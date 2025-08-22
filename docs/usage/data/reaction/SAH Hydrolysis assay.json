@@ -12,7 +12,7 @@
       "@type": "@id"
     }
   },
-  "@id": "enzml:EnzymeMLDocument/b7bd0a76-bda8-43ac-a371-e802638e50eb",
+  "@id": "enzml:EnzymeMLDocument/88e20499-04a8-4cc3-a30c-ea827c36b35f",
   "@type": [
     "enzml:EnzymeMLDocument"
   ],
@@ -45,7 +45,7 @@
           "@type": "@id"
         }
       },
-      "@id": "enzml:Protein/da133f72-c435-455c-a0ac-7faeed04e9a5",
+      "@id": "enzml:Protein/a53ca046-1ca7-41d6-8243-e72c75321252",
       "@type": [
         "enzml:Protein",
         "OBO:PR_000000001"
@@ -132,7 +132,7 @@
           "@type": "@id"
         }
       },
-      "@id": "enzml:Measurement/358f415e-fe9a-41af-8101-6efa778a12de",
+      "@id": "enzml:Measurement/c4ba1a47-f535-452f-a2f9-fd8fcbe78624",
       "@type": [
         "enzml:Measurement"
       ],
@@ -148,7 +148,7 @@
               "@type": "@id"
             }
           },
-          "@id": "enzml:MeasurementData/8c7bfe45-5bb1-4761-97f7-bfd74cd88a24",
+          "@id": "enzml:MeasurementData/dff06d08-ed34-49c4-bad3-5f1dc8d14b2f",
           "@type": [
             "enzml:MeasurementData"
           ],
@@ -199,7 +199,7 @@
               "@type": "@id"
             }
           },
-          "@id": "enzml:MeasurementData/86e2521c-f2a6-4a72-8532-bc9bb9e72e07",
+          "@id": "enzml:MeasurementData/0e828e0f-676f-4b5b-950d-246661a839bf",
           "@type": [
             "enzml:MeasurementData"
           ],
@@ -266,7 +266,7 @@
               "@type": "@id"
             }
           },
-          "@id": "enzml:MeasurementData/ea2a2119-6e5c-4ba1-a338-5e4d6836713b",
+          "@id": "enzml:MeasurementData/aa2aeecc-d4dd-41c3-b2be-8cbae2c36378",
           "@type": [
             "enzml:MeasurementData"
           ],
