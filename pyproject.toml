@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "chromhandler"
-version = "0.10.0"
+version = "0.10.1"
 description = "Tool for processing chromatography data"
 authors = ["haeussma <83341109+haeussma@users.noreply.github.com>"]
 license = "MIT"

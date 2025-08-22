@@ -5,7 +5,6 @@ from typing import Optional
 
 from calipytion.model import Calibration
 from calipytion.tools.calibrator import Calibrator
-from loguru import logger
 from mdmodels.units.annotation import UnitDefinitionAnnot
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -96,7 +95,7 @@ class Molecule(BaseModel):
         self,
         areas: list[float],
         concs: list[float],
-        conc_unit: UnitDefinitionAnnot,
+        conc_unit: str,
         ph: float,
         temperature: float,
         temp_unit: UnitDefinitionAnnot = "Celsius",
@@ -107,7 +106,7 @@ class Molecule(BaseModel):
         Args:
             areas (list[float]): The areas of the molecule.
             concs (list[float]): The concentrations of the molecule.
-            conc_unit (UnitDefinition): The unit of the concentration.
+            conc_unit (str): The unit of the concentration.
             ph (float): The pH of the solution.
             temperature (float): The temperature of the solution.
             temp_unit (UnitDefinition): The unit of the temperature.
@@ -150,20 +149,9 @@ class Molecule(BaseModel):
 
         # check if the `conc` attribute of the molecule is defined and if, it must have the same baseunit names as the calibration unit
         if self.conc_unit:
-            try:
-                for idx, unit in enumerate(self.conc_unit.base_units):
-                    assert (
-                        unit.kind == conc_unit.base_units[idx].kind
-                        and unit.exponent == conc_unit.base_units[idx].exponent
-                    ), """
-                    Units dont match.
-                    """
-            except AssertionError:
-                logger.warning(
-                    f"The concentration unit of the molecule {self.name} does not match the calibration unit defined in its standard. Conc unit of the molecule was set to {conc_unit}."
-                )
-                self.conc_unit = conc_unit
-                self.init_conc = None
+            assert self.conc_unit.name == conc_unit, """
+            The concentration unit of the molecule does not match the calibration unit defined in its standard.
+            """
         else:
             self.conc_unit = conc_unit
 

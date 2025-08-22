@@ -46,10 +46,11 @@ class GenericCSVReader(AbstractReader):
         self,
         retention_time_col_name: str,
         peak_area_col_name: str,
+        header: int | None,
     ) -> list[Measurement]:
         measurements = []
         for i, file_name in enumerate(self.file_paths):
-            df = pd.read_csv(file_name)
+            df = pd.read_csv(file_name, header=header)
             peaks = self.extract_peaks(df, retention_time_col_name, peak_area_col_name)
 
             chromatogram = Chromatogram(

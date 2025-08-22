@@ -793,6 +793,7 @@ class Handler(BaseModel):
         values: Optional[list[float]] = None,
         unit: Optional[UnitDefinitionAnnot] = None,
         silent: bool = False,
+        header: int | None = 0,
     ) -> Handler:
         """Reads chromatographic data from a CSV file.
 
@@ -808,6 +809,7 @@ class Handler(BaseModel):
             peak_area_col_name (str): Name of the peak area column.
             id (str, optional): Unique identifier of the Handler object. If not provided, the `path` is used as ID.
             silent (bool, optional): If True, no success message is printed. Defaults to False.
+            header (int | None, optional): Header row of the CSV file. Defaults to 0.
 
         Returns:
             Handler: Handler object containing the measurements.
@@ -830,6 +832,7 @@ class Handler(BaseModel):
         measurements = reader.read_generic_csv(
             retention_time_col_name=retention_time_col_name,
             peak_area_col_name=peak_area_col_name,
+            header=header,
         )
         return cls(id=id, name=str(path), measurements=measurements, mode=reader.mode)
 
