@@ -639,7 +639,7 @@ def setup_internal_calibrators(
                 standard_molecule_id=internal_standard.id,
                 molecule_init_conc=molecule.init_conc,
                 standard_init_conc=internal_standard.init_conc,
-                molecule_conc_unit=molecule.conc_unit.name,
+                molecule_conc_unit=molecule.conc_unit,
                 molecule_t0_signal=peak_analyte.area,
                 standard_t0_signal=peak_internal_standard.area,
             )

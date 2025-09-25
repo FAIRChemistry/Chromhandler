@@ -20,7 +20,7 @@ class AgilentCSVReader(AbstractReader):
         """
 
         measurements = []
-        for path_idx, csv_path in enumerate(self.file_paths):
+        for path_idx, csv_path in enumerate(sorted(self.file_paths)):
             peaks = self._read_peaks_from_csv(csv_path)
             chromatogram = Chromatogram(peaks=peaks)
 
