@@ -1,0 +1,45 @@
+"===================================================================================================================================="
+"Software Version:",6.3.2.0646,"Date:","09-10-2024 14:35:34"
+"Reprocess Number:","kt-pr-lab2:  27916",,
+"Operator:","manager","Sample Name:","EXP-24-AK6145_a_006"
+"Sample Number:"," ","Study:"," "
+"AutoSampler:","BUILT-IN","Rack/Vial:",0,5
+"Instrument Name:","GC","Channel:","A"
+"Instrument Serial #:","None","A/D mV Range:",1000
+"Delay Time:",0,00,"min","End Time:",14,00,"min"
+"Sampling Rate:",12,5000,"pts/s",,
+"Sample Volume:",1,000000,"ul","Area Reject:",0,000000
+"Sample Amount:",1,0000,"Dilution Factor:",1,00
+"Data Acquisition Time:","09-10-2024 14:21:28","Cycle:",5
+"Raw Data File :","C:\GC Data\Caroline\EXP-24-AK6145_a_006_005.raw "
+"Result File :","C:\GC Data\Caroline\EXP-24-AK6145_a_006_005.rst "
+"Inst Method :","c:\gc method\caroline\2022-04-07 - nz435 in mtbe " ,"from" ,"C:\GC Data\Caroline\EXP-24-AK6145_a_006_005.raw "
+"Proc Method :","c:\gc method\caroline\2022-04-07 - nz435 in mtbe " ,"from" ,"C:\GC Data\Caroline\EXP-24-AK6145_a_006_005.rst "
+"Calib Method :","c:\gc method\caroline\2022-04-07 - nz435 in mtbe " ,"from" ,"C:\GC Data\Caroline\EXP-24-AK6145_a_006_005.rst "
+"Report Format File :","C:\GC Method\Caroline\2022-04-07 - NZ435 in MTBE.rpt "
+"Sequence File :","C:\GC Method\Caroline\Template to GC.seq "
+"===================================================================================================================================="
+""
+"DEFAULT REPORT"
+"Peak","Time","Area","Height","Area","Norm. Area"," BL","Area/Height"
+"#","[min]","[µV·s]","[µV]","[%]","[%]","","[s]"
+------,------,------,------,------,------,------,------
+1,"0,255","289,05","718,45","0,01","0,01","BB","0,4023"
+2,"0,686","232,54","586,74","0,00","0,00","BB","0,3963"
+3,"0,917","177,34","444,09","0,00","0,00","BB","0,3993"
+4,"1,708","3862333,83","965789,62","69,11","69,11","BB","3,9991"
+5,"2,110","1203797,88","810360,28","21,54","21,54","BB","1,4855"
+6,"2,508","286644,55","121091,20","5,13","5,13","BB","2,3672"
+-,"3,941","0,00","0,00","0,00","0,00","",-----------
+7,"9,396","4497,38","2423,34","0,08","0,08","BB","1,8559"
+8,"10,486","230395,89","109490,88","4,12","4,12","BB","2,1042"
+-,"11,870","0,00","0,00","0,00","0,00","",-----------
+"","",------,------,------,------,"",""
+"","","5588368,45",2,01e+06,"100,00","100,00","",""
+"Warning -- Signal level out-of-range in peak"
+"Missing Component Report"
+"Component","Expected Retention (Calibration File)"
+------,------
+"Ethyl butyrate","3,941"
+"Butyric acid","11,870"
+"Report stored in ASCII file :","C:\GC Data\Caroline\EXP-24-AK6145_a_006_005.TX0 "

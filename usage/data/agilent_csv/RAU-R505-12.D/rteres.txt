@@ -1,0 +1,30 @@
+                                                    Area Percent Report
+
+  Data Path : D:\MassHunter\GCMS\1\data\Elizabeth\B06\24.06.06\
+  Data File : RAU-R505-12.D                                       
+  Acq On    : 06 Jun 2024  18:54
+  Operator  : Iris
+  Sample    : RAU-R505-12
+  Misc      :  
+  ALS Vial  : 13   Sample Multiplier: 1
+
+  Integration Parameters: autoint1.e
+  Integrator: ChemStation
+
+  Method    : D:\MassHunter\GCMS\1\methods\Janis12min.M
+  Title     :  
+
+  Signal     : TIC: RAU-R505-12.D\data.ms
+
+ peak  R.T. first  max last  PK   peak      corr.   corr.    % of
+   #   min   scan scan scan  TY  height     area    % max.   total
+ ---  ----- ----- ---- ---- ---  -------   -------  ------  -------
+  1   6.056   857  860  874   M   870296   8718284  29.05%  18.066%
+  2   6.302   899  903  911   M  1181456   8832165  29.43%  18.302%
+  3  10.155  1569 1570 1573   M    83984    700231   2.33%   1.451%
+  4  10.286  1590 1593 1601   M  3692553  30007995 100.00%  62.182%
+ 
+ 
+                        Sum of corrected areas:    48258674
+
+Janis12min.M Fri Jun 07 09:40:14 2024   

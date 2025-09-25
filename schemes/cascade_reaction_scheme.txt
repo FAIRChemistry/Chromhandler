@@ -1,0 +1,17 @@
+graph LR
+  A[<b>n1-triphosphate</b><br>2.5 mM] --> C{<i>MjMAT</i><br>0.05 mM};
+
+  B[<b>y-Hcy</b><br>5 mM] --> C
+  style C stroke-width:2px,fill:transparent,stroke:#000
+  
+  C --> D[<b>n1y</b>]
+  style D fill:transparent,stroke:#000,stroke-width:2px;
+
+  D --> E{<i>RnCOMT</i><br>0.05 mM};
+  style E stroke-width:2px,fill:transparent,stroke:#000
+
+  DHBAL[<b>DHBAL</b><br>0.3 mM] --> E
+
+  E --> F[<b>O<sup>3</sup>-modified DHBAL</b>] & G[<b><i>S</i>-adenosyl-<i>L</i>-homocysteine analogue</b>]
+
+  style G fill:transparent,stroke:#000,stroke-width:2px;
