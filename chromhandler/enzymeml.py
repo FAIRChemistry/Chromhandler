@@ -493,9 +493,9 @@ def add_data(
 
     if calibrator_type == CalibratorType.EXTERNAL:
         calibrator = calibrators[measurement_data.species_id]
-        assert isinstance(calibrator, Calibrator), (
-            "Calibrator must be of type Calibrator."
-        )
+        assert isinstance(
+            calibrator, Calibrator
+        ), "Calibrator must be of type Calibrator."
 
         if peak is not None:
             conc = calibrator.calculate_concentrations(
@@ -515,9 +515,9 @@ def add_data(
 
     elif calibrator_type == CalibratorType.INTERNAL:
         calibrator = calibrators[measurement_data.species_id]
-        assert isinstance(calibrator, InternalStandard), (
-            "Calibrator must be of type InternalStandard."
-        )
+        assert isinstance(
+            calibrator, InternalStandard
+        ), "Calibrator must be of type InternalStandard."
 
         if peak is not None:
             internal_std_peak = next(
@@ -578,9 +578,9 @@ def setup_external_calibrators(
         if molecule.standard:
             calibrators[molecule.id] = Calibrator.from_standard(molecule.standard)
 
-    assert calibrators, (
-        "No calibrators were created. Please define standards for the molecules."
-    )
+    assert (
+        calibrators
+    ), "No calibrators were created. Please define standards for the molecules."
 
     return calibrators
 
@@ -669,24 +669,24 @@ def extract_measurement_conditions(
     ]
 
     assert len(set(phs)) == 1, "All measurements need to have the same pH."
-    assert len(set(temperatures)) == 1, (
-        "All measurements need to have the same temperature."
-    )
-    assert len(set(time_units)) == 1, (
-        "All measurements need to have the same time unit."
-    )
-    assert len(set(temperature_units)) == 1, (
-        "All measurements need to have the same temperature unit."
-    )
+    assert (
+        len(set(temperatures)) == 1
+    ), "All measurements need to have the same temperature."
+    assert (
+        len(set(time_units)) == 1
+    ), "All measurements need to have the same time unit."
+    assert (
+        len(set(temperature_units)) == 1
+    ), "All measurements need to have the same temperature unit."
 
     assert measurements[0].ph is not None, "The pH needs to be defined."
-    assert measurements[0].temperature is not None, (
-        "The temperature needs to be defined."
-    )
+    assert (
+        measurements[0].temperature is not None
+    ), "The temperature needs to be defined."
     assert measurements[0].data.unit is not None, "The time unit needs to be defined."
-    assert measurements[0].temperature_unit is not None, (
-        "The temperature unit needs to be defined."
-    )
+    assert (
+        measurements[0].temperature_unit is not None
+    ), "The temperature unit needs to be defined."
 
     ph = measurements[0].ph
     temperature = measurements[0].temperature

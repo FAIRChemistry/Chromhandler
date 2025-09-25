@@ -179,9 +179,9 @@ class Measurement(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, (
-            f"Attribute {attr} not found in {self.__class__.__name__}"
-        )
+        assert (
+            attr in self.model_fields
+        ), f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -298,9 +298,9 @@ class Data(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, (
-            f"Attribute {attr} not found in {self.__class__.__name__}"
-        )
+        assert (
+            attr in self.model_fields
+        ), f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -406,9 +406,9 @@ class Chromatogram(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, (
-            f"Attribute {attr} not found in {self.__class__.__name__}"
-        )
+        assert (
+            attr in self.model_fields
+        ), f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -549,9 +549,9 @@ class Peak(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, (
-            f"Attribute {attr} not found in {self.__class__.__name__}"
-        )
+        assert (
+            attr in self.model_fields
+        ), f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)

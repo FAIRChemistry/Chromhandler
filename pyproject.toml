@@ -1,31 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
-
-[project]
-name = "chromhandler"
-version = "0.10.2"
-description = "Tool for processing chromatography data"
-readme = "README.md"
-license = { text = "MIT" }
-authors = [{ name = "haeussma", email = "83341109+haeussma@users.noreply.github.com" }]
-requires-python = ">=3.10,<3.15"
-
-dependencies = [
-  "numpy>=2.1.0",
-  "calipytion>=1.0.2,<2.0.0",
-  "pyenzyme>=2.1.0,<3.0.0",
-  "pydantic>=2,<3",
-  "rich>=13.7,<15",
-  "loguru>=0.7,<1",
-]
-
-[project.urls]
-Homepage = "https://github.com/haeussma/chromhandler"
+requires = ["hatchling>=1.27"]
 
 [dependency-groups]
 dev = [
-  "pydantic[mypy]>=2,<3",
+  "pre-commit>=3.7,<4",
   "ruff>=0.6,<1",
   "pytest>=8.0.2",
   "devtools>=0.12.2",
@@ -33,32 +12,50 @@ dev = [
   "mkdocstrings[python]>=0.30.0",
   "nbval>=0.11.0",
   "mkdocs-jupyter>=0.25.1",
+  "pyright>=1.1.405"
 ]
 
-[tool.pydantic.mypy]
-init_typed = true
+[project]
+authors = [{email = "83341109+haeussma@users.noreply.github.com", name = "haeussma"}]
+dependencies = [
+  "numpy>=2.1.0",
+  "calipytion>=1.0.2,<2.0.0",
+  "pyenzyme>=2.1.0,<3.0.0",
+  "pydantic>=2,<3",
+  "rich>=13.7,<15",
+  "loguru>=0.7,<1"
+]
+description = "Tool for processing chromatography data"
+license = {text = "MIT"}
+name = "chromhandler"
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+version = "0.10.2"
+
+[project.urls]
+Homepage = "https://github.com/haeussma/chromhandler"
+
+[tool.hatch.build]
+exclude = ["tests", "docs", "mkdocs.yml", ".github"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["chromhandler", "chromatopy"] # 'chromatopy' shim
+
+[tool.mypy]
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+line_length = 120
+plugins = ["pydantic.mypy"]
+strict = true
+warn_return_any = true
 
 [tool.pytest.ini_options]
 markers = [
   "readers: marks tests as slow (deselect with '-m \"not slow\"')",
-  "core: marks tests as core (deselect with '-m \"not core\"')",
+  "core: marks tests as core (deselect with '-m \"not core\"')"
 ]
-
-[tool.mypy]
-plugins = ["pydantic.mypy"]
-ignore_missing_imports = true
-line_length = 120
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-warn_return_any = true
-check_untyped_defs = true
-strict = true
 
 [tool.ruff.lint]
 extend-select = ["I"]
-
-[tool.hatch.build.targets.wheel]
-packages = ["chromhandler", "chromatopy"]  # 'chromatopy' shim
-
-[tool.hatch.build]
-exclude = ["tests", "docs", "mkdocs.yml", ".github"]

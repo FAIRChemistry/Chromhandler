@@ -164,13 +164,13 @@ class Handler(BaseModel):
         """
 
         if conc_unit:
-            assert init_conc is not None, (
-                "Initial concentration must be provided if concentration unit is given."
-            )
+            assert (
+                init_conc is not None
+            ), "Initial concentration must be provided if concentration unit is given."
         if init_conc:
-            assert conc_unit, (
-                "Concentration unit must be provided if initial concentration is given."
-            )
+            assert (
+                conc_unit
+            ), "Concentration unit must be provided if initial concentration is given."
 
         if name is None:
             name = pubchem_request_molecule_name(pubchem_cid)
@@ -916,9 +916,9 @@ class Handler(BaseModel):
             wavelength (float | None, optional): The wavelength of the detector. Defaults to None.
             visualize (bool, optional): If True, the standard curve is visualized. Defaults to True.
         """
-        assert any([molecule in [mol for mol in self.molecules]]), (
-            "Molecule not found in molecules of handler."
-        )
+        assert any(
+            [molecule in [mol for mol in self.molecules]]
+        ), "Molecule not found in molecules of handler."
 
         # check if all measurements only contain one chromatogram
         if all([len(meas.chromatograms) == 1 for meas in self.measurements]):
@@ -926,15 +926,15 @@ class Handler(BaseModel):
                 chrom for meas in self.measurements for chrom in meas.chromatograms
             ]
         else:
-            assert wavelength is not None, (
-                "Multiple chromatograms found for each measurment, wavelength needs to be provided."
-            )
+            assert (
+                wavelength is not None
+            ), "Multiple chromatograms found for each measurment, wavelength needs to be provided."
 
             chroms = self._get_chromatograms_by_wavelegnth(wavelength)
 
-            assert len(chroms) > 0, (
-                "No chromatograms found at the specified wavelength."
-            )
+            assert (
+                len(chroms) > 0
+            ), "No chromatograms found at the specified wavelength."
 
         peak_areas = [
             peak.area for chrom in chroms for peak in chrom.peaks if peak.molecule_id
@@ -943,13 +943,13 @@ class Handler(BaseModel):
         concs = [meas.data.value for meas in self.measurements]
         conc_unit = self.measurements[0].data.unit
 
-        assert len(peak_areas) == len(concs), (
-            f"Number of {molecule.name} peak areas {len(peak_areas)} and concentrations {len(concs)} do not match."
-        )
+        assert (
+            len(peak_areas) == len(concs)
+        ), f"Number of {molecule.name} peak areas {len(peak_areas)} and concentrations {len(concs)} do not match."
 
-        assert all(meas.ph == self.measurements[0].ph for meas in self.measurements), (
-            "All measurements need to have the same pH value."
-        )
+        assert all(
+            meas.ph == self.measurements[0].ph for meas in self.measurements
+        ), "All measurements need to have the same pH value."
         ph = self.measurements[0].ph
 
         assert all(

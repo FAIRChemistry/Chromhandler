@@ -1,29 +1,29 @@
 repos:
   - repo: local
     hooks:
-      - id: sort_pyproject
-        name: sort_pyproject
-        entry: toml-sort -i --sort-table-keys --sort-inline-tables
-        language: python
-        files: ^pyproject\.toml$
-        additional_dependencies: ["toml-sort==0.23.1"]
+      - id: pyright
+        name: pyright (uv venv)
+        entry: uv run pyright
+        language: system
+        pass_filenames: false
+        stages: [manual]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.4
+    rev: v0.6.8
     hooks:
       - id: ruff-format
-        types_or: [python, pyi, jupyter]    # drop toml to avoid conflicts
+        types_or: [python, pyi, jupyter]
       - id: ruff
         types_or: [python, pyi, jupyter, toml]
         args: [--fix]
 
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.379
+  - repo: local
     hooks:
       - id: pyright
-        # use the packaged pyright for reproducibility
-        language: python
-        additional_dependencies: ["pyright==1.1.379"]
+        name: pyright (uv venv)
+        entry: uv run pyright
+        language: system
+        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0

@@ -271,9 +271,9 @@ class ShimadzuReader(AbstractReader):
 
             files.append(str(file_path.absolute()))
 
-        assert len(files) == len(self.values), (
-            f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
-        )
+        assert (
+            len(files) == len(self.values)
+        ), f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
 
         self.file_paths = files
 
