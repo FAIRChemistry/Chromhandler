@@ -55,4 +55,4 @@ def __getattr__(name: str) -> Handler:
 
 __all__ = ["Handler", "ChromAnalyzer", "Molecule", "Protein", "to_enzymeml"]
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"

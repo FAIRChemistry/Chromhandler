@@ -168,3 +168,4 @@ cython_debug/
 test.py
 
 .DS_Store
+uv.lock

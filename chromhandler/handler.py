@@ -6,7 +6,6 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-import plotly.graph_objects as go
 from calipytion.model import Calibration
 from calipytion.tools.utility import pubchem_request_molecule_name
 from loguru import logger
@@ -904,21 +903,6 @@ class Handler(BaseModel):
 
         raise ValueError(f"Molecule with ID {molecule_id} not found.")
 
-    def visualize_all(
-        self, assigned_only: bool = False, dark_mode: bool = False, show: bool = False
-    ) -> go.Figure:
-        """Plots the fitted peaks of the chromatograms in an interactive figure.
-
-        Args:
-            assigned_only (bool, optional): If True, only the peaks that are assigned to a molecule are plotted. Defaults to False.
-            dark_mode (bool, optional): If True, the figure is displayed in dark mode. Defaults to False.
-            show (bool, optional): If True, shows the figure. Defaults to False.
-
-        Returns:
-            go.Figure: The plotly figure object.
-        """
-        return visualize.visualize_all(self, assigned_only, dark_mode, show)
-
     def add_standard(
         self,
         molecule: Molecule,
@@ -1029,18 +1013,6 @@ class Handler(BaseModel):
                 return
 
         self.proteins.append(protein)
-
-    def visualize_spectra(self, dark_mode: bool = False) -> go.Figure:
-        """
-        Plots all chromatograms in the Handler in a single plot.
-
-        Args:
-            dark_mode (bool, optional): If True, the figure is displayed in dark mode. Defaults to False.
-
-        Returns:
-            go.Figure: The plotly figure object.
-        """
-        return visualize.visualize_spectra(self, dark_mode)
 
     def visualize(
         self,

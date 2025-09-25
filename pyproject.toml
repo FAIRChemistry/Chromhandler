@@ -1,46 +1,47 @@
-[tool.poetry]
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
 name = "chromhandler"
-version = "0.10.1"
+version = "0.10.2"
 description = "Tool for processing chromatography data"
-authors = ["haeussma <83341109+haeussma@users.noreply.github.com>"]
-license = "MIT"
 readme = "README.md"
-packages = [
-    { include = "chromhandler" },
-    { include = "chromatopy" }   # shim
+license = { text = "MIT" }
+authors = [{ name = "haeussma", email = "83341109+haeussma@users.noreply.github.com" }]
+requires-python = ">=3.10"
+
+dependencies = [
+  "numpy>=2.1.0",
+  "calipytion>=1.0.2,<2.0.0",
+  "pyenzyme>=2.1.0,<3.0.0",
+  "pydantic>=2,<3",
+  "rich>=13.7,<15",
+  "loguru>=0.7,<1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/haeussma/chromhandler"
 
-[tool.poetry.dependencies]
-python = "^3.10"
-calipytion = "^1.0.0"
-pyenzyme =">=2.1.0,<3.0.0"
-plotly = ">=5.19,<6"
-pydantic = ">=2,<3"
-rich = ">=13.7,<14"
-loguru = ">=0.7,<1"
-
-[tool.poetry.group.dev.dependencies]
-pydantic = { version = ">=2,<3", extras = ["mypy"] }
-ruff = "<1.0.0"
-pytest = "^8.0.2"
-devtools = "^0.12.2"
-mkdocs-material = "^9.6.16"
-mkdocstrings = {extras = ["python"], version = "^0.30.0"}
-nbval = "^0.11.0"
-mkdocs-jupyter = "^0.25.1"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[dependency-groups]
+dev = [
+  "pydantic[mypy]>=2,<3",
+  "ruff>=0.6,<1",
+  "pytest>=8.0.2",
+  "devtools>=0.12.2",
+  "mkdocs-material>=9.6.16",
+  "mkdocstrings[python]>=0.30.0",
+  "nbval>=0.11.0",
+  "mkdocs-jupyter>=0.25.1",
+]
 
 [tool.pydantic.mypy]
 init_typed = true
 
 [tool.pytest.ini_options]
 markers = [
-    "readers: marks tests as slow (deselect with '-m \"not slow\"')",
-    "core: marks tests as core (deselect with '-m \"not core\"')",
+  "readers: marks tests as slow (deselect with '-m \"not slow\"')",
+  "core: marks tests as core (deselect with '-m \"not core\"')",
 ]
 
 [tool.mypy]
@@ -55,3 +56,9 @@ strict = true
 
 [tool.ruff.lint]
 extend-select = ["I"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["chromhandler", "chromatopy"]  # 'chromatopy' shim
+
+[tool.hatch.build]
+exclude = ["tests", "docs", "mkdocs.yml", ".github"]
