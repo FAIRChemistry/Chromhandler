@@ -12,7 +12,7 @@
       "@type": "@id"
     }
   },
-  "@id": "enzml:EnzymeMLDocument/88e20499-04a8-4cc3-a30c-ea827c36b35f",
+  "@id": "enzml:EnzymeMLDocument/f83048a6-0fd6-49a6-a170-ce9593321559",
   "@type": [
     "enzml:EnzymeMLDocument"
   ],
@@ -45,7 +45,7 @@
           "@type": "@id"
         }
       },
-      "@id": "enzml:Protein/a53ca046-1ca7-41d6-8243-e72c75321252",
+      "@id": "enzml:Protein/de930391-abd9-418c-baaa-3968319d3cc2",
       "@type": [
         "enzml:Protein",
         "OBO:PR_000000001"
@@ -82,7 +82,7 @@
         "enzml:SmallMolecule"
       ],
       "id": "SAH",
-      "name": "Adenosylhomocysteine",
+      "name": "S-adenosyl-L-homocysteine",
       "constant": false,
       "synonymous_names": [],
       "references": []
@@ -132,7 +132,7 @@
           "@type": "@id"
         }
       },
-      "@id": "enzml:Measurement/c4ba1a47-f535-452f-a2f9-fd8fcbe78624",
+      "@id": "enzml:Measurement/67845be0-ef8a-4326-8d21-2b929e95be38",
       "@type": [
         "enzml:Measurement"
       ],
@@ -148,7 +148,7 @@
               "@type": "@id"
             }
           },
-          "@id": "enzml:MeasurementData/dff06d08-ed34-49c4-bad3-5f1dc8d14b2f",
+          "@id": "enzml:MeasurementData/335cc228-c2c3-435b-8825-f6144a76fbb6",
           "@type": [
             "enzml:MeasurementData"
           ],
@@ -199,7 +199,7 @@
               "@type": "@id"
             }
           },
-          "@id": "enzml:MeasurementData/0e828e0f-676f-4b5b-950d-246661a839bf",
+          "@id": "enzml:MeasurementData/a2415b72-f198-4191-8668-070966940741",
           "@type": [
             "enzml:MeasurementData"
           ],
@@ -266,7 +266,7 @@
               "@type": "@id"
             }
           },
-          "@id": "enzml:MeasurementData/aa2aeecc-d4dd-41c3-b2be-8cbae2c36378",
+          "@id": "enzml:MeasurementData/b076d054-5997-435e-afc7-2254a71de776",
           "@type": [
             "enzml:MeasurementData"
           ],

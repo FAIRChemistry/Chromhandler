@@ -83,9 +83,9 @@ class GenericCSVReader(AbstractReader):
         # check if directory exists
         assert directory.exists(), f"Directory '{self.dirpath}' does not exist."
         assert directory.is_dir(), f"'{self.dirpath}' is not a directory."
-        assert any(directory.rglob("*.csv")), (
-            f"No .csv files found in '{self.dirpath}'."
-        )
+        assert any(
+            directory.rglob("*.csv")
+        ), f"No .csv files found in '{self.dirpath}'."
 
         for file_path in directory.iterdir():
             if file_path.name.startswith(".") or not file_path.name.endswith(".csv"):
@@ -93,8 +93,8 @@ class GenericCSVReader(AbstractReader):
 
             files.append(str(file_path.absolute()))
 
-        assert len(files) == len(self.values), (
-            f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
-        )
+        assert (
+            len(files) == len(self.values)
+        ), f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
 
         self.file_paths = sorted(files)
