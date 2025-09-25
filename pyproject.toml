@@ -9,7 +9,7 @@ description = "Tool for processing chromatography data"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "haeussma", email = "83341109+haeussma@users.noreply.github.com" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 
 dependencies = [
   "numpy>=2.1.0",
