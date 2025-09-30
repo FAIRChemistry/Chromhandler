@@ -43,19 +43,43 @@ def visualize(
     # First pass: collect all y-values to determine global y-range
     y_min = float("inf")
     y_max = float("-inf")
+    has_signal_data = False
+
     for meas in handler.measurements:
         for chrom in meas.chromatograms[:1]:
             if chrom.signals:
                 y_min = min(y_min, min(chrom.signals))
                 y_max = max(y_max, max(chrom.signals))
+                has_signal_data = True
             if show_processed and chrom.processed_signal:
                 y_min = min(y_min, min(chrom.processed_signal))
                 y_max = max(y_max, max(chrom.processed_signal))
+                has_signal_data = True
+
+    # If no signal data is available, collect peak areas for y-range
+    if not has_signal_data:
+        for meas in handler.measurements:
+            for chrom in meas.chromatograms[:1]:
+                if chrom.peaks:
+                    for peak in chrom.peaks:
+                        if peak.area is not None:
+                            y_min = min(y_min, 0)  # Start from 0 for peak areas
+                            y_max = max(y_max, peak.area)
+                            has_signal_data = True
+
+    # If still no data, set default range
+    if not has_signal_data:
+        y_min = 0
+        y_max = 1
 
     # Add some padding to the y-range
     y_range = y_max - y_min
-    y_min = y_min - 0.05 * y_range
-    y_max = y_max + 0.05 * y_range
+    if y_range > 0:
+        y_min = y_min - 0.05 * y_range
+        y_max = y_max + 0.05 * y_range
+    else:
+        y_min = 0
+        y_max = 1
 
     # Collect all retention times for consistent coloring
     all_retention_times = []
@@ -159,15 +183,18 @@ def visualize(
                                 else:
                                     label = f"Peak {peak.retention_time:.2f}"
 
-                                # Plot vertical line with consistent color but measurement-specific linestyle
+                                # Plot vertical line with height based on peak area
+                                peak_height = peak.area if peak.area is not None else 0
+
                                 # Use a dashed line with increasing dash length based on measurement index
                                 linestyle = (
                                     0,
                                     (1, i + 1),
                                 )  # (0, (1, 1)) for first measurement, (0, (1, 2)) for second, etc.
 
-                                ax.axvline(
-                                    x=peak.retention_time,
+                                ax.plot(
+                                    [peak.retention_time, peak.retention_time],
+                                    [0, peak_height],
                                     color=color,
                                     linestyle=linestyle,
                                     alpha=0.7,
@@ -177,7 +204,8 @@ def visualize(
                                 )
 
         # Set plot properties
-        ax.set_ylabel("Intensity")
+        ylabel = "Peak Area" if not has_signal_data else "Intensity"
+        ax.set_ylabel(ylabel)
         ax.set_xlabel("Retention time [min]")
         ax.grid(True, alpha=0.3)
 
@@ -258,9 +286,12 @@ def visualize(
                                 else:
                                     label = f"Peak {peak.retention_time:.2f}"
 
-                                # Plot vertical line with consistent color
-                                ax.axvline(
-                                    x=peak.retention_time,
+                                # Plot vertical line with height based on peak area
+                                peak_height = peak.area if peak.area is not None else 0
+
+                                ax.plot(
+                                    [peak.retention_time, peak.retention_time],
+                                    [0, peak_height],
                                     color=color,
                                     linestyle="-",
                                     alpha=0.7,
@@ -309,7 +340,8 @@ def visualize(
                 ax.set_xlabel("")
 
             if idx % n_cols == 0:  # Only show y-label for leftmost plots
-                ax.set_ylabel("Intensity")
+                ylabel = "Peak Area" if not has_signal_data else "Intensity"
+                ax.set_ylabel(ylabel)
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper right", fontsize=8, title="RT [min]", title_fontsize=9)
             ax.set_ylim(y_min, y_max)  # Set consistent y-range for all plots
