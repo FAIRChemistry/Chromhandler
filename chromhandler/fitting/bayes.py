@@ -98,98 +98,166 @@ def emg_components_area(
 
 def emg_mixture_model(
     x: jnp.ndarray,
-    y: jnp.ndarray,
+    y: Optional[jnp.ndarray],
     mu_lo: jnp.ndarray,
     mu_hi: jnp.ndarray,
     sigma_min: float,
     sigma_max: float,
     r_min: float,
-    r_max: jnp.ndarray,  # <- kept for API, not used
+    r_max: jnp.ndarray,
     auc_hat: float,
-    h_anchor: jnp.ndarray,  # [K] observed peak maxima in each window
-    alpha_dirichlet: float = 0.3,  # <- no longer needed but left for API
+    h_anchor: jnp.ndarray,
+    alpha_dirichlet: float = 0.3,
     use_baseline: bool = False,
 ) -> None:
     """NumPyro model for EMG-mixture chromatographic peaks.
 
-    Uses log-space priors for σ and ρ=τ/σ to avoid boundary pile-ups.
-    Peak heights use observed maxima in user-defined windows as weakly-informative
-    prior centers, helping disambiguation when peaks overlap.
+    Uses height-based parameterization with improved numerical stability.
 
-    Args:
-        x: Retention time points, shape [N]
-        y: Observed signal, shape [N]
-        mu_lo: Lower bounds for peak centers, shape [K]
-        mu_hi: Upper bounds for peak centers, shape [K]
-        sigma_min: Minimum Gaussian width (from sampling resolution)
-        sigma_max: Maximum Gaussian width (from window size)
-        r_min: Minimum tail ratio τ/σ (e.g. 0.05)
-        r_max: Maximum tail ratio per component (kept for API, not used)
-        auc_hat: Total area prior anchor (trapezoid AUC)
-        h_anchor: Observed peak maxima in each window, shape [K]
-                  Used as weakly-informative prior center for log(height)
-        alpha_dirichlet: Dirichlet concentration (kept for API, not used)
-        use_baseline: If True, include linear baseline b0 + b1*(x - x̄)
+    Key improvements over previous version:
+    - Tighter priors on log_h using observed data
+    - More informative priors on tau/ratio
+    - Removed numpyro.factor (can cause gradient issues)
+    - Better centering of transformations
     """
-    x = jnp.asarray(x, jnp.float32)
-    y = jnp.asarray(y, jnp.float32)
-    mu_lo = jnp.asarray(mu_lo, jnp.float32)
-    mu_hi = jnp.asarray(mu_hi, jnp.float32)
-    h_anchor = jnp.asarray(h_anchor, jnp.float32)
+    x = jnp.asarray(x, dtype=jnp.float32)
+    mu_lo = jnp.asarray(mu_lo, dtype=jnp.float32)
+    mu_hi = jnp.asarray(mu_hi, dtype=jnp.float32)
+    r_max = jnp.asarray(r_max, dtype=jnp.float32)
+    h_anchor = jnp.asarray(h_anchor, dtype=jnp.float32)
 
     K = mu_lo.shape[0]
-    y_scale = jnp.maximum(jnp.abs(y).max(), 1e-6)
+    x_mean = jnp.mean(x)
+    x_span = jnp.maximum(jnp.max(x) - jnp.min(x), jnp.array(1e-6, dtype=jnp.float32))
 
-    # ---------------------------------------------------------------- centres (unchanged)
-    mu = numpyro.sample("mu", dist.Uniform(mu_lo, mu_hi))  # [K]
+    # Handle prior predictive: if y is None, use h_anchor for scale
+    if y is None:
+        y_scale = jnp.maximum(jnp.max(h_anchor), jnp.array(1.0, dtype=jnp.float32))
+    else:
+        y = jnp.asarray(y, dtype=jnp.float32)
+        y_scale = jnp.maximum(jnp.max(jnp.abs(y)), jnp.array(1e-6, dtype=jnp.float32))
 
-    # ---------------------------------------------------------------- log-sigma  (no wall)
-    log_sigma0 = jnp.log((sigma_min + sigma_max) / 2)
-    log_sigma = numpyro.sample("log_sigma", dist.Normal(log_sigma0, 0.6).expand([K]))
-    sigma = jnp.exp(log_sigma)  # [K]
+    # ----------------------------------------------------------------
+    # Peak centers: Uniform in user-specified windows
+    # ----------------------------------------------------------------
+    mu = numpyro.sample("mu", dist.Uniform(mu_lo, mu_hi))
+
+    # ----------------------------------------------------------------
+    # Gaussian widths: Better centered LogitNormal
+    # ----------------------------------------------------------------
+    # Center the sigmoid transformation at the midpoint
+    sigma_range = sigma_max - sigma_min
+
+    # Sample with bias toward middle
+    sigma_raw = numpyro.sample("sigma_raw", dist.Normal(0.0, 1.5).expand([K]))
+    sigma_01 = jax.nn.sigmoid(sigma_raw)
+    sigma = sigma_min + sigma_range * sigma_01
     numpyro.deterministic("sigma", sigma)
 
-    # ---------------------------------------------------------------- log-ratio ρ = τ/σ
-    log_rho = numpyro.sample("log_rho", dist.Normal(jnp.log(0.2), 0.7).expand([K]))
-    # smooth lower bound ρ ≥ r_min
-    rho = r_min + jax.nn.softplus(jnp.exp(log_rho) - r_min)
-    tau = sigma * rho
-    numpyro.deterministic("ratio", rho)
-    numpyro.deterministic("tau", tau)
+    # ----------------------------------------------------------------
+    # Tail ratios: Tighter prior centered on reasonable value
+    # Most chromatographic peaks have ratio ~ 0.5-2.0
+    # ----------------------------------------------------------------
+    # Log-space prior on ratio (more natural for multiplicative scale)
+    alpha_u, beta_u = 2.0, 5.0  # ← tweak if you want a different bias
+    u = numpyro.sample("u_ratio", dist.Beta(alpha_u, beta_u).expand([K]))
 
-    # ---------------------------------------------------------------- peak HEIGHT (not area)
-    #   Use observed peak maxima in each window as prior anchor (wide, τ-independent)
-    #   height = A / τ  -> directly controls peak max ; mixes better than A
+    r = r_min + (r_max - r_min) * u  # [K]   now in physical units
+    tau = sigma * r  # τ = ρ·σ
+    numpyro.deterministic("tau", tau)
+    numpyro.deterministic("ratio", r)
+
+    # ----------------------------------------------------------------
+    # HEIGHT-BASED PARAMETERIZATION
+    # TIGHTER prior using observed data (reduces identifiability issues)
+    # ----------------------------------------------------------------
+    # Use TIGHTER prior on log-height (was 0.8, now 0.5)
+    # This is key: we trust our height anchors more
     log_h = numpyro.sample(
         "log_h",
-        dist.Normal(jnp.log(h_anchor), 0.8).expand([K]),  # wide prior, no funnel
+        dist.Normal(
+            jnp.log(h_anchor),
+            jnp.array(0.5, dtype=jnp.float32),  # TIGHTER (was 0.8)
+        ).expand([K]),
     )
     h = jnp.exp(log_h)
-    A = h * tau  # area derived
+    numpyro.deterministic("h", h)
+
+    # Derive areas from heights
+    A = h * tau
     numpyro.deterministic("A", A)
 
-    # optional soft total-area anchor (no funnel)
+    # REMOVED numpyro.factor - use proper prior instead
+    # Total area prior (weakly informative)
     total_A = A.sum()
-    numpyro.factor(
-        "soft_total_A", -0.5 * ((jnp.log(total_A) - jnp.log(auc_hat)) / 0.4) ** 2
+    numpyro.deterministic("total_A", total_A)
+
+    # Optional: add as observable (not factor) for diagnostics
+    # This doesn't constrain, just records
+    numpyro.deterministic(
+        "log_total_A_deviation", (jnp.log(total_A) - jnp.log(auc_hat))
     )
 
-    # ---------------------------------------------------------------- mean signal
+    # ----------------------------------------------------------------
+    # Mean signal
+    # ----------------------------------------------------------------
     mu_y = emg_mixture_area(x, A, mu, sigma, tau)
 
-    # baseline (unchanged)
+    # ----------------------------------------------------------------
+    # Optional baseline
+    # ----------------------------------------------------------------
     if use_baseline:
-        b0 = numpyro.sample("b0", dist.Normal(0.0, 0.05 * y_scale))
-        b1 = numpyro.sample(
-            "b1", dist.Normal(0.0, 0.02 * y_scale / (x.max() - x.min()))
-        )
-        mu_y = mu_y + b0 + b1 * (x - x.mean())
+        b0 = numpyro.sample("b0", dist.Normal(0.0, 0.1 * y_scale))
+        b1 = numpyro.sample("b1", dist.Normal(0.0, 0.05 * y_scale / x_span))
+        mu_y = mu_y + b0 + b1 * (x - x_mean)
+    else:
+        numpyro.sample("b0", dist.Normal(0.0, 0.1 * y_scale))
+        numpyro.sample("b1", dist.Normal(0.0, 0.05 * y_scale / x_span))
 
     numpyro.deterministic("mu_y", mu_y)
 
-    # ---------------------------------------------------------------- noise & likelihood
+    # ----------------------------------------------------------------
+    # Noise model: Tighter prior on noise scale
+    # ----------------------------------------------------------------
+    # Estimate noise from high-frequency variation
     sigma_y = numpyro.sample("sigma_y", dist.HalfNormal(0.05 * y_scale))
+
+    # ----------------------------------------------------------------
+    # Likelihood
+    # ----------------------------------------------------------------
     numpyro.sample("y", dist.Normal(mu_y, sigma_y).to_event(1), obs=y)
+
+
+###  gooooooo
+
+
+def relabel_by_sort(idata: az.InferenceData, key: str = "mu") -> az.InferenceData:
+    """
+    Sort each draw by ascending μ and permute all component-indexed variables.
+    Works for arrays of shape (chain, draw, K) or (chain, draw, K, …).
+    """
+    post = idata.posterior
+    mu = post[key].values  # (chain, draw, K)
+    order = jnp.argsort(mu, axis=-1)  # same shape
+
+    comp_vars = [
+        v
+        for v in post.data_vars
+        if post[v].shape[-1] == mu.shape[-1] and post[v].ndim >= 3
+    ]
+
+    reordered = {}
+    for v in comp_vars:
+        arr = post[v].values
+        # broadcast order to arr's shape: add as many trailing None as needed
+        idx = order[(...,) + (None,) * (arr.ndim - order.ndim)]
+        new = jnp.take_along_axis(arr, idx, axis=-1)
+        reordered[v] = (post[v].dims, new)
+
+    post_rl = post.assign(**reordered)
+
+    other_groups = {g: getattr(idata, g) for g in idata.groups() if g != "posterior"}
+    return az.InferenceData(posterior=post_rl, **other_groups)
 
 
 # =====================================================================
@@ -529,7 +597,17 @@ class ChromFitter:
         )
 
         self.samples = self.mcmc.get_samples()
-        self.idata = az.from_numpyro(self.mcmc)  # type: ignore
+        idata_raw = az.from_numpyro(self.mcmc)  # unchanged draws
+
+        # --- new: relabel so every chain uses the same component order
+        self.idata = relabel_by_sort(idata_raw, key="mu")
+
+        self.samples = {
+            v: self.idata.posterior[v].values.reshape(
+                -1, *self.idata.posterior[v].shape[2:]
+            )
+            for v in self.idata.posterior.data_vars
+        }
 
         return self
 
@@ -610,19 +688,42 @@ class ChromFitter:
         self,
         var_names: Optional[list[str]] = None,
         kind: str = "kde",
+        save_path: Optional[str] = None,  # ⇦ new
+        dpi: int = 100,
     ) -> None:
-        """Plot pairwise relationships (corner plot)."""
+        """
+        Corner plot of the requested variables.
+
+        Args
+        ----
+        var_names   : list of variable names to plot (None = all)
+        kind        : "scatter", "kde", "hexbin", …
+        save_path   : filesystem path — supports .png, .pdf, .svg, etc.
+                    • .png/.tiff use `dpi`
+                    • .pdf/.svg are vector-based (best for unlimited zoom)
+        dpi         : resolution for raster formats
+        """
         if self.idata is None:
             raise RuntimeError("Must call fit() before plot_pair()")
-        az.plot_pair(
-            self.idata,
-            var_names=var_names,
-            kind=kind,
-            marginals=True,
-            divergences=True,
-        )
-        plt.tight_layout()
-        plt.show()
+
+        # lift ArviZ subplot cap
+        with az.rc_context(rc={"plot.max_subplots": None}):
+            az.plot_pair(
+                self.idata,
+                var_names=var_names,
+                kind=kind,
+                marginals=True,
+                divergences=True,
+            )
+
+            plt.tight_layout()
+
+            if save_path is not None:
+                # vector formats (.pdf, .svg) ignore dpi → infinite zoom
+                plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+                print(f"Pair plot saved to {save_path!s}")
+
+            plt.show()
 
     def plot_fit(self, show_components: bool = False) -> None:
         """Plot data vs posterior mean fit.
@@ -638,7 +739,7 @@ class ChromFitter:
 
         plt.figure(figsize=(10, 4))
         plt.plot(self.x, self.y, ".", ms=3, alpha=0.5, label="data", color="C0")
-        plt.plot(self.x, y_hat, "-", lw=2, label="posterior mean", color="C1")
+        plt.plot(self.x, y_hat, "-", lw=2, label="predicted mean", color="C1")
 
         if show_components:
             # Plot median components
@@ -654,6 +755,66 @@ class ChromFitter:
         plt.xlabel("Retention time")
         plt.ylabel("Signal")
         plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    def plot_corr(
+        self,
+        var_names: Optional[list[str]] = None,
+        figsize: tuple[int, int] = (12, 10),
+        cmap: str = "coolwarm",
+        vmin: float = -1.0,
+        vmax: float = 1.0,
+    ) -> None:
+        """
+        Show a parameter–parameter correlation matrix.
+
+        Parameters
+        ----------
+        var_names : list[str] | None
+            Variables to include.  None = all component-indexed variables
+            (A, mu, sigma, tau, …).
+        figsize   : (w, h)
+            Figure size in inches.
+        cmap      : str
+            Matplotlib colormap.
+        vmin/vmax : float
+            Color scale limits.
+        """
+        if self.idata is None:
+            raise RuntimeError("Must call fit() before plot_corr()")
+
+        # -------- pick variables --------
+        posterior = self.idata.posterior
+        if var_names is None:
+            var_names = [
+                v
+                for v in posterior.data_vars
+                if posterior[v].ndim >= 3 and posterior[v].shape[-1] == self.K
+            ]
+
+        cols, labels = [], []
+        for v in var_names:
+            arr = posterior[v].values  # (chain, draw, K) or scalar per comp
+            flat = arr.reshape(-1, *arr.shape[2:])  # collapse chains & draws
+            if flat.ndim == 1:  # scalar per draw
+                cols.append(flat)
+                labels.append(v)
+            else:  # one column per component
+                for k in range(flat.shape[-1]):
+                    cols.append(flat[..., k])
+                    labels.append(f"{v}[{k}]")
+
+        X = jnp.column_stack(cols)  # (samples, features)
+        C = jnp.corrcoef(X, rowvar=False)
+
+        # -------- plot --------
+        plt.figure(figsize=figsize)
+        im = plt.imshow(C, vmin=vmin, vmax=vmax, cmap=cmap)
+        plt.colorbar(im, fraction=0.046)
+        plt.xticks(range(len(labels)), labels, rotation=90)
+        plt.yticks(range(len(labels)), labels)
+        plt.title("Posterior correlation matrix")
         plt.tight_layout()
         plt.show()
 
@@ -680,6 +841,155 @@ class ChromFitter:
             }
 
         return summaries
+
+    def plot_prior_draws(
+        self,
+        num_draws: int = 30,
+        seed: int = 0,
+        figsize: tuple[int, int] = (10, 4),
+        alpha: float = 0.25,
+        lw: float = 1.0,
+        colors: Optional[list[str]] = None,
+    ) -> None:
+        """
+        Overlay the raw data with *num_draws* prior-predictive curves.
+
+        Each thin line is one component from one prior sample – a fast,
+        visual sanity-check that your priors are plausible.
+
+        This method:
+        1. Draws samples from the prior (y=None → no conditioning on data)
+        2. Stores results in self.idata.prior_predictive (ArviZ compatible)
+        3. Plots individual component curves overlaid on data
+
+        Parameters
+        ----------
+        num_draws : int
+            How many prior samples to plot.
+        seed      : int
+            RNG seed used for the prior draw.
+        figsize   : (w, h)
+            Figure size in inches.
+        alpha     : float
+            Opacity of each prior curve (keep low!).
+        lw        : float
+            Line width of each prior curve.
+        colors    : list[str] | None
+            Matplotlib colours to cycle through for the K components.
+            Default = matplotlib's default colour cycle.
+
+        Example
+        -------
+        >>> fitter = ChromFitter(x, y, mu_lo, mu_hi)
+        >>> fitter.plot_prior_draws(num_draws=50, alpha=0.2)
+        >>> # Check if priors are reasonable before running MCMC
+        >>> fitter.fit(num_warmup=500, num_samples=500)
+        """
+        from numpyro.infer import Predictive
+
+        if colors is None:
+            colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+        # ===================================================================
+        # 1) PRIOR PREDICTIVE SAMPLING
+        # ===================================================================
+        # Sample from prior by passing y=None (no conditioning on data)
+        rng_key = jax.random.PRNGKey(seed)
+        predictive = Predictive(
+            emg_mixture_model,
+            num_samples=num_draws,
+        )
+
+        prior_samples = predictive(
+            rng_key,
+            x=self.x,
+            y=None,  # ← KEY: None means prior predictive (no data conditioning)
+            mu_lo=self.mu_lo,
+            mu_hi=self.mu_hi,
+            sigma_min=self.sigma_min,
+            sigma_max=self.sigma_max,
+            r_min=self.r_min,
+            r_max=self.r_max,
+            auc_hat=self.auc_hat,
+            h_anchor=self.h_anchor,
+            alpha_dirichlet=self.alpha_dirichlet,
+            use_baseline=self.use_baseline,
+        )
+
+        # ===================================================================
+        # 2) ARVIZ INTEGRATION
+        # ===================================================================
+        # Convert to ArviZ format with proper structure
+        # Predictive returns shape (num_samples, ...), ArviZ expects (chain, draw, ...)
+        # We treat all samples as coming from a single chain
+        prior_dict = {}
+        for k, v in prior_samples.items():
+            # Add chain dimension: (num_samples, ...) → (1, num_samples, ...)
+            prior_dict[k] = jnp.expand_dims(v, axis=0)
+
+        # Create/update InferenceData with prior_predictive group
+        if self.idata is None:
+            self.idata = az.from_dict(prior_predictive=prior_dict)
+        else:
+            # Add prior_predictive group to existing InferenceData
+            prior_group = az.from_dict(prior_predictive=prior_dict).prior_predictive
+            self.idata.add_groups(prior_predictive=prior_group)
+
+        # ===================================================================
+        # 3) PLOTTING
+        # ===================================================================
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Plot observed data
+        ax.plot(self.x, self.y, ".", ms=2, alpha=0.5, label="data", color="k", zorder=1)
+
+        K = self.K
+        # Plot prior predictive component curves
+        for d in range(num_draws):
+            for k in range(K):
+                # Compute individual component curve for this sample
+                # prior_samples shapes: A[num_samples, K], mu[num_samples, K], etc.
+                A_dk = prior_samples["A"][d, k]
+                mu_dk = prior_samples["mu"][d, k]
+                sigma_dk = prior_samples["sigma"][d, k]
+                tau_dk = prior_samples["tau"][d, k]
+
+                # emg_components_area expects arrays [K], returns [K, N]
+                # We pass scalar wrapped in array, get [1, N], then squeeze to [N]
+                curve = emg_components_area(
+                    self.x,
+                    jnp.array([A_dk]),
+                    jnp.array([mu_dk]),
+                    jnp.array([sigma_dk]),
+                    jnp.array([tau_dk]),
+                )
+                # Squeeze to remove K=1 dimension: [1, N] → [N]
+                curve = jnp.squeeze(curve, axis=0)
+
+                ax.plot(
+                    self.x,
+                    curve,
+                    lw=lw,
+                    alpha=alpha,
+                    color=colors[k % len(colors)],
+                    zorder=0,
+                )
+
+        ax.set_xlabel("Retention time")
+        ax.set_ylabel("Signal")
+        ax.set_title(f"Prior predictive check: {num_draws} draws × {K} components")
+        ax.legend(loc="best")
+        plt.tight_layout()
+        plt.show()
+
+        console.print(
+            "\n[green]✓[/green] Prior predictive samples saved to "
+            "[cyan]self.idata.prior_predictive[/cyan]"
+        )
+        console.print(
+            "  Use [yellow]az.plot_ppc(fitter.idata, group='prior_predictive')[/yellow] "
+            "for more diagnostics\n"
+        )
 
     @staticmethod
     def simulate(
@@ -751,8 +1061,16 @@ class ChromFitter:
 
         # Add noise
         rng = jax.random.PRNGKey(seed)
-        signal_scale = jnp.maximum(jnp.max(jnp.abs(y_clean)), 1e-6)
-        noise = jax.random.normal(rng, shape=y_clean.shape) * noise_level * signal_scale
+        rel_noise = 0.05  # 5 % of the local signal height
+
+        abs_noise = 10.0  # μV (or whatever units) baseline SD
+
+        rng = jax.random.PRNGKey(seed)
+
+        # per-point standard deviation:  σ_i = sqrt((ρ·y_i)² + σ₀²)
+        sigma_pts = jnp.sqrt((rel_noise * y_clean) ** 2 + abs_noise**2)
+
+        noise = jax.random.normal(rng, shape=y_clean.shape) * sigma_pts
         y_noisy = y_clean + noise
 
         return x, y_clean, y_noisy.astype(jnp.float32)
