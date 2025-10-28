@@ -1,3 +1,4 @@
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -100,9 +101,25 @@ def _convert_value(value: str) -> float:
     return float(value)
 
 
+def _safe_open(path: str) -> io.TextIOWrapper:
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin-1", "shift_jis"]
+    for enc in encodings:
+        try:
+            # read a few bytes to test decoding
+            with open(path, mode="r", encoding=enc) as test:
+                test.read(2048)
+            return open(path, mode="r", encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    # if nothing worked, raise
+    raise UnicodeDecodeError("none", b"", 0, 0, "No valid encoding found")
+
+
 def _read_peaks_from_csv(path: str) -> list[Peak]:
     peaks: list[Peak] = []
-    with open(path, mode="r", encoding="shift_jis") as file:
+
+    # use robust open instead of fixed Shift-JIS
+    with _safe_open(path) as file:
         lines = file.readlines()
 
         # Find the start of peak data
@@ -120,7 +137,6 @@ def _read_peaks_from_csv(path: str) -> list[Peak]:
             if line.startswith('"Warning') or line.startswith('"Missing'):
                 break
 
-            # Parse line using quote-aware splitting
             parts = _parse_line_with_decimal_comma(line)
 
             # Skip separator lines or empty peaks
@@ -134,7 +150,6 @@ def _read_peaks_from_csv(path: str) -> list[Peak]:
             if parts[1] == "":
                 continue
 
-            # Convert values using helper method
             time = _convert_value(parts[1])
             area = _convert_value(parts[2])
             height = _convert_value(parts[3])
@@ -171,10 +186,13 @@ def _extract_value(parts: list[str], key: str) -> str | None:
 
 def _read_metadata(path: str) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    with open(path, mode="r", encoding="shift_jis") as file:
+
+    # use the robust opener with fallback encodings
+    with _safe_open(path) as file:
         lines = file.readlines()
 
         for line in lines:
+            # skip empty / separator lines
             if not line.strip() or line.startswith("==="):
                 continue
 
@@ -183,13 +201,16 @@ def _read_metadata(path: str) -> dict[str, Any]:
             # Extract metadata using helper function
             if value := _extract_value(parts, "Software Version:"):
                 metadata["software_version"] = value
+
             elif value := _extract_value(parts, "Sample Name:"):
                 metadata["sample_name"] = value
+
             elif value := _extract_value(parts, "Sample Amount:"):
                 try:
                     metadata["sample_amount"] = float(value.replace(",", "."))
                 except ValueError:
                     pass
+
             elif value := _extract_value(parts, "Data Acquisition Time:"):
                 try:
                     metadata["acquisition_time"] = str(
@@ -198,7 +219,7 @@ def _read_metadata(path: str) -> dict[str, Any]:
                 except ValueError:
                     pass
 
-            # Stop reading when we hit the peak data
+            # Stop once we reach the start of the peak table
             if '"Peak"' in line and '"Time"' in line:
                 break
 
