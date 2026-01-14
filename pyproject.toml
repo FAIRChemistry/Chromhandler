@@ -12,7 +12,7 @@ description = "Tool for processing chromatography data"
 license = {text = "MIT"}
 name = "chromhandler"
 readme = "README.md"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.11,<3.14"
 version = "0.10.6"
 
 [build-system]
