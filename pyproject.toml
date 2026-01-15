@@ -1,15 +1,17 @@
 [project]
-authors = [{email = "83341109+haeussma@users.noreply.github.com", name = "haeussma"}]
+authors = [
+  { email = "83341109+haeussma@users.noreply.github.com", name = "haeussma" },
+]
 dependencies = [
   "numpy<=2.1.0",
   "calipytion>=1.0.2,<2.0.0",
-  "pyenzyme>=2.1.0,<3.0.0",
+  "pyenzyme>=2.2.1,<3.0.0",
   "pydantic>=2,<3",
   "rich>=13.7,<15",
-  "loguru>=0.7,<1"
+  "loguru>=0.7,<1",
 ]
 description = "Tool for processing chromatography data"
-license = {text = "MIT"}
+license = { text = "MIT" }
 name = "chromhandler"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -54,7 +56,7 @@ warn_return_any = true
 [tool.pytest.ini_options]
 markers = [
   "readers: marks tests as slow (deselect with '-m \"not slow\"')",
-  "core: marks tests as core (deselect with '-m \"not core\"')"
+  "core: marks tests as core (deselect with '-m \"not core\"')",
 ]
 
 [tool.ruff.lint]
