@@ -121,3 +121,36 @@ def test_read_asm_gc(asm_gc_1: ASMReader) -> None:
     assert measurements[0].chromatograms[0].peaks[0].area == pytest.approx(
         316139.0365283202, rel=1e-3
     )
+
+
+def test_missing_peak_list_returns_empty_peaks(asm_lc_1: ASMReader) -> None:
+    content = {
+        "liquid chromatography aggregate document": {
+            "liquid chromatography document": [
+                {
+                    "sample document": {
+                        "sample identifier": "",
+                        "written name": "broken",
+                    },
+                    "measurement document": {
+                        "chromatogram data cube": {
+                            "cube-structure": {
+                                "dimensions": [
+                                    {"unit": "s"},
+                                ]
+                            },
+                            "data": {
+                                "measures": [[1.0, 2.0]],
+                                "dimensions": [[1.0, 2.0]],
+                            },
+                        }
+                    },
+                }
+            ]
+        }
+    }
+
+    measurement = asm_lc_1._map_lc_measurement(content, 0.0, "broken.json")
+    assert measurement.id == "broken"
+    assert len(measurement.chromatograms) == 1
+    assert measurement.chromatograms[0].peaks == []
