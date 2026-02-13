@@ -26,46 +26,45 @@ print(f"Number of devices: {num_devices}")
 # =====================================================================
 
 
-def emg_logpdf(
+def log_emg_pdf(
     x: jnp.ndarray, mu: jnp.ndarray, sigma: jnp.ndarray, tau: jnp.ndarray
 ) -> jnp.ndarray:
     """Stable log-pdf of Exponentially Modified Gaussian (area=1).
 
-    log f(x; μ, σ, τ) = -log(τ) + σ²/(2τ²) - (x-μ)/τ + log Φ((x-μ)/σ - σ/τ)
+    log f(x; mu, sigma, tau) = -log(tau) + sigma**2/(2*tau**2) - (x-mu)/tau + log Φ((x-mu)/sigma - sigma/tau)
 
     Args:
-        x: Data points, shape [N]
-        mu: Centers, shape [K]
-        sigma: Gaussian widths, shape [K]
-        tau: Exponential tails, shape [K]
+        x: Data points, shape [..., N]
+        mu: Centers, shape [..., K]
+        sigma: Gaussian widths, shape [..., K]
+        tau: Exponential tails, shape [..., K]
+            Leading dimensions of x and parameters must be broadcast-compatible.
 
     Returns:
-        Log-pdf matrix, shape [K, N]
+        Log-pdf tensor, shape [..., K, N]
     """
-    x = jnp.asarray(x, dtype=jnp.float32)
-    mu = jnp.asarray(mu, dtype=x.dtype)
-    sigma = jnp.asarray(sigma, dtype=x.dtype)
-    tau = jnp.asarray(tau, dtype=x.dtype)
 
-    s = (x[None, :] - mu[:, None]) / sigma[:, None]  # [K, N]
-    k = (sigma / tau)[:, None]  # [K, 1]
+    # Broadcast-only implementation:
+    # x [..., N] -> [..., 1, N], params [..., K] -> [..., K, 1]
+    s = (x[..., None, :] - mu[..., :, None]) / sigma[..., :, None]
+    k = (sigma / tau)[..., :, None]
 
     return (
-        -jnp.log(tau)[:, None]
-        + (sigma**2)[:, None] / (2.0 * tau**2)[:, None]
-        - (x[None, :] - mu[:, None]) / tau[:, None]
+        -jnp.log(tau)[..., :, None]
+        + (sigma**2)[..., :, None] / (2.0 * tau**2)[..., :, None]
+        - (x[..., None, :] - mu[..., :, None]) / tau[..., :, None]
         + log_ndtr(s - k)
     )
 
 
-def emg_pdf_matrix(
+def emg_pdf(
     x: jnp.ndarray,
     mu: jnp.ndarray,
     sigma: jnp.ndarray,
     tau: jnp.ndarray,
 ) -> jnp.ndarray:
-    """EMG pdf matrix, shape [K, N]."""
-    return jnp.exp(emg_logpdf(x, mu, sigma, tau))
+    """EMG pdf tensor, shape [..., K, N]."""
+    return jnp.exp(log_emg_pdf(x, mu, sigma, tau))
 
 
 def emg_mixture_area(
@@ -75,9 +74,9 @@ def emg_mixture_area(
     sigma: jnp.ndarray,
     tau: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Sum of area-weighted EMG components, shape [N]."""
-    pdfs = emg_pdf_matrix(x, mu, sigma, tau)
-    return jnp.sum(pdfs * A[:, None], axis=0)
+    """Sum of area-weighted EMG components, shape [..., N]."""
+    pdfs = emg_pdf(x, mu, sigma, tau)
+    return jnp.sum(pdfs * A[..., :, None], axis=-2)
 
 
 def emg_components_area(
@@ -87,8 +86,8 @@ def emg_components_area(
     sigma: jnp.ndarray,
     tau: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Per-component curves for plotting, shape [K, N]."""
-    return emg_pdf_matrix(x, mu, sigma, tau) * A[:, None]
+    """Per-component curves for plotting, shape [..., K, N]."""
+    return emg_pdf(x, mu, sigma, tau) * A[..., :, None]
 
 
 # =====================================================================
@@ -105,65 +104,80 @@ def emg_mixture_model(
     sigma_max: float,
     r_min: float,
     r_max: jnp.ndarray,
-    auc_hat: float,
+    auc_hat: float | jnp.ndarray,
     h_anchor: jnp.ndarray,
-    alpha_dirichlet: float = 0.3,
-    use_baseline: bool = False,
 ) -> None:
     """NumPyro model for EMG-mixture chromatographic peaks.
 
-    Uses height-based parameterization with improved numerical stability.
+    Hierarchical model across spectra (evolution-aware):
+    - Per-peak population parameters: `mu_pop[k]`, `sigma_pop_raw[k]`, `u_pop_raw[k]`
+    - Per-spectrum deviations produce `mu[s,k]`, `sigma[s,k]`, `tau[s,k]`
 
-    Key improvements over previous version:
-    - Tighter priors on log_h using observed data
-    - More informative priors on tau/ratio
-    - Removed numpyro.factor (can cause gradient issues)
-    - Better centering of transformations
+    Shape contract (must be pre-formatted by caller):
+    - `x`: `[S, N]`
+    - `y`: `[S, N]` or `None` for prior predictive
+    - `mu_lo`, `mu_hi`: `[S, K]`
+    - `r_max`, `h_anchor`: `[S, K]`
+    - `auc_hat`: broadcast-compatible with `[S]` (scalar or `[S]`)
+
+    Model outputs:
+    - `mu`, `sigma`, `tau`, `A`: `[S, K]`
+    - `mu_y`: `[S, N]`
+    - `sigma_y`, `total_A`: `[S]`
     """
-    x = jnp.asarray(x, dtype=jnp.float32)
-    mu_lo = jnp.asarray(mu_lo, dtype=jnp.float32)
-    mu_hi = jnp.asarray(mu_hi, dtype=jnp.float32)
-    r_max = jnp.asarray(r_max, dtype=jnp.float32)
-    h_anchor = jnp.asarray(h_anchor, dtype=jnp.float32)
 
-    K = mu_lo.shape[0]
-    x_mean = jnp.mean(x)
-    x_span = jnp.maximum(jnp.max(x) - jnp.min(x), jnp.array(1e-6, dtype=jnp.float32))
+    S = x.shape[0]
+    K = mu_lo.shape[-1]
 
-    # Handle prior predictive: if y is None, use h_anchor for scale
     if y is None:
-        y_scale = jnp.maximum(jnp.max(h_anchor), jnp.array(1.0, dtype=jnp.float32))
+        y_obs = None
+        y_scale = jnp.maximum(
+            jnp.max(h_anchor, axis=-1), jnp.array(1.0, dtype=jnp.float32)
+        )
     else:
-        y = jnp.asarray(y, dtype=jnp.float32)
-        y_scale = jnp.maximum(jnp.max(jnp.abs(y)), jnp.array(1e-6, dtype=jnp.float32))
+        y_obs = jnp.asarray(y, dtype=jnp.float32)
+        y_scale = jnp.maximum(
+            jnp.max(jnp.abs(y_obs), axis=-1), jnp.array(1e-6, dtype=jnp.float32)
+        )
 
     # ----------------------------------------------------------------
-    # Peak centers: Uniform in user-specified windows
+    # Hierarchical μ across spectra
     # ----------------------------------------------------------------
-    mu = numpyro.sample("mu", dist.Uniform(mu_lo, mu_hi))
+    mu_lo_k = jnp.max(mu_lo, axis=0)
+    mu_hi_k = jnp.min(mu_hi, axis=0)
+    mu_hi_k = jnp.maximum(mu_hi_k, mu_lo_k + 1e-4)
+    mu_span_k = jnp.maximum(mu_hi_k - mu_lo_k, 1e-4)
+
+    mu_pop = numpyro.sample("mu_pop", dist.Uniform(mu_lo_k, mu_hi_k))
+    mu_pop_sd = numpyro.sample("mu_pop_sd", dist.HalfNormal(0.2 * mu_span_k))
+    mu_eps = numpyro.sample("mu_eps", dist.Normal(0.0, 1.0).expand((S, K)))
+    mu = jnp.clip(mu_pop[None, :] + mu_eps * mu_pop_sd[None, :], mu_lo, mu_hi)
+    numpyro.deterministic("mu", mu)
 
     # ----------------------------------------------------------------
-    # Gaussian widths: Better centered LogitNormal
+    # Hierarchical σ across spectra (on unconstrained raw scale)
     # ----------------------------------------------------------------
-    # Center the sigmoid transformation at the midpoint
-    sigma_range = sigma_max - sigma_min
-
-    # Sample with bias toward middle
-    sigma_raw = numpyro.sample("sigma_raw", dist.Normal(0.0, 1.5).expand([K]))
-    sigma_01 = jax.nn.sigmoid(sigma_raw)
-    sigma = sigma_min + sigma_range * sigma_01
+    sigma_range = jnp.array(sigma_max - sigma_min, dtype=jnp.float32)
+    sigma_pop_raw = numpyro.sample("sigma_pop_raw", dist.Normal(0.0, 1.0).expand([K]))
+    sigma_pop_sd_raw = numpyro.sample(
+        "sigma_pop_sd_raw", dist.HalfNormal(0.5).expand([K])
+    )
+    sigma_eps = numpyro.sample("sigma_eps", dist.Normal(0.0, 1.0).expand((S, K)))
+    sigma_raw = sigma_pop_raw[None, :] + sigma_eps * sigma_pop_sd_raw[None, :]
+    sigma = sigma_min + sigma_range * jax.nn.sigmoid(sigma_raw)
     numpyro.deterministic("sigma", sigma)
 
     # ----------------------------------------------------------------
-    # Tail ratios: Tighter prior centered on reasonable value
-    # Most chromatographic peaks have ratio ~ 0.5-2.0
+    # Hierarchical τ via hierarchical ratio r = τ/σ
     # ----------------------------------------------------------------
-    # Log-space prior on ratio (more natural for multiplicative scale)
-    alpha_u, beta_u = 2.0, 5.0  # ← tweak if you want a different bias
-    u = numpyro.sample("u_ratio", dist.Beta(alpha_u, beta_u).expand([K]))
+    u_pop_raw = numpyro.sample("u_pop_raw", dist.Normal(-1.0, 1.0).expand([K]))
+    u_pop_sd_raw = numpyro.sample("u_pop_sd_raw", dist.HalfNormal(0.7).expand([K]))
+    u_eps = numpyro.sample("u_eps", dist.Normal(0.0, 1.0).expand((S, K)))
+    u_raw = u_pop_raw[None, :] + u_eps * u_pop_sd_raw[None, :]
+    u = jax.nn.sigmoid(u_raw)
 
-    r = r_min + (r_max - r_min) * u  # [K]   now in physical units
-    tau = sigma * r  # τ = ρ·σ
+    r = r_min + (r_max - r_min) * u
+    tau = sigma * r
     numpyro.deterministic("tau", tau)
     numpyro.deterministic("ratio", r)
 
@@ -176,9 +190,9 @@ def emg_mixture_model(
     log_h = numpyro.sample(
         "log_h",
         dist.Normal(
-            jnp.log(h_anchor),
+            jnp.log(jnp.maximum(h_anchor, 1e-6)),
             jnp.array(0.5, dtype=jnp.float32),  # TIGHTER (was 0.8)
-        ).expand([K]),
+        ),
     )
     h = jnp.exp(log_h)
     numpyro.deterministic("h", h)
@@ -189,30 +203,20 @@ def emg_mixture_model(
 
     # REMOVED numpyro.factor - use proper prior instead
     # Total area prior (weakly informative)
-    total_A = A.sum()
+    total_A = A.sum(axis=-1)
     numpyro.deterministic("total_A", total_A)
 
     # Optional: add as observable (not factor) for diagnostics
     # This doesn't constrain, just records
+    auc_arr = jnp.asarray(auc_hat, dtype=jnp.float32)
     numpyro.deterministic(
-        "log_total_A_deviation", (jnp.log(total_A) - jnp.log(auc_hat))
+        "log_total_A_deviation", (jnp.log(total_A) - jnp.log(auc_arr))
     )
 
     # ----------------------------------------------------------------
     # Mean signal
     # ----------------------------------------------------------------
     mu_y = emg_mixture_area(x, A, mu, sigma, tau)
-
-    # ----------------------------------------------------------------
-    # Optional baseline
-    # ----------------------------------------------------------------
-    if use_baseline:
-        b0 = numpyro.sample("b0", dist.Normal(0.0, 0.1 * y_scale))
-        b1 = numpyro.sample("b1", dist.Normal(0.0, 0.05 * y_scale / x_span))
-        mu_y = mu_y + b0 + b1 * (x - x_mean)
-    else:
-        numpyro.sample("b0", dist.Normal(0.0, 0.1 * y_scale))
-        numpyro.sample("b1", dist.Normal(0.0, 0.05 * y_scale / x_span))
 
     numpyro.deterministic("mu_y", mu_y)
 
@@ -225,7 +229,7 @@ def emg_mixture_model(
     # ----------------------------------------------------------------
     # Likelihood
     # ----------------------------------------------------------------
-    numpyro.sample("y", dist.Normal(mu_y, sigma_y).to_event(1), obs=y)
+    numpyro.sample("y", dist.Normal(mu_y, sigma_y[..., None]).to_event(1), obs=y_obs)
 
 
 ###  gooooooo
@@ -279,17 +283,15 @@ def _predict_single_sample(
 def predict_mean(
     x: jnp.ndarray,
     samples: dict[str, Any],
-    use_baseline: bool = False,
 ) -> jnp.ndarray:
     """Reconstruct mean signal μ_y from posterior samples.
 
     Args:
-        x: Time/retention points, shape [N]
+        x: Time/retention points, shape [..., N]
         samples: Posterior samples dict
-        use_baseline: If True, include baseline terms
 
     Returns:
-        Mean predictions, shape [num_samples, N]
+        Mean predictions, shape [num_samples, ..., N]
     """
     x = jnp.asarray(x, dtype=jnp.float32)
     A = jnp.asarray(samples["A"], dtype=jnp.float32)
@@ -300,12 +302,9 @@ def predict_mean(
     predict_fn = partial(_predict_single_sample, x)
     mu_y = jax.vmap(predict_fn)(A, mu, sigma, tau)
 
-    if use_baseline:
-        b0 = jnp.asarray(samples["b0"], dtype=jnp.float32)
-        b1 = jnp.asarray(samples["b1"], dtype=jnp.float32)
-        x_mean = jnp.mean(x)
-        baseline = b0[:, None] + b1[:, None] * (x[None, :] - x_mean)
-        mu_y = mu_y + baseline
+    # Backward-compatible single-spectrum shape: [samples, 1, N] -> [samples, N]
+    if x.ndim == 1 and mu_y.ndim == 3 and mu_y.shape[1] == 1:
+        mu_y = jnp.squeeze(mu_y, axis=1)
 
     return mu_y
 
@@ -328,21 +327,28 @@ def peak_height_anchors(
     This provides a weakly-informative prior center that helps sampling when peaks overlap.
 
     Args:
-        x: Retention time points, shape [N]
-        y: Observed signal, shape [N]
-        mu_lo: Lower bounds for peak centers, shape [K]
-        mu_hi: Upper bounds for peak centers, shape [K]
+        x: Retention time points, shape [..., N]
+        y: Observed signal, shape [..., N]
+        mu_lo: Lower bounds for peak centers, shape [..., K]
+        mu_hi: Upper bounds for peak centers, shape [..., K]
         eps: Small offset to avoid log(0), default 1e-3
 
     Returns:
-        Peak height anchors, shape [K]
+        Peak height anchors, shape [..., K]
     """
-    anchors = []
-    for lo, hi in zip(mu_lo, mu_hi):
-        mask = (x >= lo) & (x <= hi)
-        max_val = float(y[mask].max()) if mask.any() else eps
-        anchors.append(max_val + eps)  # +eps to avoid log(0)
-    return jnp.array(anchors, dtype=jnp.float32)
+    x = jnp.asarray(x, dtype=jnp.float32)
+    y = jnp.asarray(y, dtype=jnp.float32)
+    mu_lo = jnp.asarray(mu_lo, dtype=jnp.float32)
+    mu_hi = jnp.asarray(mu_hi, dtype=jnp.float32)
+    eps_arr = jnp.asarray(eps, dtype=jnp.float32)
+
+    mask = (x[..., None, :] >= mu_lo[..., :, None]) & (
+        x[..., None, :] <= mu_hi[..., :, None]
+    )
+    y_exp = jnp.broadcast_to(y[..., None, :], mask.shape)
+    max_vals = jnp.max(jnp.where(mask, y_exp, -jnp.inf), axis=-1)
+    has_points = jnp.any(mask, axis=-1)
+    return jnp.where(has_points, max_vals, eps_arr) + eps_arr
 
 
 # =====================================================================
@@ -371,38 +377,35 @@ class ChromFitter:
         sigma_max: Optional[float] = None,
         r_min: float = 0.05,
         r_max: Optional[jnp.ndarray] = None,
-        auc_hat: Optional[float] = None,
-        alpha_dirichlet: float = 0.3,
-        use_baseline: bool = False,
+        auc_hat: Optional[float | jnp.ndarray] = None,
     ):
         """Initialize ChromFitter with data and constraints.
 
         Args:
-            x: Retention time/data points, shape [N]
-            y: Observed signal, shape [N]
-            mu_lo: Lower bounds for peak centers, shape [K]
-            mu_hi: Upper bounds for peak centers, shape [K]
+            x: Retention time/data points, shape [..., N]
+            y: Observed signal, shape [..., N]
+            mu_lo: Lower bounds for peak centers, shape [..., K]
+            mu_hi: Upper bounds for peak centers, shape [..., K]
             sigma_min: Minimum Gaussian width (auto-computed if None)
             sigma_max: Maximum Gaussian width (auto-computed if None)
-            r_min: Minimum tail ratio τ/σ
-            r_max: Maximum tail ratio per component, shape [K] (auto-computed if None)
-            auc_hat: AUC prior anchor (auto-computed if None)
-            alpha_dirichlet: Dirichlet concentration for sparsity
-            use_baseline: Whether to include linear baseline
+            r_min: Minimum tail ratio tau/sigma
+            r_max: Maximum tail ratio per component, shape [..., K] (auto-computed if None)
+            auc_hat: AUC prior anchor, shape [...] (auto-computed if None)
         """
         self.x = jnp.asarray(x, dtype=jnp.float32)
         self.y = jnp.asarray(y, dtype=jnp.float32)
         self.mu_lo = jnp.asarray(mu_lo, dtype=jnp.float32)
         self.mu_hi = jnp.asarray(mu_hi, dtype=jnp.float32)
-        self.K = len(mu_lo)
-        self.alpha_dirichlet = alpha_dirichlet
-        self.use_baseline = use_baseline
+        self.K = int(self.mu_lo.shape[-1])
+        self.batch_shape = tuple(self.y.shape[:-1])
 
         # Auto-compute constraints if not provided
-        dx = float(jnp.median(jnp.diff(x)))
+        dx = float(jnp.median(jnp.diff(self.x, axis=-1)))
         self.sigma_min = sigma_min if sigma_min is not None else 12 * dx / 2.355
         self.sigma_max = (
-            sigma_max if sigma_max is not None else (x.max() - x.min()) / 8.0
+            sigma_max
+            if sigma_max is not None
+            else float((self.x.max() - self.x.min()) / 8.0)
         )
         self.r_min = r_min
 
@@ -410,17 +413,20 @@ class ChromFitter:
             sigma_ref = 0.5 * (self.sigma_min + self.sigma_max)
             eps = 0.01
             r_hard = 5
-            d_right = float(x.max() - float(mu_lo.min()))
+            d_right = float(self.x.max() - self.mu_lo.min())
             r_edge = d_right / (sigma_ref * jnp.log(1.0 / eps))
             r_max_val = jnp.maximum(r_edge, r_hard)
-            self.r_max = jnp.full(self.K, r_max_val, dtype=jnp.float32)
+            self.r_max = jnp.full(self.mu_lo.shape, r_max_val, dtype=jnp.float32)
         else:
             self.r_max = jnp.asarray(r_max, dtype=jnp.float32)
 
-        self.auc_hat = (
+        self.auc_hat = jnp.asarray(
             auc_hat
             if auc_hat is not None
-            else float(jnp.trapezoid(jnp.clip(y, a_min=0.0, a_max=None), x))
+            else jnp.trapezoid(
+                jnp.clip(self.y, a_min=0.0, a_max=None), self.x, axis=-1
+            ),
+            dtype=jnp.float32,
         )
 
         # Compute peak height anchors from observed maxima in each window
@@ -448,7 +454,12 @@ class ChromFitter:
         data_table.add_column("Description", style="dim")
 
         data_table.add_row(
-            "Data points (N)", f"{len(self.x):,}", "Number of time points"
+            "Data points (N)", f"{self.x.shape[-1]:,}", "Points per spectrum"
+        )
+        data_table.add_row(
+            "Batch shape",
+            f"{self.batch_shape if self.batch_shape else '(single)'}",
+            "Leading dimensions (evolution axes)",
         )
         data_table.add_row("Components (K)", f"{self.K}", "Number of EMG components")
         data_table.add_row(
@@ -484,12 +495,19 @@ class ChromFitter:
         constraints_table.add_row(
             "r_min", f"{self.r_min:.3f}", "Minimum tail ratio τ/σ"
         )
+        r_max_disp = jnp.asarray(self.r_max).reshape(-1, self.K)[0]
         constraints_table.add_row(
-            "r_max", f"{float(self.r_max[0]):.3f}", "Maximum tail ratio (per component)"
+            "r_max[0]",
+            f"{float(r_max_disp[0]):.3f}",
+            "First component maximum tail ratio",
         )
-        constraints_table.add_row(
-            "AUC_hat", f"{self.auc_hat:.3f}", "Prior anchor for total area"
+        auc_flat = self.auc_hat.reshape(-1)
+        auc_text = (
+            f"{float(auc_flat[0]):.3f}"
+            if auc_flat.size == 1
+            else f"{float(auc_flat.min()):.3f}..{float(auc_flat.max()):.3f}"
         )
+        constraints_table.add_row("AUC_hat", auc_text, "Prior anchor for total area")
 
         # Peak bounds table
         peak_table = Table(
@@ -503,11 +521,14 @@ class ChromFitter:
         peak_table.add_column("Range", style="yellow", justify="right")
         peak_table.add_column("h_anchor", style="magenta", justify="right")
 
+        mu_lo_disp = self.mu_lo.reshape(-1, self.K)[0]
+        mu_hi_disp = self.mu_hi.reshape(-1, self.K)[0]
+        h_anchor_disp = self.h_anchor.reshape(-1, self.K)[0]
         for k in range(self.K):
-            mu_lo_val = float(self.mu_lo[k])
-            mu_hi_val = float(self.mu_hi[k])
+            mu_lo_val = float(mu_lo_disp[k])
+            mu_hi_val = float(mu_hi_disp[k])
             range_val = mu_hi_val - mu_lo_val
-            h_anchor_val = float(self.h_anchor[k])
+            h_anchor_val = float(h_anchor_disp[k])
             peak_table.add_row(
                 f"k={k}",
                 f"{mu_lo_val:.3f}",
@@ -524,14 +545,6 @@ class ChromFitter:
         settings_table.add_column("Value", style="green")
         settings_table.add_column("Description", style="dim")
 
-        settings_table.add_row(
-            "α_dirichlet",
-            f"{self.alpha_dirichlet:.1f}",
-            "Dirichlet concentration (sparsity)",
-        )
-        settings_table.add_row(
-            "use_baseline", f"{self.use_baseline}", "Include linear baseline"
-        )
         settings_table.add_row("Devices", f"{num_devices}", "Available JAX devices")
 
         # Print all tables
@@ -592,8 +605,6 @@ class ChromFitter:
             r_max=self.r_max,
             auc_hat=self.auc_hat,
             h_anchor=self.h_anchor,
-            alpha_dirichlet=self.alpha_dirichlet,
-            use_baseline=self.use_baseline,
         )
 
         self.samples = self.mcmc.get_samples()
@@ -624,7 +635,7 @@ class ChromFitter:
             raise RuntimeError("Must call fit() before predict()")
 
         x_pred = self.x if x is None else jnp.asarray(x, dtype=jnp.float32)
-        return predict_mean(x_pred, self.samples, use_baseline=self.use_baseline)
+        return predict_mean(x_pred, self.samples)
 
     def summary(self, var_names: Optional[list[str]] = None, round_to: int = 3) -> Any:
         """Generate summary statistics for posterior.
@@ -741,12 +752,17 @@ class ChromFitter:
         plt.plot(self.x, self.y, ".", ms=3, alpha=0.5, label="data", color="C0")
         plt.plot(self.x, y_hat, "-", lw=2, label="predicted mean", color="C1")
 
-        if show_components:
+        if show_components and self.x.ndim == 1:
             # Plot median components
             A_med = jnp.median(self.samples["A"], axis=0)
             mu_med = jnp.median(self.samples["mu"], axis=0)
             sigma_med = jnp.median(self.samples["sigma"], axis=0)
             tau_med = jnp.median(self.samples["tau"], axis=0)
+            if A_med.ndim > 1:
+                A_med = A_med.reshape(-1, self.K)[0]
+                mu_med = mu_med.reshape(-1, self.K)[0]
+                sigma_med = sigma_med.reshape(-1, self.K)[0]
+                tau_med = tau_med.reshape(-1, self.K)[0]
 
             comps = emg_components_area(self.x, A_med, mu_med, sigma_med, tau_med)
             for k in range(self.K):
@@ -829,15 +845,19 @@ class ChromFitter:
 
         summaries = {}
         for k in range(self.K):
+            area_k = self.samples["A"][..., k].reshape(-1)
+            mu_k = self.samples["mu"][..., k].reshape(-1)
+            sigma_k = self.samples["sigma"][..., k].reshape(-1)
+            tau_k = self.samples["tau"][..., k].reshape(-1)
             summaries[f"peak_{k + 1}"] = {
-                "area_mean": float(self.samples["A"][:, k].mean()),
-                "area_std": float(self.samples["A"][:, k].std()),
-                "mu_mean": float(self.samples["mu"][:, k].mean()),
-                "mu_std": float(self.samples["mu"][:, k].std()),
-                "sigma_mean": float(self.samples["sigma"][:, k].mean()),
-                "sigma_std": float(self.samples["sigma"][:, k].std()),
-                "tau_mean": float(self.samples["tau"][:, k].mean()),
-                "tau_std": float(self.samples["tau"][:, k].std()),
+                "area_mean": float(area_k.mean()),
+                "area_std": float(area_k.std()),
+                "mu_mean": float(mu_k.mean()),
+                "mu_std": float(mu_k.std()),
+                "sigma_mean": float(sigma_k.mean()),
+                "sigma_std": float(sigma_k.std()),
+                "tau_mean": float(tau_k.mean()),
+                "tau_std": float(tau_k.std()),
             }
 
         return summaries
@@ -912,8 +932,6 @@ class ChromFitter:
             r_max=self.r_max,
             auc_hat=self.auc_hat,
             h_anchor=self.h_anchor,
-            alpha_dirichlet=self.alpha_dirichlet,
-            use_baseline=self.use_baseline,
         )
 
         # ===================================================================
@@ -1002,7 +1020,6 @@ class ChromFitter:
         sampling_rate: float = 1200.0,
         noise_level: float = 0.02,
         seed: int = 0,
-        baseline: tuple[float, float] = (0.0, 0.0),
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Simulate a chromatographic spectrum with multiple EMG peaks.
 
@@ -1016,7 +1033,6 @@ class ChromFitter:
             sampling_rate: Samples per time unit (default: 1200 Hz = 20 Hz * 60)
             noise_level: Relative noise level (fraction of max signal)
             seed: Random seed for noise generation
-            baseline: Tuple (b0, b1) for linear baseline b0 + b1*(x - x̄)
 
         Returns:
             Tuple of (x, y_clean, y_noisy) arrays
@@ -1053,17 +1069,11 @@ class ChromFitter:
         # Generate clean signal
         y_clean = emg_mixture_area(x, A, mu, sigma, tau)
 
-        # Add baseline if specified
-        b0, b1 = baseline
-        if b0 != 0.0 or b1 != 0.0:
-            x_mean = jnp.mean(x)
-            y_clean = y_clean + b0 + b1 * (x - x_mean)
-
         # Add noise
         rng = jax.random.PRNGKey(seed)
         rel_noise = 0.05  # 5 % of the local signal height
 
-        abs_noise = 10.0  # μV (or whatever units) baseline SD
+        abs_noise = 10.0  # μV (or whatever units) absolute noise SD
 
         rng = jax.random.PRNGKey(seed)
 
@@ -1077,54 +1087,55 @@ class ChromFitter:
 
 
 if __name__ == "__main__":
+    pass
     # Simulate data using the new simulate method
-    x, y_clean, y = ChromFitter.simulate(
-        A=[14.0, 100, 150],
-        mu=[6.5, 6.7, 6.9],
-        sigma=[0.05, 0.07, 0.02],
-        tau=[0.04, 0.01, 0.06],
-        x_min=5.0,
-        x_max=8.0,
-        sampling_rate=1200.0,  # 20 Hz * 60
-        noise_level=0.02,
-        seed=0,
-    )
+    # x, y_clean, y = ChromFitter.simulate(
+    #     A=[14.0, 100, 150],
+    #     mu=[6.5, 6.7, 6.9],
+    #     sigma=[0.05, 0.07, 0.02],
+    #     tau=[0.04, 0.01, 0.06],
+    #     x_min=5.0,
+    #     x_max=8.0,
+    #     sampling_rate=1200.0,  # 20 Hz * 60
+    #     noise_level=0.02,
+    #     seed=0,
+    # )
 
-    # Plot simulated data
-    plt.figure(figsize=(10, 4))
-    plt.plot(x, y, ".", ms=2, alpha=0.5, label="noisy data", color="C0")
-    plt.plot(x, y_clean, "-", lw=2, label="true signal", color="C1")
-    plt.xlabel("Retention time")
-    plt.ylabel("Signal")
-    plt.legend()
-    plt.title("Simulated Chromatographic Data")
-    plt.tight_layout()
-    plt.show()
+    # # Plot simulated data
+    # plt.figure(figsize=(10, 4))
+    # plt.plot(x, y, ".", ms=2, alpha=0.5, label="noisy data", color="C0")
+    # plt.plot(x, y_clean, "-", lw=2, label="true signal", color="C1")
+    # plt.xlabel("Retention time")
+    # plt.ylabel("Signal")
+    # plt.legend()
+    # plt.title("Simulated Chromatographic Data")
+    # plt.tight_layout()
+    # plt.show()
 
-    # Define peak search windows
-    mu_lo = jnp.array([6.3, 6.6, 6.8], dtype=jnp.float32)
-    mu_hi = jnp.array([6.6, 6.9, 7.1], dtype=jnp.float32)
+    # # Define peak search windows
+    # mu_lo = jnp.array([6.3, 6.6, 6.8], dtype=jnp.float32)
+    # mu_hi = jnp.array([6.6, 6.9, 7.1], dtype=jnp.float32)
 
-    # Fit model
-    fitter = ChromFitter(x, y, mu_lo, mu_hi)
-    fitter.fit(num_warmup=1000, num_samples=1000)
+    # # Fit model
+    # fitter = ChromFitter(x, y, mu_lo, mu_hi)
+    # fitter.fit(num_warmup=1000, num_samples=1000)
 
-    # Diagnostics
-    print(fitter.summary())
-    fitter.plot_fit(show_components=True)
-    fitter.plot_trace(var_names=["A", "mu", "sigma", "tau"])
+    # # Diagnostics
+    # print(fitter.summary())
+    # fitter.plot_fit(show_components=True)
+    # fitter.plot_trace(var_names=["A", "mu", "sigma", "tau"])
 
-    # plot corner plot
-    fitter.plot_pair(var_names=["A", "mu", "sigma", "tau"])
-    plt.tight_layout()
-    plt.show()
+    # # plot corner plot
+    # fitter.plot_pair(var_names=["A", "mu", "sigma", "tau"])
+    # plt.tight_layout()
+    # plt.show()
 
-    # plot rank plot
-    fitter.plot_rank(var_names=["A", "mu", "sigma", "tau"])
-    plt.tight_layout()
-    plt.show()
+    # # plot rank plot
+    # fitter.plot_rank(var_names=["A", "mu", "sigma", "tau"])
+    # plt.tight_layout()
+    # plt.show()
 
-    # plot autocorrelation plot
-    fitter.plot_autocorr(var_names=["A", "mu", "sigma", "tau"])
-    plt.tight_layout()
-    plt.show()
+    # # plot autocorrelation plot
+    # fitter.plot_autocorr(var_names=["A", "mu", "sigma", "tau"])
+    # plt.tight_layout()
+    # plt.show()

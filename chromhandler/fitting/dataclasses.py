@@ -1,6 +1,6 @@
 """Data classes for chromatography fitting."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import jax.numpy as jnp
 
@@ -37,5 +37,5 @@ class Chromatogram:
     id: str
     x_arr: jnp.ndarray
     y_arr: jnp.ndarray
-    sections: list[ChromatogramSection] = field(default_factory=list)
-    peaks: list[Peak] = field(default_factory=list)
+    sections: list[ChromatogramSection] = []
+    peaks: list[Peak] = []
