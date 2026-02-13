@@ -162,7 +162,7 @@ class ASMReader(AbstractReader):
             id=sample_id,
             sample_name=name,
             temperature=self.temperature,
-            temperature_unit=self.temperature_unit.name,
+            temperature_unit=self.temperature_unit,
             ph=self.ph,
             chromatograms=[chrom],
             data=data,

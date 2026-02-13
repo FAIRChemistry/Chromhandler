@@ -116,7 +116,9 @@ def emg_mixture_model(
     Shape contract (must be pre-formatted by caller):
     - `x`: `[S, N]`
     - `y`: `[S, N]` or `None` for prior predictive
-    - `mu_lo`, `mu_hi`: `[S, K]`
+    - `mu_lo`, `mu_hi`:
+        - `[K]` for shared peak centers across all spectra, or
+        - `[S, K]` for per-spectrum center bounds
     - `r_max`, `h_anchor`: `[S, K]`
     - `auc_hat`: broadcast-compatible with `[S]` (scalar or `[S]`)
 
@@ -127,7 +129,22 @@ def emg_mixture_model(
     """
 
     S = x.shape[0]
-    K = mu_lo.shape[-1]
+    mu_lo_arr = jnp.asarray(mu_lo, dtype=jnp.float32)
+    mu_hi_arr = jnp.asarray(mu_hi, dtype=jnp.float32)
+
+    if mu_lo_arr.ndim == 1 and mu_hi_arr.ndim == 1:
+        # Shared bounds across spectra: one μ[k] per component, broadcast to [S, K]
+        K = mu_lo_arr.shape[0]
+        mu_lo_mat = jnp.broadcast_to(mu_lo_arr[None, :], (S, K))
+        mu_hi_mat = jnp.broadcast_to(mu_hi_arr[None, :], (S, K))
+        shared_mu = True
+    elif mu_lo_arr.ndim == 2 and mu_hi_arr.ndim == 2:
+        K = mu_lo_arr.shape[-1]
+        mu_lo_mat = mu_lo_arr
+        mu_hi_mat = mu_hi_arr
+        shared_mu = False
+    else:
+        raise ValueError("mu_lo and mu_hi must both be 1D [K] or both be 2D [S, K].")
 
     if y is None:
         y_obs = None
@@ -143,15 +160,20 @@ def emg_mixture_model(
     # ----------------------------------------------------------------
     # Hierarchical μ across spectra
     # ----------------------------------------------------------------
-    mu_lo_k = jnp.max(mu_lo, axis=0)
-    mu_hi_k = jnp.min(mu_hi, axis=0)
+    mu_lo_k = jnp.max(mu_lo_mat, axis=0)
+    mu_hi_k = jnp.min(mu_hi_mat, axis=0)
     mu_hi_k = jnp.maximum(mu_hi_k, mu_lo_k + 1e-4)
     mu_span_k = jnp.maximum(mu_hi_k - mu_lo_k, 1e-4)
 
-    mu_pop = numpyro.sample("mu_pop", dist.Uniform(mu_lo_k, mu_hi_k))
-    mu_pop_sd = numpyro.sample("mu_pop_sd", dist.HalfNormal(0.2 * mu_span_k))
-    mu_eps = numpyro.sample("mu_eps", dist.Normal(0.0, 1.0).expand((S, K)))
-    mu = jnp.clip(mu_pop[None, :] + mu_eps * mu_pop_sd[None, :], mu_lo, mu_hi)
+    if shared_mu:
+        mu_shared = numpyro.sample("mu_shared", dist.Uniform(mu_lo_k, mu_hi_k))
+        mu = jnp.broadcast_to(mu_shared[None, :], (S, K))
+    else:
+        mu_pop = numpyro.sample("mu_pop", dist.Uniform(mu_lo_k, mu_hi_k))
+        mu_pop_sd = numpyro.sample("mu_pop_sd", dist.HalfNormal(0.2 * mu_span_k))
+        mu_eps = numpyro.sample("mu_eps", dist.Normal(0.0, 1.0).expand((S, K)))
+        mu = mu_pop[None, :] + mu_eps * mu_pop_sd[None, :]
+        mu = jnp.clip(mu, mu_lo_mat, mu_hi_mat)
     numpyro.deterministic("mu", mu)
 
     # ----------------------------------------------------------------
@@ -238,25 +260,46 @@ def emg_mixture_model(
 def relabel_by_sort(idata: az.InferenceData, key: str = "mu") -> az.InferenceData:
     """
     Sort each draw by ascending μ and permute all component-indexed variables.
-    Works for arrays of shape (chain, draw, K) or (chain, draw, K, …).
+    Handles component-indexed arrays with either:
+    - the same shape rank as `mu`, or
+    - one fewer rank than `mu` (e.g. global/shared [chain, draw, K] vars when
+      `mu` is [chain, draw, S, K]).
+
+    Variables that are not shape-compatible are left unchanged.
     """
     post = idata.posterior
-    mu = post[key].values  # (chain, draw, K)
-    order = jnp.argsort(mu, axis=-1)  # same shape
+    mu = jnp.asarray(post[key].values)
+    order = jnp.argsort(mu, axis=-1)
+    K = mu.shape[-1]
 
     comp_vars = [
-        v
-        for v in post.data_vars
-        if post[v].shape[-1] == mu.shape[-1] and post[v].ndim >= 3
+        v for v in post.data_vars if post[v].shape[-1] == K and post[v].ndim >= 3
     ]
 
     reordered = {}
     for v in comp_vars:
-        arr = post[v].values
-        # broadcast order to arr's shape: add as many trailing None as needed
-        idx = order[(...,) + (None,) * (arr.ndim - order.ndim)]
+        arr = jnp.asarray(post[v].values)
+
+        if arr.ndim == order.ndim:
+            # Example: arr and order are both [chain, draw, S, K]
+            if arr.shape[:-1] != order.shape[:-1]:
+                continue
+            idx = order
+        elif arr.ndim == order.ndim - 1:
+            # Example: arr is [chain, draw, K] while order is [chain, draw, S, K]
+            if arr.shape[:-1] != order.shape[:-2]:
+                continue
+            idx = order[..., 0, :]
+            if order.shape[-2] > 1:
+                is_consistent = bool(jnp.all(order == idx[..., None, :]))
+                if not is_consistent:
+                    # No unique order across the dropped axis; skip relabeling.
+                    continue
+        else:
+            continue
+
         new = jnp.take_along_axis(arr, idx, axis=-1)
-        reordered[v] = (post[v].dims, new)
+        reordered[v] = (post[v].dims, jnp.asarray(new))
 
     post_rl = post.assign(**reordered)
 
@@ -774,6 +817,67 @@ class ChromFitter:
         plt.tight_layout()
         plt.show()
 
+    def plot_posterior_hairlines(
+        self,
+        num_samples: int = 100,
+        spectrum_index: int = 0,
+        figsize: tuple[int, int] = (10, 4),
+        alpha: float = 0.08,
+        lw: float = 0.8,
+        sample_color: str = "C1",
+        data_color: str = "C0",
+    ) -> None:
+        """Overlay posterior sample curves ("hairlines") with observed data.
+
+        Notes:
+            - Draws up to `num_samples` posterior mean curves.
+            - No legend is shown by design.
+            - For batched spectra, choose the spectrum with `spectrum_index`.
+        """
+        if self.samples is None:
+            raise RuntimeError("Must call fit() before plot_posterior_hairlines()")
+
+        mu_y_samps = self.predict()
+
+        # Single spectrum: [draw, N]
+        if mu_y_samps.ndim == 2:
+            curves = mu_y_samps
+            x_plot = self.x
+            y_plot = self.y
+        else:
+            # Batched spectra: [draw, ..., N] -> [draw, S_flat, N]
+            batch_shape = mu_y_samps.shape[1:-1]
+            n_spectra = 1
+            for dim in batch_shape:
+                n_spectra *= int(dim)
+
+            if spectrum_index < 0 or spectrum_index >= n_spectra:
+                raise ValueError(
+                    f"spectrum_index={spectrum_index} out of range [0, {n_spectra - 1}]"
+                )
+
+            curves = mu_y_samps.reshape(mu_y_samps.shape[0], n_spectra, -1)[
+                :, spectrum_index, :
+            ]
+            x_plot = self.x.reshape(n_spectra, -1)[spectrum_index]
+            y_plot = self.y.reshape(n_spectra, -1)[spectrum_index]
+
+        n_draws = min(int(num_samples), int(curves.shape[0]))
+        if n_draws <= 0:
+            raise ValueError("num_samples must be >= 1")
+
+        idx = jnp.linspace(0, int(curves.shape[0]) - 1, n_draws, dtype=jnp.int32)
+
+        plt.figure(figsize=figsize)
+        for i in idx:
+            plt.plot(x_plot, curves[i], color=sample_color, alpha=alpha, lw=lw)
+
+        plt.plot(x_plot, y_plot, ".", ms=3, alpha=0.6, color=data_color)
+        plt.xlabel("Retention time")
+        plt.ylabel("Signal")
+        plt.tight_layout()
+        plt.show()
+
     def plot_corr(
         self,
         var_names: Optional[list[str]] = None,
@@ -1087,48 +1191,38 @@ class ChromFitter:
 
 
 if __name__ == "__main__":
-    pass
-    # Simulate data using the new simulate method
-    # x, y_clean, y = ChromFitter.simulate(
-    #     A=[14.0, 100, 150],
-    #     mu=[6.5, 6.7, 6.9],
-    #     sigma=[0.05, 0.07, 0.02],
-    #     tau=[0.04, 0.01, 0.06],
-    #     x_min=5.0,
-    #     x_max=8.0,
-    #     sampling_rate=1200.0,  # 20 Hz * 60
-    #     noise_level=0.02,
-    #     seed=0,
-    # )
+    # ead in array from file
+    arr = jnp.load("/Users/max/code/chromhandler/chromhandler/fitting/asm_data.npy")
+    # plot array
+    xdata = jnp.linspace(0, 20, arr.shape[1])
+    x = jnp.broadcast_to(xdata, arr.shape)
 
-    # # Plot simulated data
-    # plt.figure(figsize=(10, 4))
-    # plt.plot(x, y, ".", ms=2, alpha=0.5, label="noisy data", color="C0")
-    # plt.plot(x, y_clean, "-", lw=2, label="true signal", color="C1")
-    # plt.xlabel("Retention time")
-    # plt.ylabel("Signal")
-    # plt.legend()
-    # plt.title("Simulated Chromatographic Data")
-    # plt.tight_layout()
-    # plt.show()
+    # truncate array to first 500 point only per row
+    arr = arr[:, 200:700][:1, :]
+    x = x[:, 200:700][:1, :]
 
-    # # Define peak search windows
-    # mu_lo = jnp.array([6.3, 6.6, 6.8], dtype=jnp.float32)
-    # mu_hi = jnp.array([6.6, 6.9, 7.1], dtype=jnp.float32)
+    # Define peak search windows
+    mu_lo = jnp.array([2.8], dtype=jnp.float32)
+    mu_hi = jnp.array([3.2], dtype=jnp.float32)
 
-    # # Fit model
-    # fitter = ChromFitter(x, y, mu_lo, mu_hi)
-    # fitter.fit(num_warmup=1000, num_samples=1000)
+    # Fit model
+    fitter = ChromFitter(x, arr, mu_lo, mu_hi)
+    fitter.fit(num_warmup=1000, num_samples=1000)
 
     # # Diagnostics
-    # print(fitter.summary())
-    # fitter.plot_fit(show_components=True)
-    # fitter.plot_trace(var_names=["A", "mu", "sigma", "tau"])
+    print(fitter.summary())
+    fitter.plot_fit(show_components=True)
+    fitter.plot_trace(var_names=["A", "mu", "sigma", "tau"])
+
+    # plot hairlines
+    fitter.plot_posterior_hairlines(num_samples=100, spectrum_index=0)
+    plt.tight_layout()
+    plt.show()
 
     # # plot corner plot
-    # fitter.plot_pair(var_names=["A", "mu", "sigma", "tau"])
-    # plt.tight_layout()
-    # plt.show()
+    fitter.plot_pair(var_names=["A", "mu", "sigma", "tau"])
+    plt.tight_layout()
+    plt.show()
 
     # # plot rank plot
     # fitter.plot_rank(var_names=["A", "mu", "sigma", "tau"])
