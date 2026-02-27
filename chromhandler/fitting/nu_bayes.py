@@ -4232,9 +4232,9 @@ if __name__ == "__main__":
 
     arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
         -1, 3000
-    )[:14, :1000]
+    )[:70, :1000]
     time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        :14, :1000
+        :70, :1000
     ]
     sample_names = jnp.load("/Users/max/code/sahh-kinetics-hplc/folder_names.npy")
     chromatogram_names = jnp.load("/Users/max/code/sahh-kinetics-hplc/sample_names.npy")
