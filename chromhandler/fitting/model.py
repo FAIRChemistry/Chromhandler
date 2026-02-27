@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from jax import vmap
 from jax.scipy import special as jsp  # gives erf, erfc, erfcx, ndtr
+from pathlib import Path
 from rich.console import Console
 
 console = Console()
@@ -52,26 +53,3 @@ def emg_mixture(
     components = vmap(lambda h, m, s, t: emg(x, h, m, s, t))(h, mu, sigma, tau)
     y_hat = components.sum(axis=0)
     return y_hat, components
-
-
-if __name__ == "__main__":
-    import numpy as np
-    from matplotlib import pyplot as plt
-
-    x = jnp.linspace(4.7, 5.5, 1000)
-    h = jnp.array([60.0, 110.0, 80.0])  # heights h_k
-    mu = jnp.array([5.0, 5.05, 5.15])
-    sigma = jnp.array([0.05, 0.03, 0.03])
-    tau = jnp.array([0.01, 0.01, 0.01])
-
-    y_hat, comps = emg_mixture(x, h, mu, sigma, tau)  # comps: (K, N)
-
-    # Convert to NumPy for plotting (optional but avoids dtype surprises)
-    x_np = np.asarray(x)
-    y_np = np.asarray(y_hat)
-    comps_np = np.asarray(comps)  # (K, N)
-
-    plt.scatter(x_np, y_np, label="observed", s=1, color="tab:gray")
-    plt.plot(x_np, comps_np.T, alpha=0.7, label="component")
-    plt.legend()
-    plt.savefig("emg_mixture.png")

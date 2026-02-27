@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
     from .handler import Handler
+
+
+def _next_figure_path(stem: str, requested_path: str | None = None) -> Path:
+    figs_dir = Path("figs")
+    figs_dir.mkdir(parents=True, exist_ok=True)
+
+    if requested_path:
+        return figs_dir / Path(requested_path).name
+
+    idx = 1
+    while True:
+        candidate = figs_dir / f"{stem}_{idx:03d}.png"
+        if not candidate.exists():
+            return candidate
+        idx += 1
 
 
 def visualize(
@@ -30,7 +46,7 @@ def visualize(
         show_processed (bool, optional): If True, shows processed signal. Defaults to False.
         rt_min (float | None, optional): Minimum retention time to display. If None, shows all data. Defaults to None.
         rt_max (float | None, optional): Maximum retention time to display. If None, shows all data. Defaults to None.
-        save_path (str | None, optional): Path to save the figure. If None, the figure is not saved. Defaults to None.
+        save_path (str | None, optional): Optional filename; figure is always saved inside figs/. Defaults to None.
         assigned_only (bool, optional): If True, only shows peaks that are assigned to a molecule. Defaults to False.
         overlay (bool, optional): If True, plots all chromatograms on a single axis. Defaults to False.
     """
@@ -351,7 +367,6 @@ def visualize(
                 ax.set_xlim(rt_min, rt_max)
 
     plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path)
-    else:
-        plt.show()
+    out_path = _next_figure_path("visualize", save_path)
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)

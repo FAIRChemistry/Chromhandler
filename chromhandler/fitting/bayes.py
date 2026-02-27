@@ -14,9 +14,10 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from chromhandler.fitting.dataclasses import (
-    PeakDefinition,
-    PeakWindow,
+from chromhandler.fitting.moments import (
+    compute_peak_moment_metrics_batch,
+    metrics_list_to_arrays,
+    summarize_metrics,
 )
 from chromhandler.fitting.peak_models import (
     log_skew_normal_pdf,
@@ -34,8 +35,6 @@ num_devices = jax.local_device_count()
 console = Console()
 
 print(f"Number of devices: {num_devices}")
-
-# Peak models are implemented in `chromhandler.fitting.peak_models`.
 
 
 def relabel_by_sort(idata: az.InferenceData, key: str = "mu") -> az.InferenceData:
@@ -268,6 +267,7 @@ class ChromFitter:
         self.mcmc: Optional[MCMC] = None
         self.idata: Optional[az.InferenceData] = None
         self.samples: Optional[dict[str, Any]] = None
+        self.moment_metrics: dict[str, dict[str, Any]] = {}
         self.figure_dir = Path("figs")
         self.figure_dir.mkdir(parents=True, exist_ok=True)
         self._figure_counts: dict[str, int] = {}
@@ -298,6 +298,109 @@ class ChromFitter:
         if arr_jnp.ndim >= 3:
             return arr_jnp.reshape(-1, arr_jnp.shape[-1])
         raise ValueError(f"Unsupported array shape for _as_2d: {arr_jnp.shape}")
+
+    def _flat_trace_labels(self) -> list[str]:
+        """Build flattened trace labels that match ``self._as_2d`` ordering."""
+        n_samples, n_chrom, _ = self.signal.shape
+        sample_names = list(self.sample_names)
+        chromatogram_names = np.asarray(self.chromatogram_names, dtype=object)
+        labels: list[str] = []
+
+        for sample_index in range(n_samples):
+            if sample_index < len(sample_names):
+                sample_label = str(sample_names[sample_index])
+            else:
+                sample_label = f"sample_{sample_index}"
+
+            for chromatogram_index in range(n_chrom):
+                chrom_label = f"chrom_{chromatogram_index}"
+                if chromatogram_names.ndim >= 2:
+                    if (
+                        sample_index < chromatogram_names.shape[0]
+                        and chromatogram_index < chromatogram_names.shape[1]
+                    ):
+                        chrom_label = str(
+                            chromatogram_names[sample_index, chromatogram_index]
+                        )
+                elif chromatogram_names.ndim == 1:
+                    flat_index = sample_index * n_chrom + chromatogram_index
+                    if flat_index < chromatogram_names.shape[0]:
+                        chrom_label = str(chromatogram_names[flat_index])
+
+                labels.append(f"{sample_label} | {chrom_label}")
+
+        return labels
+
+    def compute_peak_moment_metrics(
+        self,
+        peak_names: Optional[Sequence[str]] = None,
+        start_quantile: float = 0.005,
+        end_quantile: float = 0.995,
+        tail_window_sigma: float = 2.0,
+        use_background: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        """Compute moment-based diagnostics within logical peak windows.
+
+        The user-defined logical peak bounds from `add_peak(...)` are used as
+        broad initialization windows. Within each window, this method estimates
+        tighter quantile bounds and shape metrics for every flattened trace.
+        """
+        if len(self.peak_definitions) == 0:
+            raise RuntimeError("No peak definitions available. Add peaks first.")
+
+        if peak_names is None:
+            selected_definitions = list(self.peak_definitions)
+        else:
+            by_name = {
+                definition.name: definition for definition in self.peak_definitions
+            }
+            missing = [name for name in peak_names if name not in by_name]
+            if missing:
+                raise ValueError(
+                    f"Unknown peak names: {missing}. Available: {list(by_name.keys())}"
+                )
+            selected_definitions = [by_name[name] for name in peak_names]
+
+        x2d = np.asarray(self._as_2d(self.x), dtype=float)
+        y2d = np.asarray(self._as_2d(self.y), dtype=float)
+        if use_background:
+            background2d = np.asarray(self._as_2d(self.background), dtype=float)
+            if background2d.shape != y2d.shape:
+                raise ValueError(
+                    "background must have the same flattened shape as signal."
+                )
+            y2d = y2d - background2d
+
+        trace_labels = np.asarray(self._flat_trace_labels(), dtype=object)
+        if trace_labels.shape[0] != x2d.shape[0]:
+            trace_labels = np.asarray(
+                [f"trace_{index}" for index in range(x2d.shape[0])], dtype=object
+            )
+
+        output: dict[str, dict[str, Any]] = {}
+        for definition in selected_definitions:
+            metrics_list = compute_peak_moment_metrics_batch(
+                x_matrix=x2d,
+                y_matrix=y2d,
+                window_low=float(definition.low),
+                window_high=float(definition.high),
+                start_quantile=float(start_quantile),
+                end_quantile=float(end_quantile),
+                tail_window_sigma=float(tail_window_sigma),
+            )
+            metric_arrays = metrics_list_to_arrays(metrics_list)
+            metric_summary = summarize_metrics(metric_arrays)
+            metric_arrays["trace_index"] = np.arange(x2d.shape[0], dtype=int)
+            metric_arrays["trace_label"] = trace_labels
+
+            output[definition.name] = {
+                "definition": definition,
+                "metrics": metric_arrays,
+                "summary": metric_summary,
+            }
+
+        self.moment_metrics = output
+        return output
 
     def plot_data(
         self,
@@ -2935,6 +3038,281 @@ class ChromFitter:
         plt.tight_layout()
         self._save_and_close_current_figure("outside_low_slope_curv")
 
+    def plot_peak_moment_diagnostics(
+        self,
+        peak_names: Optional[Sequence[str]] = None,
+        start_quantile: float = 0.005,
+        end_quantile: float = 0.995,
+        tail_window_sigma: float = 2.0,
+        use_background: bool = False,
+        overlay_alpha: float = 0.20,
+        overlay_linewidth: float = 0.8,
+        dpi: int = 150,
+    ) -> dict[str, dict[str, Any]]:
+        """Visualize moment-based metrics within user-defined logical windows.
+
+        For each selected logical peak, this method creates a 2x2 diagnostic
+        figure showing:
+        1) overlay of raw traces in the broad user window with robust bound bands,
+        2) per-trace positions (start/end/apex/centroid),
+        3) asymmetry indicators (z-shift, skewness, log tail ratio),
+        4) scale indicators (sigma, left/right sigma, relative area).
+        """
+        diagnostics = self.compute_peak_moment_metrics(
+            peak_names=peak_names,
+            start_quantile=start_quantile,
+            end_quantile=end_quantile,
+            tail_window_sigma=tail_window_sigma,
+            use_background=use_background,
+        )
+
+        x2d = np.asarray(self._as_2d(self.x), dtype=float)
+        y2d = np.asarray(self._as_2d(self.y), dtype=float)
+        if use_background:
+            y2d = y2d - np.asarray(self._as_2d(self.background), dtype=float)
+
+        trace_index = np.arange(x2d.shape[0], dtype=int)
+
+        for peak_name, payload in diagnostics.items():
+            definition = payload["definition"]
+            metric = payload["metrics"]
+
+            start_times = np.asarray(metric["start_time"], dtype=float)
+            end_times = np.asarray(metric["end_time"], dtype=float)
+            centroids = np.asarray(metric["centroid"], dtype=float)
+            apex_times = np.asarray(metric["apex_time"], dtype=float)
+            sigmas = np.asarray(metric["sigma"], dtype=float)
+            left_sigmas = np.asarray(metric["left_sigma"], dtype=float)
+            right_sigmas = np.asarray(metric["right_sigma"], dtype=float)
+            areas = np.asarray(metric["area"], dtype=float)
+            centroid_apex_z = np.asarray(metric["centroid_apex_z"], dtype=float)
+            skewness = np.asarray(metric["skewness"], dtype=float)
+            log_tail_ratio = np.asarray(metric["log_tail_ratio"], dtype=float)
+
+            area_median = np.nanmedian(areas)
+            if not np.isfinite(area_median) or area_median <= 1e-12:
+                area_relative = np.full_like(areas, np.nan)
+            else:
+                area_relative = areas / area_median
+
+            fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+            ax_overlay = axes[0, 0]
+            ax_positions = axes[0, 1]
+            ax_shape = axes[1, 0]
+            ax_scale = axes[1, 1]
+
+            for trace_id in range(x2d.shape[0]):
+                x_trace = x2d[trace_id]
+                y_trace = y2d[trace_id]
+                trace_mask = (
+                    np.isfinite(x_trace)
+                    & np.isfinite(y_trace)
+                    & (x_trace >= float(definition.low))
+                    & (x_trace <= float(definition.high))
+                )
+                if int(np.sum(trace_mask)) < 2:
+                    continue
+                ax_overlay.plot(
+                    x_trace[trace_mask],
+                    y_trace[trace_mask],
+                    color="0.5",
+                    alpha=overlay_alpha,
+                    linewidth=overlay_linewidth,
+                )
+
+            def _add_iqr_band(
+                axis,
+                values: np.ndarray,
+                color: str,
+                label: str,
+            ) -> None:
+                finite_values = values[np.isfinite(values)]
+                if finite_values.size == 0:
+                    return
+                q25, q75 = np.percentile(finite_values, [25, 75])
+                median = np.median(finite_values)
+                axis.axvspan(q25, q75, color=color, alpha=0.12, label=f"{label} IQR")
+                axis.axvline(
+                    median,
+                    color=color,
+                    linestyle="--",
+                    linewidth=1.5,
+                    label=f"{label} median",
+                )
+
+            _add_iqr_band(ax_overlay, start_times, "tab:green", "start")
+            _add_iqr_band(ax_overlay, end_times, "tab:red", "end")
+            _add_iqr_band(ax_overlay, centroids, "tab:blue", "centroid")
+            _add_iqr_band(ax_overlay, apex_times, "tab:orange", "apex")
+
+            ax_overlay.set_title("Window overlay with robust moment bands")
+            ax_overlay.set_xlabel("Retention time")
+            ax_overlay.set_ylabel("Signal")
+            ax_overlay.grid(True, alpha=0.25)
+            ax_overlay.legend(loc="best", frameon=False, fontsize=8)
+
+            ax_positions.plot(
+                trace_index,
+                start_times,
+                color="tab:green",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="start",
+            )
+            ax_positions.plot(
+                trace_index,
+                end_times,
+                color="tab:red",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="end",
+            )
+            ax_positions.plot(
+                trace_index,
+                centroids,
+                color="tab:blue",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="centroid",
+            )
+            ax_positions.plot(
+                trace_index,
+                apex_times,
+                color="tab:orange",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="apex",
+            )
+            ax_positions.axhline(
+                float(definition.low),
+                color="0.35",
+                linestyle=":",
+                linewidth=1.0,
+                label="window low",
+            )
+            ax_positions.axhline(
+                float(definition.high),
+                color="0.20",
+                linestyle=":",
+                linewidth=1.0,
+                label="window high",
+            )
+            ax_positions.set_title("Per-trace location metrics")
+            ax_positions.set_xlabel("Flattened trace index")
+            ax_positions.set_ylabel("Retention time")
+            ax_positions.grid(True, alpha=0.25)
+            ax_positions.legend(loc="best", frameon=False, fontsize=8)
+
+            ax_shape.plot(
+                trace_index,
+                centroid_apex_z,
+                color="tab:purple",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="(centroid-apex)/sigma",
+            )
+            ax_shape.plot(
+                trace_index,
+                skewness,
+                color="tab:brown",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="skewness",
+            )
+            ax_shape.plot(
+                trace_index,
+                log_tail_ratio,
+                color="tab:pink",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="log tail ratio",
+            )
+            ax_shape.axhline(0.0, color="0.2", linestyle="--", linewidth=1.0)
+            ax_shape.set_title("Asymmetry metrics")
+            ax_shape.set_xlabel("Flattened trace index")
+            ax_shape.grid(True, alpha=0.25)
+            ax_shape.legend(loc="best", frameon=False, fontsize=8)
+            ax_shape.set_ylim(-2.0, 2.0)
+
+            ax_scale.plot(
+                trace_index,
+                sigmas,
+                color="tab:blue",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="sigma",
+            )
+            ax_scale.plot(
+                trace_index,
+                left_sigmas,
+                color="tab:cyan",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="left sigma",
+            )
+            ax_scale.plot(
+                trace_index,
+                right_sigmas,
+                color="tab:olive",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="right sigma",
+            )
+            ax_scale.plot(
+                trace_index,
+                area_relative,
+                color="tab:gray",
+                marker="o",
+                markersize=2.5,
+                linewidth=1.0,
+                label="area / median(area)",
+            )
+            ax_scale.axhline(1.0, color="0.2", linestyle="--", linewidth=1.0)
+            ax_scale.set_title("Scale metrics")
+            ax_scale.set_xlabel("Flattened trace index")
+            ax_scale.grid(True, alpha=0.25)
+            ax_scale.legend(loc="best", frameon=False, fontsize=8)
+            ax_scale.set_ylim(-2.0, 2.0)
+
+            fig.suptitle(
+                f"Moment diagnostics: {peak_name} [{definition.low:.4f}, {definition.high:.4f}]",
+                fontsize=13,
+            )
+            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+
+            safe_name = "".join(
+                char if (char.isalnum() or char in ("_", "-")) else "_"
+                for char in str(peak_name)
+            ).strip("_")
+            if not safe_name:
+                safe_name = "peak"
+            self._save_and_close_current_figure(
+                stem=f"moment_metrics_{safe_name}",
+                dpi=dpi,
+            )
+
+            console.print(
+                "[cyan]Moment diagnostics[/cyan] "
+                f"{peak_name}: "
+                f"start≈{np.nanmedian(start_times):.4f}, "
+                f"end≈{np.nanmedian(end_times):.4f}, "
+                f"z≈{np.nanmedian(centroid_apex_z):.3f}, "
+                f"skew≈{np.nanmedian(skewness):.3f}, "
+                f"log-tail≈{np.nanmedian(log_tail_ratio):.3f}"
+            )
+
+        return diagnostics
+
 
 if __name__ == "__main__":
     from rich import print
@@ -2944,7 +3322,7 @@ if __name__ == "__main__":
     time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy")
     sample_names = jnp.load("/Users/max/code/sahh-kinetics-hplc/folder_names.npy")
     chromatogram_names = jnp.load("/Users/max/code/sahh-kinetics-hplc/sample_names.npy")
-    n_keep_chromatograms = 5
+    n_keep_chromatograms = 22 * 7
     if arr.ndim < 3 or time.ndim < 3:
         raise ValueError(
             f"Expected arr/time with shape [S, C, N], got arr={arr.shape}, time={time.shape}"
@@ -2954,29 +3332,67 @@ if __name__ == "__main__":
             f"Chromatogram axis mismatch: arr.shape[1]={arr.shape[1]} vs time.shape[1]={time.shape[1]}"
         )
 
+    n_samples = int(arr.shape[0])
     n_chrom_per_sample = int(arr.shape[1])
+    total_chromatograms = n_samples * n_chrom_per_sample
     traces_to_keep = max(int(n_keep_chromatograms), 1)
-    chrom_start = max(n_chrom_per_sample - traces_to_keep, 0)
 
-    # Keep only the last sample and its last `traces_to_keep` chromatograms.
-    arr = arr[-1:, chrom_start:, :]
-    time = time[-1:, chrom_start:, :]
-    sample_names = np.asarray(sample_names)[-1:]
+    sample_names_arr = np.asarray(sample_names, dtype=object)
+    chromatogram_names_arr = np.asarray(chromatogram_names, dtype=object)
 
-    chromatogram_names_arr = np.asarray(chromatogram_names)
-    if chromatogram_names_arr.ndim >= 2:
-        chromatogram_names = chromatogram_names_arr[-1:, chrom_start:]
-    elif chromatogram_names_arr.ndim == 1:
-        chromatogram_names = chromatogram_names_arr[chrom_start:]
-    else:
+    if traces_to_keep >= total_chromatograms:
+        # Keep the full [S, C, N] cube.
+        sample_names = sample_names_arr
         chromatogram_names = chromatogram_names_arr
+        print("[main] Keeping all chromatograms:")
+        print(
+            f"  requested traces: {traces_to_keep}, total available: {total_chromatograms}, "
+            f"kept traces: {total_chromatograms}"
+        )
+        print(f"  new shape: {arr.shape}")
+    else:
+        # Keep the last N chromatograms across all samples (global flattened order).
+        keep_start = total_chromatograms - traces_to_keep
+        arr_flat = arr.reshape(total_chromatograms, arr.shape[-1])
+        time_flat = time.reshape(total_chromatograms, time.shape[-1])
+        arr = arr_flat[keep_start:][None, :, :]
+        time = time_flat[keep_start:][None, :, :]
 
-    print("[main] Keeping last chromatograms of the last sample:")
-    print(
-        f"  requested traces: {traces_to_keep}, available in last sample: {n_chrom_per_sample}, "
-        f"kept traces: {arr.shape[1]}"
-    )
-    print(f"  new shape: {arr.shape}")
+        sample_index_flat = np.repeat(np.arange(n_samples), n_chrom_per_sample)
+        chromatogram_index_flat = np.tile(np.arange(n_chrom_per_sample), n_samples)
+        selected_labels: list[str] = []
+        for flat_index in range(keep_start, total_chromatograms):
+            sample_index = int(sample_index_flat[flat_index])
+            chromatogram_index = int(chromatogram_index_flat[flat_index])
+            if sample_index < sample_names_arr.shape[0]:
+                sample_label = str(sample_names_arr[sample_index])
+            else:
+                sample_label = f"sample_{sample_index}"
+
+            chrom_label = f"chrom_{chromatogram_index}"
+            if chromatogram_names_arr.ndim >= 2:
+                if (
+                    sample_index < chromatogram_names_arr.shape[0]
+                    and chromatogram_index < chromatogram_names_arr.shape[1]
+                ):
+                    chrom_label = str(
+                        chromatogram_names_arr[sample_index, chromatogram_index]
+                    )
+            elif chromatogram_names_arr.ndim == 1:
+                flat_name_index = sample_index * n_chrom_per_sample + chromatogram_index
+                if flat_name_index < chromatogram_names_arr.shape[0]:
+                    chrom_label = str(chromatogram_names_arr[flat_name_index])
+            selected_labels.append(f"{sample_label} | {chrom_label}")
+
+        sample_names = np.asarray(["selected_chromatograms"], dtype=object)
+        chromatogram_names = np.asarray([selected_labels], dtype=object)
+
+        print("[main] Keeping last chromatograms across all samples:")
+        print(
+            f"  requested traces: {traces_to_keep}, total available: {total_chromatograms}, "
+            f"kept traces: {arr.shape[1]}"
+        )
+        print(f"  new shape: {arr.shape}")
 
     F = ChromFitter(time, arr, [], sample_names, chromatogram_names)
 
@@ -3002,6 +3418,17 @@ if __name__ == "__main__":
         draw_color="tab:blue",
         draw_alpha=0.2,
     )
+    print("[main] Plotting peak moment diagnostics...")
+    F.plot_peak_moment_diagnostics(
+        start_quantile=0.005,
+        end_quantile=0.995,
+        tail_window_sigma=2.0,
+        use_background=False,
+        overlay_alpha=0.18,
+        overlay_linewidth=0.8,
+        dpi=200,
+    )
+    raise SystemExit(0)
 
     F.fit(num_warmup=3000, num_samples=2000, num_chains=8)
     if F.idata is not None:
@@ -3018,8 +3445,6 @@ if __name__ == "__main__":
     F.plot_fit()
 
     F.plot_trace()
-
-    raise SystemExit(0)
 
     F.slice_time_ranges([(0.5, 5)])
     F.plot_data(

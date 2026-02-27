@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import numpy as np
 from loguru import logger
@@ -10,6 +11,21 @@ from chromhandler.model import Chromatogram
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
+
+
+def _next_figure_path(stem: str, requested_path: str | None = None) -> Path:
+    figs_dir = Path("figs")
+    figs_dir.mkdir(parents=True, exist_ok=True)
+
+    if requested_path:
+        return figs_dir / Path(requested_path).name
+
+    idx = 1
+    while True:
+        candidate = figs_dir / f"{stem}_{idx:03d}.png"
+        if not candidate.exists():
+            return candidate
+        idx += 1
 
 
 def _resolve_chromatogram(
@@ -69,13 +85,16 @@ def generate_gaussian_data(
 
 
 def visualize_enzymeml(
-    enzymeml_doc: EnzymeMLDocument, return_fig: bool = False
+    enzymeml_doc: EnzymeMLDocument,
+    return_fig: bool = False,
+    save_path: str | None = None,
 ) -> Figure | None:
     """visualize the data in the EnzymeML document
 
     Args:
         enzymeml_doc (EnzymeMLDocument): The EnzymeML document to visualize
         return_fig (bool, optional): Whether to return the figure. Defaults to False.
+        save_path (str | None, optional): Optional filename; figure is always saved inside figs/. Defaults to None.
     """
     for species in enzymeml_doc.measurements[0].species_data:
         if species.data:
@@ -93,9 +112,14 @@ def visualize_enzymeml(
         plt.ylabel(f"concentration [{species.data_unit.name}]")
     plt.xlabel(f"reaction time [{species.time_unit.name}]")
 
-    plt.show()
+    fig = plt.gcf()
+    out_path = _next_figure_path("enzymeml", save_path)
+    fig.savefig(out_path, bbox_inches="tight")
+
     if return_fig:
-        return plt.gcf()
+        return fig
+
+    plt.close(fig)
     return None
 
 

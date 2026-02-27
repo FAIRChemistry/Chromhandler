@@ -81,6 +81,34 @@ def _to_component_matrix(
     raise ValueError(f"`{name}` must be 1D or 2D, got shape {array.shape}.")
 
 
+def _to_logical_matrix(
+    values: jnp.ndarray,
+    num_spectra: int,
+    logical_count: int,
+    name: str,
+) -> jnp.ndarray:
+    """Broadcast or validate a logical-peak array to ``[num_spectra, logical_count]``."""
+    array = jnp.asarray(values, dtype=jnp.float32)
+    if array.ndim == 1:
+        if array.shape[0] != logical_count:
+            raise ValueError(
+                f"`{name}` has shape {array.shape}; expected [{logical_count}]."
+            )
+        return jnp.broadcast_to(array[None, :], (num_spectra, logical_count))
+
+    if array.ndim == 2:
+        if array.shape == (num_spectra, logical_count):
+            return array
+        if array.shape == (1, logical_count):
+            return jnp.broadcast_to(array, (num_spectra, logical_count))
+        raise ValueError(
+            f"`{name}` has shape {array.shape}; expected "
+            f"[{num_spectra}, {logical_count}] or [1, {logical_count}]."
+        )
+
+    raise ValueError(f"`{name}` must be 1D or 2D, got shape {array.shape}.")
+
+
 def _to_mask_matrix(
     mask_values: jnp.ndarray,
     num_spectra: int,
@@ -107,6 +135,26 @@ def _to_mask_matrix(
         )
 
     raise ValueError(f"`{name}` must be 1D or 2D, got shape {mask.shape}.")
+
+
+def _to_spectrum_vector(
+    values: float | jnp.ndarray,
+    num_spectra: int,
+    name: str,
+) -> jnp.ndarray:
+    """Broadcast or validate a per-spectrum vector to ``[num_spectra]``."""
+    vector = jnp.asarray(values, dtype=jnp.float32)
+    if vector.ndim == 0:
+        return jnp.full((num_spectra,), vector, dtype=jnp.float32)
+    if vector.ndim == 1:
+        if vector.shape[0] == num_spectra:
+            return vector
+        if vector.shape[0] == 1:
+            return jnp.broadcast_to(vector, (num_spectra,))
+        raise ValueError(
+            f"`{name}` has shape {vector.shape}; expected [{num_spectra}] or [1]."
+        )
+    raise ValueError(f"`{name}` must be scalar or 1D, got shape {vector.shape}.")
 
 
 def _build_peak_window_mask(
@@ -238,6 +286,16 @@ def model(
     mu_init: Optional[jnp.ndarray] = None,
     sigma_init: Optional[jnp.ndarray] = None,
     A_init: Optional[jnp.ndarray] = None,
+    alpha_init: Optional[jnp.ndarray] = None,
+    mu_prior_loc: Optional[jnp.ndarray] = None,
+    mu_prior_scale: Optional[jnp.ndarray] = None,
+    sigma_prior_loc: Optional[jnp.ndarray] = None,
+    sigma_prior_scale: Optional[jnp.ndarray] = None,
+    alpha_prior_loc: Optional[jnp.ndarray] = None,
+    alpha_prior_scale: Optional[jnp.ndarray] = None,
+    intercept_anchor: Optional[jnp.ndarray] = None,
+    intercept_prior_mean: Optional[float] = None,
+    intercept_prior_scale: Optional[float] = None,
     peak_mask: Optional[jnp.ndarray] = None,
     alpha_prior_sd: float = 1.0,
 ) -> None:
@@ -267,9 +325,29 @@ def model(
             chemical total area reporting.
         mu_init: Optional center initialization matrix.
         sigma_init: Optional width initialization matrix.
-        A_init: Optional area initialization matrix.
+        A_init: Optional area initialization matrix used as the center of the
+            component-wise ``A ~ Uniform(0.9 * A_init, 1.1 * A_init)`` prior.
+        alpha_init: Optional skew initialization matrix used as fallback prior
+            source when ``alpha_prior_loc`` / ``alpha_prior_scale`` are not
+            provided.
+        mu_prior_loc: Optional non-hierarchical center prior location per logical
+            peak (or per-spectrum logical peak matrix).
+        mu_prior_scale: Optional non-hierarchical center prior scale per logical
+            peak (or per-spectrum logical peak matrix).
+        sigma_prior_loc: Optional non-hierarchical width prior location per
+            logical peak (or per-spectrum logical-peak matrix).
+        sigma_prior_scale: Optional non-hierarchical width prior scale per
+            logical peak (or per-spectrum logical-peak matrix).
+        alpha_prior_loc: Optional non-hierarchical skew prior location per
+            logical peak (or per-spectrum logical-peak matrix).
+        alpha_prior_scale: Optional non-hierarchical skew prior scale per
+            logical peak (or per-spectrum logical-peak matrix).
+        intercept_anchor: Legacy baseline anchor input (currently unused).
+        intercept_prior_mean: Legacy baseline prior mean input (currently unused).
+        intercept_prior_scale: Legacy baseline prior scale input (currently unused).
         peak_mask: Optional explicit likelihood mask for peak points.
-        alpha_prior_sd: Standard deviation of ``alpha ~ Normal(0, alpha_prior_sd)``.
+        alpha_prior_sd: Fallback scale for ``alpha`` when
+            ``alpha_prior_scale`` is not provided.
 
     Raises:
         ValueError: If metadata dimensions are inconsistent.
@@ -384,57 +462,138 @@ def model(
     else:
         area_initial_matrix = jnp.ones((num_spectra, num_components), dtype=jnp.float32)
 
-    sigma_minimum = jnp.full(
-        (num_components,), jnp.asarray(sigma_min, dtype=jnp.float32)
-    )
-    sigma_maximum = jnp.full(
-        (num_components,), jnp.asarray(sigma_max, dtype=jnp.float32)
-    )
+    sigma_minimum = jnp.asarray(sigma_min, dtype=jnp.float32)
+    sigma_maximum = jnp.asarray(sigma_max, dtype=jnp.float32)
     sigma_range = jnp.maximum(
         sigma_maximum - sigma_minimum,
         jnp.array(1e-4, dtype=jnp.float32),
     )
-
-    sigma_location = jnp.clip(
-        jnp.median(sigma_initial_matrix, axis=0),
+    sigma_main_initial = sigma_initial_matrix[:, main_index_array]
+    sigma_location_default = jnp.clip(
+        jnp.median(sigma_main_initial, axis=0),
         sigma_minimum + 1e-4,
         sigma_maximum - 1e-4,
     )
     sigma_mad = jnp.median(
-        jnp.abs(sigma_initial_matrix - sigma_location[None, :]),
+        jnp.abs(sigma_main_initial - sigma_location_default[None, :]),
         axis=0,
     )
     sigma_robust_standard_deviation = 1.4826 * sigma_mad
-    sigma_scale = jnp.clip(
-        sigma_robust_standard_deviation + 0.02 * sigma_range,
-        jnp.array(1e-4, dtype=jnp.float32),
-        0.25 * sigma_range,
-    )
+    sigma_scale_default = sigma_robust_standard_deviation + 0.02 * sigma_range
 
-    sigma = numpyro.sample(
-        "sigma",
+    if sigma_prior_loc is None:
+        sigma_location_logical = sigma_location_default
+    else:
+        sigma_location_matrix = _to_logical_matrix(
+            sigma_prior_loc, num_spectra, logical_count, "sigma_prior_loc"
+        )
+        sigma_location_logical = jnp.median(sigma_location_matrix, axis=0)
+        sigma_location_logical = jnp.clip(
+            sigma_location_logical,
+            sigma_minimum + 1e-6,
+            sigma_maximum - 1e-6,
+        )
+
+    if sigma_prior_scale is None:
+        sigma_scale_logical = sigma_scale_default
+    else:
+        sigma_scale_matrix = _to_logical_matrix(
+            sigma_prior_scale, num_spectra, logical_count, "sigma_prior_scale"
+        )
+        sigma_scale_logical = jnp.median(sigma_scale_matrix, axis=0)
+        sigma_scale_logical = jnp.maximum(
+            sigma_scale_logical, jnp.array(1e-6, dtype=jnp.float32)
+        )
+
+    sigma_relative_scale = sigma_scale_logical / jnp.maximum(
+        sigma_location_logical, jnp.array(1e-6, dtype=jnp.float32)
+    )
+    tau_sigma_logical = jnp.maximum(
+        jnp.sqrt(jnp.log1p(sigma_relative_scale**2)),
+        jnp.array(1e-6, dtype=jnp.float32),
+    )
+    numpyro.deterministic("tau_sigma", tau_sigma_logical)
+    log_sigma_location = jnp.log(sigma_location_logical)
+    log_sigma = numpyro.sample(
+        "log_sigma",
         dist.TruncatedNormal(
-            loc=jnp.broadcast_to(
-                sigma_location[None, :], (num_spectra, num_components)
-            ),
-            scale=jnp.broadcast_to(sigma_scale[None, :], (num_spectra, num_components)),
-            low=jnp.broadcast_to(sigma_minimum[None, :], (num_spectra, num_components)),
-            high=jnp.broadcast_to(
-                sigma_maximum[None, :], (num_spectra, num_components)
-            ),
+            loc=log_sigma_location,
+            scale=tau_sigma_logical,
+            low=jnp.broadcast_to(jnp.log(sigma_minimum), (logical_count,)),
+            high=jnp.broadcast_to(jnp.log(sigma_maximum), (logical_count,)),
+        ),
+    )
+    sigma_logical = numpyro.deterministic("sigma_logical", jnp.exp(log_sigma))
+    sigma = numpyro.deterministic(
+        "sigma",
+        jnp.broadcast_to(
+            sigma_logical[None, component_to_logical_array],
+            (num_spectra, num_components),
         ),
     )
 
-    alpha_scale = jnp.full(
-        (num_spectra, num_components),
-        jnp.maximum(float(alpha_prior_sd), 1e-3),
-        dtype=jnp.float32,
-    )
-    alpha = numpyro.sample(
+    if alpha_prior_loc is None:
+        if alpha_init is None:
+            alpha_location_logical = jnp.zeros((logical_count,), dtype=jnp.float32)
+        else:
+            alpha_initial_matrix = _to_component_matrix(
+                alpha_init, num_spectra, num_components, "alpha_init"
+            )
+            alpha_main_initial = alpha_initial_matrix[:, main_index_array]
+            alpha_location_logical = jnp.median(alpha_main_initial, axis=0)
+            alpha_location_logical = jnp.where(
+                jnp.isfinite(alpha_location_logical),
+                alpha_location_logical,
+                jnp.zeros((logical_count,), dtype=jnp.float32),
+            )
+    else:
+        alpha_location_matrix = _to_logical_matrix(
+            alpha_prior_loc, num_spectra, logical_count, "alpha_prior_loc"
+        )
+        alpha_location_logical = jnp.median(alpha_location_matrix, axis=0)
+
+    if alpha_prior_scale is None:
+        if alpha_init is None:
+            alpha_scale_logical = jnp.full(
+                (logical_count,),
+                jnp.maximum(float(alpha_prior_sd), 1e-3),
+                dtype=jnp.float32,
+            )
+        else:
+            alpha_initial_matrix = _to_component_matrix(
+                alpha_init, num_spectra, num_components, "alpha_init"
+            )
+            alpha_main_initial = alpha_initial_matrix[:, main_index_array]
+            alpha_median = jnp.median(alpha_main_initial, axis=0)
+            alpha_mad = jnp.median(
+                jnp.abs(alpha_main_initial - alpha_median[None, :]),
+                axis=0,
+            )
+            alpha_scale_logical = jnp.maximum(
+                1.4826 * alpha_mad,
+                jnp.array(max(float(alpha_prior_sd), 1e-3), dtype=jnp.float32),
+            )
+    else:
+        alpha_scale_matrix = _to_logical_matrix(
+            alpha_prior_scale, num_spectra, logical_count, "alpha_prior_scale"
+        )
+        alpha_scale_logical = jnp.median(alpha_scale_matrix, axis=0)
+        alpha_scale_logical = jnp.maximum(
+            alpha_scale_logical, jnp.array(1e-3, dtype=jnp.float32)
+        )
+
+    alpha_logical = numpyro.sample(
         "alpha",
         dist.Normal(
-            loc=jnp.zeros((num_spectra, num_components), dtype=jnp.float32),
-            scale=alpha_scale,
+            loc=alpha_location_logical,
+            scale=alpha_scale_logical,
+        ),
+    )
+    alpha_component = numpyro.deterministic(
+        "alpha_component",
+        jnp.broadcast_to(
+            alpha_logical[None, component_to_logical_array],
+            (num_spectra, num_components),
         ),
     )
 
@@ -446,12 +605,6 @@ def model(
     logical_span = jnp.maximum(
         logical_high_array - logical_low_array,
         jnp.array(1e-4, dtype=jnp.float32),
-    )
-    logical_low_matrix = jnp.broadcast_to(
-        logical_low_array[None, :], (num_spectra, logical_count)
-    )
-    logical_high_matrix = jnp.broadcast_to(
-        logical_high_array[None, :], (num_spectra, logical_count)
     )
 
     mu_main_initial = mu_initial_matrix[:, main_index_array]
@@ -466,21 +619,70 @@ def model(
         axis=0,
     )
     mu_center_robust_standard_deviation = 1.4826 * mu_center_mad
-    mu_center_prior_scale = jnp.clip(
+    mu_center_prior_scale_default = jnp.clip(
         mu_center_robust_standard_deviation + 0.01 * logical_span,
         jnp.array(1e-4, dtype=jnp.float32),
         0.05 * logical_span,
     )
+
+    if mu_prior_loc is None:
+        mu_center_prior_loc = mu_center_median
+    else:
+        mu_center_prior_loc_matrix = _to_logical_matrix(
+            mu_prior_loc, num_spectra, logical_count, "mu_prior_loc"
+        )
+        mu_center_prior_loc = jnp.median(mu_center_prior_loc_matrix, axis=0)
+    mu_center_prior_loc = jnp.clip(
+        mu_center_prior_loc, logical_low_array, logical_high_array
+    )
+
+    if mu_prior_scale is None:
+        mu_center_prior_scale = mu_center_prior_scale_default
+    else:
+        mu_center_prior_scale_matrix = _to_logical_matrix(
+            mu_prior_scale, num_spectra, logical_count, "mu_prior_scale"
+        )
+        mu_center_prior_scale = jnp.median(mu_center_prior_scale_matrix, axis=0)
+        mu_center_prior_scale = jnp.clip(
+            mu_center_prior_scale,
+            jnp.array(1e-6, dtype=jnp.float32),
+            jnp.maximum(0.5 * logical_span, jnp.array(1e-6, dtype=jnp.float32)),
+        )
+
     mu_center = numpyro.sample(
         "mu_center",
         dist.TruncatedNormal(
-            loc=mu_center_initial,
-            scale=jnp.broadcast_to(
-                mu_center_prior_scale[None, :], (num_spectra, logical_count)
-            ),
-            low=logical_low_matrix,
-            high=logical_high_matrix,
+            loc=mu_center_prior_loc,
+            scale=mu_center_prior_scale,
+            low=logical_low_array,
+            high=logical_high_array,
         ),
+    )
+    mu_trace_scale = numpyro.deterministic(
+        "mu_trace_scale",
+        jnp.clip(
+            0.15 * mu_center_prior_scale,
+            jnp.array(5e-4, dtype=jnp.float32),
+            0.20 * logical_span,
+        ),
+    )
+    mu_trace_offset = numpyro.sample(
+        "mu_trace_offset",
+        dist.Normal(0.0, mu_trace_scale).expand((num_spectra, logical_count)),
+    )
+    mu_center_matrix = mu_center[None, :] + mu_trace_offset
+    mu_center_epsilon = 1e-6 * logical_span
+    mu_center_matrix = jnp.clip(
+        mu_center_matrix,
+        logical_low_array[None, :] + mu_center_epsilon[None, :],
+        logical_high_array[None, :] - mu_center_epsilon[None, :],
+    )
+    numpyro.deterministic("mu_center_trace", mu_center_matrix)
+    logical_low_matrix = jnp.broadcast_to(
+        logical_low_array[None, :], (num_spectra, logical_count)
+    )
+    logical_high_matrix = jnp.broadcast_to(
+        logical_high_array[None, :], (num_spectra, logical_count)
     )
 
     separation_initial = (
@@ -510,8 +712,8 @@ def model(
         separation[None, :], (num_spectra, logical_count)
     )
     maximum_separation = 2.0 * jnp.minimum(
-        mu_center - logical_low_matrix,
-        logical_high_matrix - mu_center,
+        mu_center_matrix - logical_low_matrix,
+        logical_high_matrix - mu_center_matrix,
     )
     separation_matrix = jnp.minimum(
         separation_matrix,
@@ -519,10 +721,10 @@ def model(
     )
 
     mu_shoulder_component = (
-        mu_center + 0.5 * shoulder_side_effective[None, :] * separation_matrix
+        mu_center_matrix + 0.5 * shoulder_side_effective[None, :] * separation_matrix
     )
     mu_main_component = (
-        mu_center - 0.5 * shoulder_side_effective[None, :] * separation_matrix
+        mu_center_matrix - 0.5 * shoulder_side_effective[None, :] * separation_matrix
     )
 
     mu_values = jnp.zeros((num_spectra, num_components), dtype=jnp.float32)
@@ -533,28 +735,44 @@ def model(
 
     mu = numpyro.deterministic("mu", mu_values)
 
-    area_location = jnp.log(
-        jnp.maximum(area_initial_matrix, jnp.array(1e-8, dtype=jnp.float32))
+    area_initial_safe = jnp.maximum(
+        area_initial_matrix, jnp.array(1e-8, dtype=jnp.float32)
     )
-    area_scale = jnp.full((num_spectra, num_components), 0.6, dtype=jnp.float32)
-    A = numpyro.sample("A", dist.LogNormal(area_location, area_scale))
-
-    numpyro.deterministic("A_total", jnp.sum(A, axis=-1))
-
-    A_total_fit_logical = jnp.zeros((num_spectra, logical_count), dtype=jnp.float32)
-    A_total_fit_logical = A_total_fit_logical.at[:, component_to_logical_array].add(A)
-    numpyro.deterministic("A_total_fit_logical", A_total_fit_logical)
-
-    A_total_chemical_logical = jnp.zeros(
-        (num_spectra, logical_count), dtype=jnp.float32
+    # Allow collapse to near-zero area when a peak is absent in a trace.
+    area_lower = jnp.full_like(area_initial_safe, jnp.array(1e-8, dtype=jnp.float32))
+    area_upper = jnp.maximum(
+        2.0 * area_initial_safe,
+        area_lower + jnp.array(1e-8, dtype=jnp.float32),
     )
-    A_total_chemical_logical = A_total_chemical_logical.at[
-        :, component_to_logical_array
-    ].add(A * component_include_array[None, :])
-    numpyro.deterministic("A_total_chemical_logical", A_total_chemical_logical)
+    A = numpyro.sample("A", dist.Uniform(low=area_lower, high=area_upper))
 
-    peak_signal = skew_mixture_area(x_values, A, mu, sigma, alpha)
-    numpyro.deterministic("mu_y", peak_signal)
+    shoulder_index_valid = shoulder_index_array >= 0
+    shoulder_index_safe = jnp.where(shoulder_index_valid, shoulder_index_array, 0)
+    shoulder_component_mask_f = jnp.zeros((num_components,), dtype=jnp.float32)
+    shoulder_component_mask_f = shoulder_component_mask_f.at[shoulder_index_safe].add(
+        shoulder_index_valid.astype(jnp.float32)
+    )
+    shoulder_component_mask = shoulder_component_mask_f > 0.0
+    main_component_mask = ~shoulder_component_mask
+
+    area = jnp.sum(A * main_component_mask[None, :])
+    area_sholder = jnp.sum(A * shoulder_component_mask[None, :])
+    area_total = area + area_sholder
+    numpyro.deterministic("area", area)
+    numpyro.deterministic("area_sholder", area_sholder)
+    numpyro.deterministic("area_total", area_total)
+
+    baseline_intercept = numpyro.sample(
+        "baseline_intercept",
+        dist.Uniform(
+            low=jnp.full((num_spectra,), -1000.0, dtype=jnp.float32),
+            high=jnp.full((num_spectra,), 10000.0, dtype=jnp.float32),
+        ),
+    )
+
+    peak_signal = skew_mixture_area(x_values, A, mu, sigma, alpha_component)
+    mu_y = peak_signal + baseline_intercept[:, None]
+    numpyro.deterministic("mu_y", mu_y)
 
     if y_observed is None:
         sigma_reference = jnp.maximum(
@@ -577,7 +795,7 @@ def model(
             jnp.max(y_used_only, axis=-1),
             jnp.array(1.0, dtype=jnp.float32),
         )
-        residual = y_observed - peak_signal
+        residual = y_observed - mu_y
         noise_guess = _masked_standard_deviation(
             residual,
             peak_observation_mask,
@@ -593,13 +811,11 @@ def model(
         ),
     )
 
-    y_distribution = dist.Normal(peak_signal, sigma_y[:, None]).mask(
-        peak_observation_mask
-    )
+    y_distribution = dist.Normal(mu_y, sigma_y[:, None]).mask(peak_observation_mask)
     y_observed_masked = (
         None
         if y_observed is None
-        else jnp.where(peak_observation_mask, y_observed, peak_signal)
+        else jnp.where(peak_observation_mask, y_observed, mu_y)
     )
     numpyro.sample("y", y_distribution, obs=y_observed_masked)
 
@@ -607,7 +823,20 @@ def model(
 __all__ = [
     "log_skew_normal_pdf",
     "model",
+    "SAMPLED_PARAMETER_NAMES",
     "skew_components_area",
     "skew_mixture_area",
     "skew_normal_pdf",
 ]
+
+
+SAMPLED_PARAMETER_NAMES = (
+    "log_sigma",
+    "alpha",
+    "mu_center",
+    "mu_trace_offset",
+    "separation",
+    "A",
+    "baseline_intercept",
+    "sigma_y",
+)

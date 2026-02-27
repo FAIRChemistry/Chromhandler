@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from jax.scipy.special import erfc
+from pathlib import Path
 
 
 def emg(
@@ -28,4 +29,7 @@ plt.plot(x, y)
 plt.xlabel("x")
 plt.ylabel("EMG")
 plt.tight_layout()
-plt.show()
+figs_dir = Path("figs")
+figs_dir.mkdir(parents=True, exist_ok=True)
+plt.savefig(figs_dir / "demo_emg.png", bbox_inches="tight")
+plt.close()
