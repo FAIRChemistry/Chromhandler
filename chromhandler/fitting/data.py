@@ -32,6 +32,21 @@ class PeakAnnotation:
 
 
 @dataclass(frozen=True)
+class PeakPriorHints:
+    """Prior parameter hints for one logical peak, used to inform MCMC initialisation."""
+
+    mu_loc: float
+    mu_scale: float
+    sigma_loc: float
+    sigma_scale: float
+    alpha_loc: float
+    alpha_scale: float
+    area_loc: float
+    area_scale: float
+    trace_count: int
+
+
+@dataclass(frozen=True)
 class BaselineAnnotation:
     """Baseline annotation for a chromatogram.
 
