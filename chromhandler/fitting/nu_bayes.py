@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import numpyro
-from numpyro.infer import MCMC, NUTS, init_to_value
+from numpyro.infer import MCMC, NUTS
 
-from .baseline import BaselineEstimate
+from .baseline import BaselinePriors, estimate_baseline
 from .data import (
     BaselineAnnotation,
     PeakAnnotation,
@@ -20,7 +20,6 @@ from .data import (
 )
 from .peak_models import (
     SAMPLED_PARAMETER_NAMES,
-    skew_mixture_area,
     skew_normal_pdf,
 )
 from .peak_models import (
@@ -311,7 +310,7 @@ class Fitter:
         self.shift_time = jnp.zeros((self.signal.shape[0]))
         self.alignment_mask: jnp.ndarray | None = None
         self.peak_prior_hints: list[PeakPriorHints] = []
-        self._baseline_estimate_cache: dict[bool, list[BaselineEstimate]] = {}
+        self._baseline_priors_cache: dict[bool, BaselinePriors] = {}
         self.mu_init = jnp.zeros((self.signal.shape[0], 0), dtype=jnp.float32)
         self.sigma_init = jnp.zeros((self.signal.shape[0], 0), dtype=jnp.float32)
         self.A_init = jnp.zeros((self.signal.shape[0], 0), dtype=jnp.float32)
@@ -320,6 +319,9 @@ class Fitter:
         self.samples: dict[str, jnp.ndarray] | None = None
         self.mcmc: Any = None
         self.idata: Any = None
+        self._fwhm_diag: list[dict] | None = (
+            None  # populated by _build_component_initializers
+        )
         self.sigma_min, self.sigma_max = self._default_sigma_bounds()
         self.alpha_prior_sd = 1.0
         self._validate_shapes()
@@ -373,133 +375,24 @@ class Fitter:
         """Baseline mask on the original time axis."""
         return self.get_baseline_mask(use_aligned_time=False)
 
-    def _compute_baseline_estimates(
-        self, *, use_aligned_time: bool
-    ) -> list[BaselineEstimate]:
-        anchor_payload = self._collect_peak_edge_baseline_anchors(
-            use_aligned_time=use_aligned_time
-        )
-        y_anchor = np.asarray(anchor_payload["y_anchor"], dtype=float)
-        estimates: list[BaselineEstimate] = []
-        for trace_index in range(y_anchor.shape[0]):
-            anchor_value = (
-                float(y_anchor[trace_index, 0])
-                if y_anchor.ndim == 2 and y_anchor.shape[1] > 0
-                else np.nan
-            )
-            if np.isfinite(anchor_value):
-                intercept = anchor_value
-            else:
-                signal_row = np.asarray(self.signal[trace_index], dtype=float)
-                finite_signal = signal_row[np.isfinite(signal_row)]
-                intercept = (
-                    float(np.nanmin(finite_signal)) if finite_signal.size > 0 else 0.0
-                )
-            estimates.append(
-                BaselineEstimate(slope=0.0, intercept=intercept, r2=np.nan)
-            )
-        return estimates
-
-    def _collect_peak_edge_baseline_anchors(
-        self, *, use_aligned_time: bool
-    ) -> dict[str, np.ndarray]:
-        """Collect one anchor per trace for intercept-only baseline estimates.
-
-        The anchor is the minimum signal value inside the union of all peak
-        windows. If a trace has no finite samples in peak windows, falls back
-        to the global trace minimum over finite points.
-        """
+    def _compute_baseline_priors(self, *, use_aligned_time: bool) -> BaselinePriors:
+        """Fit OLS linear baseline through peak-window anchor points."""
         time_axis = self._time_axis(use_aligned_time=use_aligned_time)
-        if len(self.peaks) == 0:
-            raise ValueError(
-                "Baseline estimation requires peak annotations. "
-                "Define at least one peak window."
-            )
-
-        time_np = np.asarray(time_axis, dtype=float)
-        signal_np = np.asarray(self.signal, dtype=float)
-        peak_masks = np.asarray(
-            self.get_peak_masks(use_aligned_time=use_aligned_time), dtype=bool
+        return estimate_baseline(
+            time_axis,
+            self.signal,
+            peaks=self.peaks,
+            baselines=self.baselines,
         )
-        if peak_masks.shape[0] == 0:
-            raise ValueError(
-                "Baseline estimation requires at least one peak mask window."
-            )
-        peak_union_mask = np.any(peak_masks, axis=0)
-        n_trace = int(time_np.shape[0])
-        n_time = int(time_np.shape[1])
-        n_anchor = 1
 
-        x_anchor = np.full((n_trace, n_anchor), np.nan, dtype=float)
-        y_anchor = np.full((n_trace, n_anchor), np.nan, dtype=float)
-        anchor_indices = np.full((n_trace, n_anchor), -1, dtype=int)
-
-        for trace_index in range(n_trace):
-            trace_time = time_np[trace_index]
-            trace_signal = signal_np[trace_index]
-            finite = np.isfinite(trace_time) & np.isfinite(trace_signal)
-            if not np.any(finite):
-                continue
-
-            in_window = finite & peak_union_mask[trace_index]
-            search_mask = in_window if np.any(in_window) else finite
-            candidate_indices = np.flatnonzero(search_mask)
-            if candidate_indices.size == 0:
-                continue
-            min_local = int(np.argmin(trace_signal[candidate_indices]))
-            min_global = int(candidate_indices[min_local])
-            anchor_indices[trace_index, 0] = min_global
-            x_anchor[trace_index, 0] = trace_time[min_global]
-            y_anchor[trace_index, 0] = trace_signal[min_global]
-
-        return {
-            "x_anchor": x_anchor,
-            "y_anchor": y_anchor,
-            "anchor_indices": anchor_indices,
-            "n_time": np.asarray([n_time], dtype=int),
-        }
-
-    def _baseline_intercept_prior(
-        self, *, use_aligned_time: bool
-    ) -> tuple[np.ndarray, float, float]:
-        """Return per-trace intercept anchors and global mean/std prior stats."""
-        baseline_estimates = self.get_baseline_estimates(
-            use_aligned_time=use_aligned_time
-        )
-        intercept_raw = np.asarray(
-            [float(estimate.intercept) for estimate in baseline_estimates], dtype=float
-        )
-        finite = intercept_raw[np.isfinite(intercept_raw)]
-        if finite.size == 0:
-            prior_mean = 0.0
-            prior_std = 1.0
-        else:
-            prior_mean = float(np.mean(finite))
-            if finite.size > 1:
-                prior_std = float(np.std(finite, ddof=1))
-            else:
-                prior_std = max(abs(prior_mean) * 0.05, 1.0)
-            prior_std = max(prior_std, 1e-3)
-
-        intercept_anchor = np.where(
-            np.isfinite(intercept_raw), intercept_raw, prior_mean
-        )
-        return intercept_anchor.astype(float), float(prior_mean), float(prior_std)
-
-    def get_baseline_estimates(
-        self, *, use_aligned_time: bool = False
-    ) -> list[BaselineEstimate]:
+    def get_baseline_priors(self, *, use_aligned_time: bool = False) -> BaselinePriors:
+        """Per-trace linear baseline priors, cached per time-axis variant."""
         key = bool(use_aligned_time)
-        if key not in self._baseline_estimate_cache:
-            self._baseline_estimate_cache[key] = self._compute_baseline_estimates(
+        if key not in self._baseline_priors_cache:
+            self._baseline_priors_cache[key] = self._compute_baseline_priors(
                 use_aligned_time=use_aligned_time
             )
-        return self._baseline_estimate_cache[key]
-
-    @property
-    def baseline_estimates(self) -> list[BaselineEstimate]:
-        """Baseline estimates on the original time axis."""
-        return self.get_baseline_estimates(use_aligned_time=False)
+        return self._baseline_priors_cache[key]
 
     def _median_time_step_per_chromatogram(self) -> jnp.ndarray:
         """Return per-trace median time step."""
@@ -556,18 +449,11 @@ class Fitter:
         self, *, use_aligned_time: bool = True
     ) -> jnp.ndarray:
         time_axis = self._time_axis(use_aligned_time=use_aligned_time)
-        baseline_estimates = self.get_baseline_estimates(
-            use_aligned_time=use_aligned_time
+        priors = self.get_baseline_priors(use_aligned_time=use_aligned_time)
+        baseline = (
+            jnp.asarray(priors.intercept, dtype=jnp.float32)[:, None]
+            + jnp.asarray(priors.slope, dtype=jnp.float32)[:, None] * time_axis
         )
-        slopes = jnp.asarray(
-            [float(estimate.slope) for estimate in baseline_estimates],
-            dtype=jnp.float32,
-        )
-        intercepts = jnp.asarray(
-            [float(estimate.intercept) for estimate in baseline_estimates],
-            dtype=jnp.float32,
-        )
-        baseline = slopes[:, None] * time_axis + intercepts[:, None]
         corrected = jnp.asarray(self.signal, dtype=jnp.float32) - baseline
         finite_mask = jnp.isfinite(corrected) & jnp.isfinite(time_axis)
         return jnp.where(finite_mask, corrected, jnp.nan)
@@ -608,7 +494,7 @@ class Fitter:
                 mu_lo.append(float(peak.low))
                 mu_hi.append(float(peak.high))
                 component_to_logical_index.append(logical_index)
-                component_include_in_total_area.append(not bool(peak.exclude_shoulder))
+                component_include_in_total_area.append(True)
                 shoulder_side_code = -1 if peak.shoulder == "left" else 1
 
             logical_main_component_index.append(main_index)
@@ -705,6 +591,7 @@ class Fitter:
         right_time_all = np.asarray(fwhm_payload["right_time_all"], dtype=float)
 
         prior_hints: list[PeakPriorHints] = []
+        _fwhm_diag_list: list[dict] = []
         for logical_index, peak in enumerate(sorted_peaks):
             low = float(peak.low)
             high = float(peak.high)
@@ -835,6 +722,198 @@ class Fitter:
                 mode_loc = float(mu_loc + sigma_loc * mode_offset_ref)
             mode_loc = float(np.clip(mode_loc, low, high))
 
+            # --- Shoulder separation estimation ---
+            # Three-tier approach: bimodal apex → HWHM excess → geometric fallback.
+            sep_est_for_prior = 0.0
+            _tier_used = 0
+            _t1_n_cand = 0
+            _t1_sh_apexes: np.ndarray = np.array([], dtype=float)
+            _t1_raw_sep = 0.0
+            _t2_sigma_ref = 0.0
+            _t2_gauss_hwhm = 0.0
+            _t2_median_hwhm = 0.0
+            _t2_excess = 0.0
+            _t3_sigma_fb = 0.0
+            _t3_geo = 0.0
+            if side != 0 and int(np.sum(keep_width)) > 0:
+                T_main_val = mode_loc  # robust median of in-gate apex times
+
+                # Tier 1: out-of-gate traces on the shoulder side
+                out_of_gate_valid = width_valid & ~gate_keep[:, logical_index]
+                if side > 0:
+                    cand_sh = (
+                        out_of_gate_valid
+                        & np.isfinite(mode_trace)
+                        & (mode_trace > T_main_val)
+                    )
+                else:
+                    cand_sh = (
+                        out_of_gate_valid
+                        & np.isfinite(mode_trace)
+                        & (mode_trace < T_main_val)
+                    )
+                _t1_n_cand = int(np.sum(cand_sh))
+                if _t1_n_cand >= 2:
+                    sh_apexes = mode_trace[cand_sh]
+                    sh_apexes = sh_apexes[np.isfinite(sh_apexes)]
+                    _t1_sh_apexes = sh_apexes.copy()
+                    if sh_apexes.size >= 1:
+                        raw_sep = abs(T_main_val - float(np.median(sh_apexes)))
+                        _t1_raw_sep = raw_sep
+                        if raw_sep > 0.003 * span:
+                            sep_est_for_prior = raw_sep
+                            _tier_used = 1
+
+                # Tier 2: excess HWHM on the shoulder side.
+                # Use the UNAFFECTED (opposite) side sigma as reference so that
+                # natural peak asymmetry doesn't mask the shoulder:
+                #   left shoulder → right side is clean → use sigma_right as ref
+                #   right shoulder → left side is clean → use sigma_left as ref
+                if sep_est_for_prior < 1e-6:
+                    if side > 0:
+                        sigma_far_vals = sigma_left_trace[keep_width]
+                    else:
+                        sigma_far_vals = sigma_right_trace[keep_width]
+                    sigma_far_vals = sigma_far_vals[
+                        np.isfinite(sigma_far_vals) & (sigma_far_vals > 0)
+                    ]
+                    sigma_ref = (
+                        float(np.nanmedian(sigma_far_vals))
+                        if sigma_far_vals.size > 0
+                        else float(sigma_loc)
+                    )
+                    _t2_sigma_ref = sigma_ref
+                    gauss_hwhm = sigma_ref * gaussian_hwhm_factor
+                    _t2_gauss_hwhm = gauss_hwhm
+                    hwhm_side = (w_right if side > 0 else w_left)[keep_width]
+                    hwhm_side = hwhm_side[np.isfinite(hwhm_side) & (hwhm_side > 0)]
+                    if hwhm_side.size > 0:
+                        excess = float(np.nanmedian(hwhm_side)) - gauss_hwhm
+                        _t2_median_hwhm = float(np.nanmedian(hwhm_side))
+                        _t2_excess = excess
+                        if excess > 1e-6:
+                            sep_est_for_prior = max(1.5 * excess, 0.005 * span)
+                            _tier_used = 2
+
+                # Tier 3: geometric fallback — at least 2σ to avoid shoulder
+                # landing inside the main peak body where subtraction collapses.
+                if sep_est_for_prior < 1e-6:
+                    sigma_all = sigma_trace[
+                        np.isfinite(sigma_trace) & (sigma_trace > 0)
+                    ]
+                    sigma_fb = (
+                        float(np.nanmedian(sigma_all))
+                        if sigma_all.size > 0
+                        else float(sigma_loc)
+                    )
+                    _t3_sigma_fb = sigma_fb
+                    if side > 0:
+                        geo = 0.15 * (high - T_main_val)
+                        sep_est_for_prior = max(geo, 2.0 * sigma_fb, 0.01 * span)
+                    else:
+                        geo = 0.15 * (T_main_val - low)
+                        sep_est_for_prior = max(geo, 2.0 * sigma_fb, 0.01 * span)
+                    _t3_geo = geo
+                    _tier_used = 3
+
+                sep_est_for_prior = float(
+                    np.clip(sep_est_for_prior, 0.002 * span, 0.60 * span)
+                )
+
+            # --- Second pass: data-driven shoulder sep_est from residuals ---
+            # Pre-compute the main-component area for every trace so that
+            # _compute_main_residuals_for_window can build accurate residuals
+            # before the per-trace init loop runs.
+            _pass2: dict = {"n_valid": 0, "sep_est": None}
+            if side != 0:
+                _main_area_pre = np.full((n_traces,), 1e-8, dtype=float)
+                for _t in range(n_traces):
+                    _xi = (
+                        float(xi_trace[_t])
+                        if keep_width[_t] and np.isfinite(xi_trace[_t])
+                        else float(mu_loc)
+                    )
+                    _sig = (
+                        float(sigma_trace[_t])
+                        if keep_width[_t] and np.isfinite(sigma_trace[_t])
+                        else float(sigma_loc)
+                    )
+                    _alp = (
+                        float(alpha_trace[_t])
+                        if keep_width[_t] and np.isfinite(alpha_trace[_t])
+                        else float(alpha_loc)
+                    )
+                    _tgt = (
+                        float(mode_trace[_t])
+                        if keep_width[_t] and np.isfinite(mode_trace[_t])
+                        else float(mode_loc)
+                    )
+                    _active = (
+                        peak_mask_matrix[logical_index, _t]
+                        & np.isfinite(time_matrix[_t])
+                        & np.isfinite(signal_matrix[_t])
+                    )
+                    _cand = np.flatnonzero(_active)
+                    if _cand.size == 0:
+                        _in_win = (
+                            np.isfinite(time_matrix[_t])
+                            & np.isfinite(signal_matrix[_t])
+                            & (time_matrix[_t] >= low)
+                            & (time_matrix[_t] <= high)
+                        )
+                        _cand = np.flatnonzero(_in_win)
+                    _h = 0.0
+                    if _cand.size > 0:
+                        _ni = int(
+                            _cand[int(np.argmin(np.abs(time_matrix[_t, _cand] - _tgt)))]
+                        )
+                        _h = max(float(signal_matrix[_t, _ni]), 0.0)
+                    _pdf_pre = float(
+                        np.asarray(
+                            skew_normal_pdf(
+                                jnp.asarray([_tgt], dtype=jnp.float32),
+                                jnp.asarray([_xi], dtype=jnp.float32),
+                                jnp.asarray([_sig], dtype=jnp.float32),
+                                jnp.asarray([_alp], dtype=jnp.float32),
+                            )[0, 0],
+                            dtype=float,
+                        )
+                    )
+                    _main_area_pre[_t] = max(
+                        _h / _pdf_pre
+                        if np.isfinite(_pdf_pre) and _pdf_pre > 1e-12
+                        else _h * _sig * sqrt_two_pi,
+                        1e-8,
+                    )
+                _d_pass2 = {
+                    "T_main": mode_loc,
+                    "sigma_loc": sigma_loc,
+                    "mu_loc": mu_loc,
+                    "alpha_loc": alpha_loc,
+                    "low": low,
+                    "high": high,
+                    "side": side,
+                    "xi_trace": xi_trace,
+                    "sigma_trace": sigma_trace,
+                    "alpha_trace": alpha_trace,
+                    "main_area_per_trace": _main_area_pre,
+                }
+                _pass2 = self._second_pass_shoulder_fwhm(
+                    _d_pass2,
+                    time_matrix,
+                    signal_matrix,
+                )
+                if _pass2.get("n_valid", 0) >= 3 and _pass2.get("sep_est") is not None:
+                    _sep2 = float(
+                        np.clip(
+                            max(float(_pass2["sep_est"]), 2.0 * sigma_loc),
+                            0.002 * span,
+                            0.60 * span,
+                        )
+                    )
+                    sep_est_for_prior = _sep2
+                    _tier_used = 0  # sentinel: "pass2"
+
             for trace_index in range(n_traces):
                 if keep_width[trace_index]:
                     xi_value = float(xi_trace[trace_index])
@@ -922,22 +1001,144 @@ class Fitter:
                     alpha_init[trace_index, m_idx] = alpha_value
                     A_init[trace_index, m_idx] = area_value
                 else:
-                    offset = max(0.08 * span, min(0.25 * span, 0.8 * sigma_value))
+                    # Use data-driven separation estimate when available
+                    if sep_est_for_prior > 1e-6:
+                        offset = sep_est_for_prior
+                    else:
+                        offset = max(0.08 * span, min(0.25 * span, 0.8 * sigma_value))
                     direction = 1.0 if side > 0 else -1.0
-                    main_mu = float(
-                        np.clip(xi_value - 0.5 * direction * offset, low, high)
+                    # main_mu: location parameter (xi) of main component
+                    main_mu = float(np.clip(xi_value, low, high))
+                    # shoulder_mode_pos: the MODE of the shoulder component,
+                    # offset from the main peak MODE (target_mode), not from xi
+                    shoulder_mode_pos = float(
+                        np.clip(target_mode + direction * offset, low, high)
                     )
-                    shoulder_mu = float(
-                        np.clip(xi_value + 0.5 * direction * offset, low, high)
+
+                    # --- Shoulder component parameters ---
+                    sigma_sh = max(0.75 * sigma_value, 1e-4)
+                    alpha_sh = 0.5 * alpha_value
+                    mode_offset_sh = float(
+                        _skew_mode_offsets(np.asarray([alpha_sh]))[0]
                     )
+                    # xi_sh: location parameter whose mode = shoulder_mode_pos
+                    xi_sh = float(
+                        np.clip(
+                            shoulder_mode_pos - sigma_sh * mode_offset_sh, low, high
+                        )
+                    )
+
+                    # Signal height at shoulder mode position
+                    if candidate_idx.size > 0:
+                        near_sh = int(
+                            candidate_idx[
+                                int(
+                                    np.argmin(
+                                        np.abs(
+                                            time_matrix[trace_index, candidate_idx]
+                                            - shoulder_mode_pos
+                                        )
+                                    )
+                                )
+                            ]
+                        )
+                        h_sh = max(float(signal_matrix[trace_index, near_sh]), 0.0)
+                    else:
+                        h_sh = 0.0
+
+                    # Net shoulder height: subtract main component's contribution
+                    pdf_main_at_sh = float(
+                        np.asarray(
+                            skew_normal_pdf(
+                                jnp.asarray([shoulder_mode_pos], dtype=jnp.float32),
+                                jnp.asarray([xi_value], dtype=jnp.float32),
+                                jnp.asarray([sigma_value], dtype=jnp.float32),
+                                jnp.asarray([alpha_value], dtype=jnp.float32),
+                            )[0, 0],
+                            dtype=float,
+                        )
+                    )
+                    h_sh_net = h_sh - area_value * pdf_main_at_sh
+
+                    # Shoulder area from net height when the shoulder pokes out
+                    # clearly above the main tail. When buried (small sep or
+                    # compressed tail side), fall back to Beta(3,1) prior mean:
+                    # main_fraction = 0.75 → shoulder = 25% of total = main / 3.
+                    if h_sh_net > 0.02 * max(h_sh, 1e-12):
+                        pdf_sh_at_mode = float(
+                            np.asarray(
+                                skew_normal_pdf(
+                                    jnp.asarray([shoulder_mode_pos], dtype=jnp.float32),
+                                    jnp.asarray([xi_sh], dtype=jnp.float32),
+                                    jnp.asarray([sigma_sh], dtype=jnp.float32),
+                                    jnp.asarray([alpha_sh], dtype=jnp.float32),
+                                )[0, 0],
+                                dtype=float,
+                            )
+                        )
+                        if np.isfinite(pdf_sh_at_mode) and pdf_sh_at_mode > 1e-12:
+                            area_sh = h_sh_net / pdf_sh_at_mode
+                        else:
+                            area_sh = h_sh_net * sigma_sh * sqrt_two_pi
+                    else:
+                        # Shoulder buried in main's tail → Beta(3,1) prior mean
+                        area_sh = area_value / 3.0
+                    area_sh = max(float(area_sh), 1e-8)
+
                     mu_init[trace_index, m_idx] = main_mu
-                    mu_init[trace_index, s_idx] = shoulder_mu
+                    # Store xi_sh (location parameter) so prior plot displays
+                    # shoulder mode at shoulder_mode_pos = xi_sh + sigma_sh*offset
+                    mu_init[trace_index, s_idx] = xi_sh
                     sigma_init[trace_index, m_idx] = sigma_value
-                    sigma_init[trace_index, s_idx] = max(0.75 * sigma_value, 1e-4)
+                    sigma_init[trace_index, s_idx] = sigma_sh
                     alpha_init[trace_index, m_idx] = alpha_value
-                    alpha_init[trace_index, s_idx] = 0.5 * alpha_value
-                    A_init[trace_index, m_idx] = 0.85 * area_value
-                    A_init[trace_index, s_idx] = 0.15 * area_value
+                    alpha_init[trace_index, s_idx] = alpha_sh
+                    A_init[trace_index, m_idx] = area_value
+                    A_init[trace_index, s_idx] = area_sh
+                    # Update total area for prior_hints computation
+                    area_trace[trace_index] = area_value + area_sh
+
+            _fwhm_diag_list.append(
+                {
+                    "peak_name": getattr(peak, "name", f"peak_{logical_index}"),
+                    "logical_index": logical_index,
+                    "low": low,
+                    "high": high,
+                    "side": side,
+                    "T_main": mode_loc,
+                    "mu_loc": mu_loc,
+                    "sigma_loc": sigma_loc,
+                    "alpha_loc": alpha_loc,
+                    "sep_est": sep_est_for_prior,
+                    "tier_used": _tier_used,
+                    "t1_n_cand": _t1_n_cand,
+                    "t1_sh_apexes": _t1_sh_apexes.copy(),
+                    "t1_raw_sep": _t1_raw_sep,
+                    "t2_sigma_ref": _t2_sigma_ref,
+                    "t2_gauss_hwhm": _t2_gauss_hwhm,
+                    "t2_median_hwhm": _t2_median_hwhm,
+                    "t2_excess": _t2_excess,
+                    "t3_sigma_fb": _t3_sigma_fb,
+                    "t3_geo": _t3_geo,
+                    "pass2_sep_est": _pass2.get("sep_est"),
+                    "pass2_n_valid": _pass2.get("n_valid", 0),
+                    "pass2_area_split": _pass2.get("area_split"),
+                    "pass2_sh_apex_times": _pass2.get("sh_apex_times", []),
+                    "pass2_trace_indices": _pass2.get("trace_indices", []),
+                    "pass2_snr_list": _pass2.get("snr_list", []),
+                    "mode_trace": mode_trace.copy(),
+                    "xi_trace": xi_trace.copy(),
+                    "sigma_trace": sigma_trace.copy(),
+                    "alpha_trace": alpha_trace.copy(),
+                    "area_trace": area_trace.copy(),
+                    "w_left": w_left.copy(),
+                    "w_right": w_right.copy(),
+                    "keep_width": keep_width.copy(),
+                    "gate_keep_col": gate_keep[:, logical_index].copy(),
+                    "width_valid": width_valid.copy(),
+                    "main_area_per_trace": A_init[:, m_idx].copy(),
+                }
+            )
 
             area_kept = area_trace[keep_width]
             area_loc, area_scale = _weighted_robust_location_scale(
@@ -961,6 +1162,7 @@ class Fitter:
                     area_loc=float(area_loc),
                     area_scale=float(area_scale),
                     trace_count=int(np.sum(keep_width)),
+                    sep_est=float(sep_est_for_prior),
                 )
             )
 
@@ -971,6 +1173,7 @@ class Fitter:
             max(float(self.sigma_max), 1.5 * float(self.sigma_min)),
         )
         A_init = np.maximum(A_init, 1e-8)
+        self._fwhm_diag = _fwhm_diag_list
         return (
             jnp.asarray(mu_init, dtype=jnp.float32),
             jnp.asarray(sigma_init, dtype=jnp.float32),
@@ -978,6 +1181,236 @@ class Fitter:
             jnp.asarray(alpha_init, dtype=jnp.float32),
             prior_hints,
         )
+
+    # ------------------------------------------------------------------
+    # Second-pass shoulder FWHM helpers
+    # ------------------------------------------------------------------
+
+    def _compute_main_residuals_for_window(
+        self,
+        d: dict,
+        t_win: np.ndarray,
+        sig_win: np.ndarray,
+    ) -> np.ndarray:
+        """Subtract per-trace main-component skew-normal fit from windowed signal.
+
+        Parameters
+        ----------
+        d:
+            A ``_fwhm_diag``-compatible dict containing ``xi_trace``,
+            ``sigma_trace``, ``alpha_trace``, ``mu_loc``, ``sigma_loc``,
+            ``alpha_loc``, and ``main_area_per_trace``.
+        t_win:
+            1-D time grid for the window, shape ``(n_t_win,)``.
+        sig_win:
+            Baseline-corrected signal sliced to the window,
+            shape ``(n_trace, n_t_win)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Residuals, shape ``(n_trace, n_t_win)``.  Rows where the main
+            component cannot be reconstructed are filled with ``nan``.
+        """
+        n_trace = sig_win.shape[0]
+        residuals = np.full_like(sig_win, np.nan, dtype=float)
+        for t in range(n_trace):
+            xi_v = (
+                float(d["xi_trace"][t])
+                if np.isfinite(d["xi_trace"][t])
+                else float(d["mu_loc"])
+            )
+            sig_v = (
+                float(d["sigma_trace"][t])
+                if np.isfinite(d["sigma_trace"][t])
+                else float(d["sigma_loc"])
+            )
+            alp_v = (
+                float(d["alpha_trace"][t])
+                if np.isfinite(d["alpha_trace"][t])
+                else float(d["alpha_loc"])
+            )
+            area_main = float(d["main_area_per_trace"][t])
+            if area_main < 1e-8 or sig_v < 1e-6:
+                continue
+            pdf_vals = np.asarray(
+                skew_normal_pdf(
+                    jnp.asarray(t_win, dtype=jnp.float32),
+                    jnp.asarray([xi_v], dtype=jnp.float32),
+                    jnp.asarray([sig_v], dtype=jnp.float32),
+                    jnp.asarray([alp_v], dtype=jnp.float32),
+                )[:, 0],
+                dtype=float,
+            )
+            residuals[t] = sig_win[t] - area_main * pdf_vals
+        return residuals
+
+    def _second_pass_shoulder_fwhm(
+        self,
+        d: dict,
+        time_matrix: np.ndarray,
+        signal_matrix: np.ndarray,
+        *,
+        window_sigma: float = 3.0,
+        min_n: int = 3,
+        min_shoulder_fraction: float = 0.04,
+    ) -> dict:
+        """Data-driven shoulder separation from FWHM on main-fit residuals.
+
+        Subtracts the main skew-normal reconstruction (Pass-1 parameters) from
+        the baseline-corrected signal, cuts to a window on the shoulder side
+        (``window_sigma`` × ``sigma_loc`` wide), and runs FWHM analysis on
+        the residuals to locate the shoulder apex.
+
+        Parameters
+        ----------
+        d:
+            A dict with keys ``T_main``, ``sigma_loc``, ``mu_loc``,
+            ``alpha_loc``, ``low``, ``high``, ``side``, ``xi_trace``,
+            ``sigma_trace``, ``alpha_trace``, ``main_area_per_trace``.
+        time_matrix:
+            ``[n_trace, n_time]`` (or ``[n_time]``) time axis.
+        signal_matrix:
+            ``[n_trace, n_time]`` baseline-corrected signal.
+        window_sigma:
+            How many ``sigma_loc`` to extend the window on the shoulder side.
+        min_n:
+            Minimum number of traces with a valid shoulder FWHM for the
+            result to be accepted.
+        min_shoulder_fraction:
+            Minimum ratio of residual shoulder-peak height to the
+            baseline-corrected signal at ``T_main``.  Traces where the
+            shoulder residual is smaller than this fraction of the main
+            signal are excluded from the apex median.  This filters out
+            early traces where the shoulder is below the modeling-noise
+            floor (default 0.04 = 4 %).
+
+        Returns
+        -------
+        dict
+            ``sep_est`` (unsigned, mode-to-mode), ``sigma_sh``,
+            ``area_split``, ``n_valid``, ``sh_apex_times``,
+            ``trace_indices``, ``snr_list``.  When the estimate is
+            unreliable ``sep_est`` is ``None`` and ``n_valid < min_n``.
+        """
+        T_main = float(d["T_main"])
+        sigma_loc = float(d["sigma_loc"])
+        low = float(d["low"])
+        high = float(d["high"])
+        side = int(d["side"])
+        direction = 1.0 if side > 0 else -1.0
+        span = max(high - low, 1e-4)
+
+        # Shoulder-side window: [T_main … T_main + direction × window_sigma × σ]
+        win_end = T_main + direction * window_sigma * sigma_loc
+        if direction > 0:
+            win_lo, win_hi = T_main, win_end
+        else:
+            win_lo, win_hi = win_end, T_main
+        win_lo = float(np.clip(win_lo, low, high))
+        win_hi = float(np.clip(win_hi, low, high))
+        if win_hi - win_lo < 0.002 * span:
+            return {
+                "n_valid": 0,
+                "sep_est": None,
+                "sh_apex_times": [],
+                "trace_indices": [],
+                "snr_list": [],
+            }
+
+        t_ref = time_matrix[0] if time_matrix.ndim == 2 else time_matrix
+        window_mask = (t_ref >= win_lo) & (t_ref <= win_hi)
+        if int(np.sum(window_mask)) < 3:
+            return {
+                "n_valid": 0,
+                "sep_est": None,
+                "sh_apex_times": [],
+                "trace_indices": [],
+                "snr_list": [],
+            }
+
+        t_win = t_ref[window_mask]
+        sig_win = signal_matrix[:, window_mask]
+
+        residuals = self._compute_main_residuals_for_window(d, t_win, sig_win)
+
+        gaussian_hwhm_factor = float(np.sqrt(2.0 * np.log(2.0)))
+        # Index of T_main in the window — used for SNR reference height
+        idx_T_main = int(np.argmin(np.abs(t_win - T_main)))
+        sh_apex_times: list[float] = []
+        sh_sigmas: list[float] = []
+        sh_areas: list[float] = []
+        sh_main_areas: list[float] = []
+        _snr_list: list[float] = []
+        _trace_indices_list: list[int] = []
+
+        for t in range(residuals.shape[0]):
+            row = residuals[t]
+            if not np.all(np.isfinite(row)):
+                continue
+            pos = np.clip(row, 0.0, None)
+            if float(np.max(pos)) < 1e-8:
+                continue
+            payload = _compute_normalized_fwhm(t_win, row, half_level=0.5)
+            if not np.isfinite(payload["apex_time"]):
+                continue
+            if not np.isfinite(payload["fwhm"]):
+                continue
+            apex_t = float(payload["apex_time"])
+            # Require shoulder apex on the shoulder side of the main apex
+            if direction > 0 and apex_t <= T_main:
+                continue
+            if direction < 0 and apex_t >= T_main:
+                continue
+            # SNR filter: residual shoulder peak must be at least min_shoulder_fraction
+            # of the baseline-corrected signal at T_main.  This excludes early traces
+            # where the shoulder is below the main-peak modeling noise floor, so that
+            # the unweighted median is only computed from traces where the shoulder is
+            # genuinely visible in the residual.
+            h_ref = max(float(sig_win[t, idx_T_main]), 1e-10)
+            apex_height_res = float(payload["apex_height"])
+            snr = apex_height_res / h_ref
+            if snr < min_shoulder_fraction:
+                continue  # shoulder too small relative to main — likely modeling noise
+            sh_apex_times.append(apex_t)
+            sh_sigmas.append(float(payload["fwhm"]) / (2.0 * gaussian_hwhm_factor))
+            sh_areas.append(float(np.trapz(pos, t_win)))
+            sh_main_areas.append(float(d["main_area_per_trace"][t]))
+            _snr_list.append(snr)
+            _trace_indices_list.append(t)
+
+        n_valid = len(sh_apex_times)
+        if n_valid < min_n:
+            return {
+                "n_valid": n_valid,
+                "sep_est": None,
+                "sh_apex_times": sh_apex_times,
+                "trace_indices": _trace_indices_list,
+                "snr_list": _snr_list,
+            }
+
+        # Unweighted median across SNR-filtered traces. Each included trace's shoulder
+        # estimate contributes equally.  Early traces where the shoulder is invisible
+        # have already been removed by the SNR filter above.
+        sep_est = abs(float(np.median(sh_apex_times)) - T_main)
+        sigma_sh = float(np.median(sh_sigmas))
+        split_ratios = np.array(
+            [
+                sa / (sa + ma) if (sa + ma) > 0.0 else 0.25
+                for sa, ma in zip(sh_areas, sh_main_areas)
+            ],
+            dtype=float,
+        )
+        area_split = float(np.median(split_ratios))
+        return {
+            "sep_est": sep_est,
+            "sigma_sh": sigma_sh,
+            "area_split": area_split,
+            "n_valid": n_valid,
+            "sh_apex_times": sh_apex_times,
+            "trace_indices": _trace_indices_list,
+            "snr_list": _snr_list,
+        }
 
     def _build_model_inputs(
         self,
@@ -1008,9 +1441,7 @@ class Fitter:
         self.A_init = A_init
         self.alpha_init = alpha_init
 
-        intercept_anchor, intercept_prior_mean, intercept_prior_scale = (
-            self._baseline_intercept_prior(use_aligned_time=use_aligned_time)
-        )
+        baseline_priors = self.get_baseline_priors(use_aligned_time=use_aligned_time)
         peak_mask = (
             jnp.any(peak_masks, axis=0)
             if peak_masks.shape[0] > 0
@@ -1019,161 +1450,179 @@ class Fitter:
         peak_mask_arg: jnp.ndarray | None = (
             peak_mask if bool(jnp.any(peak_mask)) else None
         )
-        logical_mu_lo = np.asarray(metadata["logical_mu_lo"], dtype=float).reshape(-1)
-        logical_mu_hi = np.asarray(metadata["logical_mu_hi"], dtype=float).reshape(-1)
-        logical_span = np.maximum(logical_mu_hi - logical_mu_lo, 1e-4)
-        n_logical = logical_mu_lo.size
-        logical_main_component_index = np.asarray(
-            metadata["logical_main_component_index"], dtype=int
-        ).reshape(-1)
 
-        mu_prior_loc = np.empty((n_logical,), dtype=float)
-        mu_prior_scale = np.empty((n_logical,), dtype=float)
-        for logical_index in range(n_logical):
-            hint = (
-                self.peak_prior_hints[logical_index]
-                if logical_index < len(self.peak_prior_hints)
-                else None
-            )
-            loc_hint = np.nan if hint is None else float(hint.mu_loc)
-            scale_hint = np.nan if hint is None else float(hint.mu_scale)
+        # Peak-level geometry
+        sorted_peaks: list[PeakAnnotation] = metadata["sorted_peaks"]
+        n_peak = len(sorted_peaks)
+        mu_lo_np = np.asarray(metadata["logical_mu_lo"], dtype=float)  # [n_peak]
+        mu_hi_np = np.asarray(metadata["logical_mu_hi"], dtype=float)  # [n_peak]
+        logical_span = np.maximum(mu_hi_np - mu_lo_np, 1e-4)
+        shoulder_side_np = np.asarray(
+            metadata["logical_shoulder_side"], dtype=int
+        )  # [n_peak]
+        shoulder_enabled = shoulder_side_np != 0
+        shoulder_peak_index = np.where(shoulder_enabled)[0].astype(np.int32)
+        main_idx = np.asarray(metadata["logical_main_component_index"], dtype=int)
+        shoulder_idx_raw = np.asarray(
+            metadata["logical_shoulder_component_index"], dtype=int
+        )
+        shoulder_safe = np.where(shoulder_idx_raw >= 0, shoulder_idx_raw, main_idx)
 
-            loc_fallback = 0.5 * (
-                logical_mu_lo[logical_index] + logical_mu_hi[logical_index]
-            )
-            scale_fallback = max(0.02 * logical_span[logical_index], 1e-4)
-
-            loc_value = loc_hint if np.isfinite(loc_hint) else loc_fallback
-            scale_value = (
-                scale_hint
-                if np.isfinite(scale_hint) and scale_hint > 0.0
-                else scale_fallback
-            )
-            mu_prior_loc[logical_index] = np.clip(
-                loc_value, logical_mu_lo[logical_index], logical_mu_hi[logical_index]
-            )
-            mu_prior_scale[logical_index] = max(scale_value, 1e-6)
-
-        sigma_min = float(self.sigma_min)
-        sigma_max = float(self.sigma_max)
-        sigma_prior_loc = np.empty((n_logical,), dtype=float)
-        sigma_prior_scale = np.empty((n_logical,), dtype=float)
+        # Reshape init arrays: [n_trace, n_component_old] → [n_trace, n_peak, 2]
+        # where axis=-1 index 0 = main component, 1 = shoulder component.
+        A_init_np = np.asarray(A_init, dtype=float)
+        A_init_model = np.stack(
+            [
+                A_init_np[:, main_idx],
+                A_init_np[:, shoulder_safe] * shoulder_enabled[None, :],
+            ],
+            axis=-1,
+        )  # [n_trace, n_peak, 2]
+        mu_init_np = np.asarray(mu_init, dtype=float)
+        mu_init_model = np.stack(
+            [mu_init_np[:, main_idx], mu_init_np[:, shoulder_safe]], axis=-1
+        )  # [n_trace, n_peak, 2]
         sigma_init_np = np.asarray(sigma_init, dtype=float)
+        sigma_init_model = np.stack(
+            [sigma_init_np[:, main_idx], sigma_init_np[:, shoulder_safe]], axis=-1
+        )  # [n_trace, n_peak, 2]
         alpha_init_np = np.asarray(alpha_init, dtype=float)
-        for logical_index in range(n_logical):
-            hint = (
-                self.peak_prior_hints[logical_index]
-                if logical_index < len(self.peak_prior_hints)
-                else None
-            )
-            loc_hint = np.nan if hint is None else float(hint.sigma_loc)
-            scale_hint = np.nan if hint is None else float(hint.sigma_scale)
+        alpha_init_model = np.stack(
+            [alpha_init_np[:, main_idx], alpha_init_np[:, shoulder_safe]], axis=-1
+        )  # [n_trace, n_peak, 2]
 
-            main_component = int(logical_main_component_index[logical_index])
-            if 0 <= main_component < sigma_init_np.shape[1]:
-                init_column = sigma_init_np[:, main_component]
-            else:
-                init_column = np.asarray([], dtype=float)
-            finite_init = init_column[np.isfinite(init_column) & (init_column > 0.0)]
-            if finite_init.size > 0:
-                loc_fallback = float(np.nanmedian(finite_init))
-            else:
-                loc_fallback = max(logical_span[logical_index] / 6.0, 1e-4)
+        # component_to_logical for new flat layout [main0, sh0, main1, sh1, ...]
+        component_to_logical = np.repeat(np.arange(n_peak), 2)  # [2*n_peak]
 
-            scale_fallback = max(0.2 * loc_fallback, 1e-4)
-            loc_value = (
-                loc_hint if np.isfinite(loc_hint) and loc_hint > 0.0 else loc_fallback
-            )
-            scale_value = (
-                scale_hint
-                if np.isfinite(scale_hint) and scale_hint > 0.0
-                else scale_fallback
-            )
-            sigma_prior_loc[logical_index] = np.clip(
-                loc_value, sigma_min + 1e-6, sigma_max - 1e-6
-            )
-            sigma_prior_scale[logical_index] = max(scale_value, 1e-6)
+        # Per-peak priors from prior_hints.
+        # For shoulder peaks, shift mu_center_loc from the main-peak apex to the
+        # midpoint between main and shoulder modes (model parameterisation uses
+        # mu_center = midpoint, so anchoring at T_main would allow the shoulder
+        # component to drift onto the main peak).
+        mu_center_loc_raw = np.array([h.mu_loc for h in prior_hints], dtype=float)
+        for _i, _h in enumerate(prior_hints):
+            if shoulder_enabled[_i] and _h.sep_est > 1e-6:
+                _side = float(shoulder_side_np[_i])
+                mu_center_loc_raw[_i] = _h.mu_loc + 0.5 * _side * _h.sep_est
+        mu_center_loc = np.clip(mu_center_loc_raw, mu_lo_np, mu_hi_np).astype(float)
+        mu_center_scale = np.maximum([h.mu_scale for h in prior_hints], 1e-6).astype(
+            float
+        )
 
-        alpha_prior_loc = np.empty((n_logical,), dtype=float)
-        alpha_prior_scale = np.empty((n_logical,), dtype=float)
-        for logical_index in range(n_logical):
-            hint = (
-                self.peak_prior_hints[logical_index]
-                if logical_index < len(self.peak_prior_hints)
-                else None
-            )
-            alpha_loc_hint = np.nan if hint is None else float(hint.alpha_loc)
-            alpha_scale_hint = np.nan if hint is None else float(hint.alpha_scale)
+        sigma_loc_np = np.asarray([h.sigma_loc for h in prior_hints], dtype=float)
+        sigma_scale_np = np.asarray([h.sigma_scale for h in prior_hints], dtype=float)
+        sigma_prior_loc = np.stack(
+            [sigma_loc_np, 0.75 * sigma_loc_np], axis=-1
+        )  # [n_peak, 2]
+        sigma_prior_scale = np.stack(
+            [sigma_scale_np, sigma_scale_np], axis=-1
+        )  # [n_peak, 2]
 
-            main_component = int(logical_main_component_index[logical_index])
-            if 0 <= main_component < alpha_init_np.shape[1]:
-                alpha_init_col = alpha_init_np[:, main_component]
-            else:
-                alpha_init_col = np.asarray([], dtype=float)
-            alpha_init_finite = alpha_init_col[np.isfinite(alpha_init_col)]
-            if alpha_init_finite.size > 0:
-                alpha_loc_fallback = float(np.nanmedian(alpha_init_finite))
-                alpha_mad = float(
-                    np.nanmedian(np.abs(alpha_init_finite - alpha_loc_fallback))
-                )
-                alpha_scale_fallback = max(
-                    1.4826 * alpha_mad,
-                    float(self.alpha_prior_sd),
-                    1e-3,
-                )
-            else:
-                alpha_loc_fallback = 0.0
-                alpha_scale_fallback = max(float(self.alpha_prior_sd), 1e-3)
-            alpha_loc_value = (
-                alpha_loc_hint if np.isfinite(alpha_loc_hint) else alpha_loc_fallback
-            )
-            alpha_scale_value = (
-                alpha_scale_hint
-                if np.isfinite(alpha_scale_hint) and alpha_scale_hint > 0.0
-                else alpha_scale_fallback
-            )
-            alpha_prior_loc[logical_index] = alpha_loc_value
-            alpha_prior_scale[logical_index] = max(alpha_scale_value, 1e-3)
+        alpha_loc_np = np.asarray([h.alpha_loc for h in prior_hints], dtype=float)
+        alpha_scale_np = np.maximum([h.alpha_scale for h in prior_hints], 1e-3).astype(
+            float
+        )
+        alpha_prior_loc = np.stack(
+            [alpha_loc_np, 0.5 * alpha_loc_np], axis=-1
+        )  # [n_peak, 2]
+        alpha_prior_scale = np.stack(
+            [alpha_scale_np, alpha_scale_np], axis=-1
+        )  # [n_peak, 2]
+
+        area_total_loc = np.maximum([h.area_loc for h in prior_hints], 1e-8).astype(
+            float
+        )
+        area_total_scale = np.maximum([h.area_scale for h in prior_hints], 1e-6).astype(
+            float
+        )
+
+        # Beta(1, 1) = Uniform(0, 1) for shoulder area split.
+        # No prior preference on how total area is split between main and shoulder.
+        # In a kinetic series, area_split must range from ~1 (early, all main) to
+        # ~0 (late, all shoulder). Separation parameterisation (mu_center ± separation/2)
+        # already prevents component-swap, so the prior uses maximum entropy.
+        area_split_alpha = np.where(shoulder_enabled, 1.0, 1.0)
+        area_split_beta = np.where(shoulder_enabled, 1.0, 1.0)
+
+        # Separation bounds: data-driven around sep_est when available, else geometric.
+        # Tight [0.5×, 2.5×] bounds prevent the component swap (shoulder stealing the
+        # main peak) that occurs when the prior is wide and uninformative.
+        separation_low = np.zeros(n_peak, dtype=float)
+        separation_high = np.full(n_peak, 1e-6, dtype=float)
+        separation_est = np.zeros(n_peak, dtype=float)
+        for _i, _h in enumerate(prior_hints):
+            if shoulder_enabled[_i]:
+                _s = _h.sep_est
+                if _s > 1e-6:
+                    _lo = float(
+                        np.clip(
+                            0.5 * _s, 0.005 * logical_span[_i], 0.40 * logical_span[_i]
+                        )
+                    )
+                    _hi = float(np.clip(2.5 * _s, _lo + 1e-6, 0.80 * logical_span[_i]))
+                else:
+                    _lo = 0.04 * float(logical_span[_i])
+                    _hi = 0.50 * float(logical_span[_i])
+                    _s = 0.5 * (_lo + _hi)
+                separation_low[_i] = _lo
+                separation_high[_i] = _hi
+                separation_est[_i] = _s
+
+        # Per-trace noise prior: signal std in peak windows
+        signal_np = np.asarray(self.signal, dtype=float)
+        if peak_mask_arg is not None:
+            peak_mask_np = np.asarray(peak_mask, dtype=bool)
+            masked_signal = np.where(peak_mask_np, signal_np, np.nan)
+        else:
+            masked_signal = signal_np
+        sigma_y_prior_loc = np.nanstd(masked_signal, axis=1)
+        sigma_y_prior_loc = np.where(
+            np.isfinite(sigma_y_prior_loc) & (sigma_y_prior_loc > 0),
+            sigma_y_prior_loc,
+            1.0,
+        )
 
         model_inputs = {
             "x": jnp.asarray(time_axis, dtype=jnp.float32),
             "y": jnp.asarray(self.signal, dtype=jnp.float32),
-            "mu_lo": jnp.asarray(metadata["mu_lo"], dtype=jnp.float32),
-            "mu_hi": jnp.asarray(metadata["mu_hi"], dtype=jnp.float32),
-            "sigma_min": float(self.sigma_min),
-            "sigma_max": float(self.sigma_max),
-            "logical_mu_lo": jnp.asarray(metadata["logical_mu_lo"], dtype=jnp.float32),
-            "logical_mu_hi": jnp.asarray(metadata["logical_mu_hi"], dtype=jnp.float32),
-            "logical_main_component_index": jnp.asarray(
-                metadata["logical_main_component_index"], dtype=jnp.int32
-            ),
-            "logical_shoulder_component_index": jnp.asarray(
-                metadata["logical_shoulder_component_index"], dtype=jnp.int32
-            ),
-            "logical_shoulder_side": jnp.asarray(
-                metadata["logical_shoulder_side"], dtype=jnp.int32
-            ),
-            "component_to_logical_index": jnp.asarray(
-                metadata["component_to_logical_index"], dtype=jnp.int32
-            ),
-            "component_include_in_total_area": jnp.asarray(
-                metadata["component_include_in_total_area"], dtype=bool
-            ),
-            "mu_init": mu_init,
-            "sigma_init": sigma_init,
-            "A_init": A_init,
-            "alpha_init": alpha_init,
-            "mu_prior_loc": jnp.asarray(mu_prior_loc, dtype=jnp.float32),
-            "mu_prior_scale": jnp.asarray(mu_prior_scale, dtype=jnp.float32),
+            "mu_lo": jnp.asarray(mu_lo_np, dtype=jnp.float32),
+            "mu_hi": jnp.asarray(mu_hi_np, dtype=jnp.float32),
+            "shoulder_side": jnp.asarray(shoulder_side_np, dtype=jnp.int32),
+            "shoulder_peak_index": jnp.asarray(shoulder_peak_index, dtype=jnp.int32),
+            "A_init": jnp.asarray(A_init_model, dtype=jnp.float32),
+            "mu_center_loc": jnp.asarray(mu_center_loc, dtype=jnp.float32),
+            "mu_center_scale": jnp.asarray(mu_center_scale, dtype=jnp.float32),
+            "separation_low": jnp.asarray(separation_low, dtype=jnp.float32),
+            "separation_high": jnp.asarray(separation_high, dtype=jnp.float32),
             "sigma_prior_loc": jnp.asarray(sigma_prior_loc, dtype=jnp.float32),
             "sigma_prior_scale": jnp.asarray(sigma_prior_scale, dtype=jnp.float32),
             "alpha_prior_loc": jnp.asarray(alpha_prior_loc, dtype=jnp.float32),
             "alpha_prior_scale": jnp.asarray(alpha_prior_scale, dtype=jnp.float32),
+            "area_total_loc": jnp.asarray(area_total_loc, dtype=jnp.float32),
+            # area_total_scale kept as metadata for diagnostics only (model uses LogNormal CV=0.3)
+            "area_total_scale": jnp.asarray(area_total_scale, dtype=jnp.float32),
+            "area_split_alpha": jnp.asarray(area_split_alpha, dtype=jnp.float32),
+            "area_split_beta": jnp.asarray(area_split_beta, dtype=jnp.float32),
+            "baseline_intercept_loc": jnp.asarray(
+                baseline_priors.intercept, dtype=jnp.float32
+            ),
+            "baseline_intercept_scale": jnp.asarray(
+                baseline_priors.intercept_scale, dtype=jnp.float32
+            ),
+            "baseline_slope_loc": jnp.asarray(baseline_priors.slope, dtype=jnp.float32),
+            "baseline_slope_scale": jnp.asarray(
+                baseline_priors.slope_scale, dtype=jnp.float32
+            ),
+            "sigma_y_prior_loc": jnp.asarray(sigma_y_prior_loc, dtype=jnp.float32),
             "peak_mask": peak_mask_arg,
-            "intercept_anchor": jnp.asarray(intercept_anchor, dtype=jnp.float32),
-            "intercept_prior_mean": float(intercept_prior_mean),
-            "intercept_prior_scale": float(intercept_prior_scale),
-            "alpha_prior_sd": float(self.alpha_prior_sd),
+            # Extra metadata used by post-processing/plotting (not passed to numpyro model)
+            "component_to_logical_index": jnp.asarray(
+                component_to_logical, dtype=jnp.int32
+            ),
+            "separation_est": jnp.asarray(separation_est, dtype=jnp.float32),
+            "mu_init_model": jnp.asarray(mu_init_model, dtype=jnp.float32),
+            "sigma_init_model": jnp.asarray(sigma_init_model, dtype=jnp.float32),
+            "alpha_init_model": jnp.asarray(alpha_init_model, dtype=jnp.float32),
         }
         self.model_inputs = model_inputs
         return model_inputs
@@ -1181,148 +1630,175 @@ class Fitter:
     def _build_init_values_for_nuts(
         self, model_inputs: dict[str, Any]
     ) -> dict[str, Any]:
-        mu_init = np.asarray(model_inputs["mu_init"], dtype=float)
-        sigma_init = np.asarray(model_inputs["sigma_init"], dtype=float)
-        A_init = np.asarray(model_inputs["A_init"], dtype=float)
-        main_index = np.asarray(model_inputs["logical_main_component_index"], dtype=int)
-        shoulder_index = np.asarray(
-            model_inputs["logical_shoulder_component_index"], dtype=int
-        )
-        has_shoulder = shoulder_index >= 0
-        shoulder_safe = np.where(has_shoulder, shoulder_index, 0)
+        n_peak = int(jnp.asarray(model_inputs["mu_lo"]).shape[0])
+        shoulder_side = np.asarray(model_inputs["shoulder_side"], dtype=int)  # [n_peak]
+        shoulder_enabled = shoulder_side != 0
+        shoulder_peak_index = np.asarray(model_inputs["shoulder_peak_index"], dtype=int)
+        n_shoulder_peak = int(shoulder_peak_index.shape[0])
 
-        mu_main = mu_init[:, main_index]
-        mu_shoulder = mu_init[:, shoulder_safe]
-        mu_center = mu_main + 0.5 * has_shoulder[None, :] * (mu_shoulder - mu_main)
-        if "mu_prior_loc" in model_inputs:
-            mu_prior_loc = np.asarray(
-                model_inputs["mu_prior_loc"], dtype=float
-            ).reshape(-1)
-            if mu_prior_loc.size == mu_center.shape[1]:
-                mu_center = np.broadcast_to(
-                    mu_prior_loc[None, :], mu_center.shape
-                ).copy()
-        mu_center_shared = np.nanmedian(mu_center, axis=0)
+        mu_lo = np.asarray(model_inputs["mu_lo"], dtype=float)
+        mu_hi = np.asarray(model_inputs["mu_hi"], dtype=float)
+        logical_span = np.maximum(mu_hi - mu_lo, 1e-4)
 
-        separation_trace = np.abs(mu_shoulder - mu_main)
-        separation = np.nanmedian(separation_trace, axis=0)
+        # log_sigma: [n_peak, 2]
+        sigma_prior_loc = np.asarray(model_inputs["sigma_prior_loc"], dtype=float)
+        log_sigma = np.log(np.maximum(sigma_prior_loc, 1e-6))
 
-        logical_mu_lo = np.asarray(model_inputs["logical_mu_lo"], dtype=float)
-        logical_mu_hi = np.asarray(model_inputs["logical_mu_hi"], dtype=float)
-        logical_span = np.maximum(logical_mu_hi - logical_mu_lo, 1e-4)
-        separation_floor = 0.05 * logical_span
-        separation = np.where(
-            has_shoulder, np.maximum(separation, separation_floor), 1e-4
+        # alpha: [n_peak, 2]
+        alpha_prior_loc = np.asarray(model_inputs["alpha_prior_loc"], dtype=float)
+        alpha = np.where(np.isfinite(alpha_prior_loc), alpha_prior_loc, 0.0)
+
+        # mu_center: [n_peak]
+        mu_center_loc = np.asarray(model_inputs["mu_center_loc"], dtype=float)
+        mu_center = np.clip(
+            mu_center_loc, mu_lo + 1e-6 * logical_span, mu_hi - 1e-6 * logical_span
         )
 
-        sigma_min = float(model_inputs["sigma_min"])
-        sigma_max = float(model_inputs["sigma_max"])
-        sigma_safe = np.clip(sigma_init, sigma_min, sigma_max)
-        n_logical = int(np.asarray(main_index, dtype=int).shape[0])
-        sigma_main = sigma_safe[:, main_index]
-        sigma_logical_seed = np.nanmedian(sigma_main, axis=0)
-        if "sigma_prior_loc" in model_inputs:
-            sigma_prior_loc = np.asarray(model_inputs["sigma_prior_loc"], dtype=float)
-            sigma_seed = None
-            if sigma_prior_loc.ndim == 1 and sigma_prior_loc.size == n_logical:
-                sigma_seed = sigma_prior_loc.copy()
-            elif sigma_prior_loc.ndim == 2 and sigma_prior_loc.shape[1] == n_logical:
-                sigma_seed = np.nanmedian(sigma_prior_loc, axis=0)
-            if sigma_seed is not None:
-                sigma_logical_seed = np.where(
-                    np.isfinite(sigma_seed) & (sigma_seed > 0.0),
-                    sigma_seed,
-                    sigma_logical_seed,
-                )
-        sigma_logical_seed = np.clip(sigma_logical_seed, sigma_min, sigma_max)
-        log_sigma = np.log(sigma_logical_seed)
-        log_sigma_low = np.log(sigma_min)
-        log_sigma_high = np.log(sigma_max)
-        log_sigma_eps = 1e-6
-        if log_sigma_high > log_sigma_low + 2.0 * log_sigma_eps:
-            log_sigma = np.clip(
-                log_sigma,
-                log_sigma_low + log_sigma_eps,
-                log_sigma_high - log_sigma_eps,
-            )
-        alpha = np.zeros((n_logical,), dtype=float)
-        if "alpha_prior_loc" in model_inputs:
-            alpha_prior_loc = np.asarray(model_inputs["alpha_prior_loc"], dtype=float)
-            if alpha_prior_loc.ndim == 1 and alpha_prior_loc.size == alpha.size:
-                alpha = np.where(np.isfinite(alpha_prior_loc), alpha_prior_loc, alpha)
-            elif alpha_prior_loc.ndim == 2 and alpha_prior_loc.shape[1] == alpha.size:
-                alpha_seed = np.nanmedian(alpha_prior_loc, axis=0)
-                alpha = np.where(np.isfinite(alpha_seed), alpha_seed, alpha)
-        area_low = np.full_like(A_init, 1e-8, dtype=float)
-        area_high = np.maximum(
-            2.0 * np.asarray(model_inputs["A_init"], dtype=float), area_low + 1e-8
-        )
-        area_span = np.maximum(area_high - area_low, 1e-12)
-        area_eps = 1e-6 * area_span
-        area = np.clip(
-            np.asarray(A_init, dtype=float),
-            area_low + area_eps,
-            area_high - area_eps,
+        # mu_trace_offset: [n_trace, n_peak] — start at zero
+        n_trace = int(jnp.asarray(model_inputs["x"]).shape[0])
+        mu_trace_offset = np.zeros((n_trace, n_peak), dtype=float)
+
+        # A_total: [n_trace, n_peak] — init at trapezoid-based area estimate (sum of components)
+        # LogNormal prior has no hard bounds, so any positive value is valid.
+        A_init = np.asarray(model_inputs["A_init"], dtype=float)  # [n_trace, n_peak, 2]
+        A_total = np.maximum(np.sum(A_init, axis=-1), 1e-8)  # [n_trace, n_peak]
+
+        # baseline_intercept: [n_trace]
+        baseline_intercept = np.asarray(
+            model_inputs["baseline_intercept_loc"], dtype=float
         )
 
-        mu_center_low = logical_mu_lo
-        mu_center_high = logical_mu_hi
-        mu_center_span = np.maximum(mu_center_high - mu_center_low, 1e-6)
-        mu_center_eps = 1e-6 * mu_center_span
-        mu_center_shared = np.clip(
-            mu_center_shared,
-            mu_center_low + mu_center_eps,
-            mu_center_high - mu_center_eps,
-        )
-        if "mu_prior_scale" in model_inputs:
-            mu_prior_scale = np.asarray(
-                model_inputs["mu_prior_scale"], dtype=float
-            ).reshape(-1)
-            if mu_prior_scale.size != n_logical:
-                mu_prior_scale = np.broadcast_to(
-                    np.nanmedian(mu_prior_scale), (n_logical,)
-                )
-        else:
-            mu_prior_scale = 0.02 * logical_span
-        mu_prior_scale = np.where(
-            np.isfinite(mu_prior_scale) & (mu_prior_scale > 0.0),
-            mu_prior_scale,
-            0.02 * logical_span,
-        )
-        mu_trace_offset = np.zeros((mu_init.shape[0], n_logical), dtype=float)
+        # baseline_slope: [n_trace]
+        baseline_slope = np.asarray(model_inputs["baseline_slope_loc"], dtype=float)
 
-        y_matrix = np.asarray(model_inputs["y"], dtype=float)
-        sigma_y = np.nanstd(y_matrix, axis=1)
-        sigma_y = np.where(np.isfinite(sigma_y), sigma_y, 1.0)
-        sigma_y = np.maximum(sigma_y, 1e-3)
+        # sigma_y: [n_trace]
+        sigma_y_prior = np.asarray(model_inputs["sigma_y_prior_loc"], dtype=float)
+        sigma_y = np.where(
+            np.isfinite(sigma_y_prior) & (sigma_y_prior > 0), sigma_y_prior, 1.0
+        )
 
-        intercept_anchor = np.asarray(
-            model_inputs.get("intercept_anchor", np.zeros((y_matrix.shape[0],))),
-            dtype=float,
-        ).reshape(-1)
-        if intercept_anchor.size != y_matrix.shape[0]:
-            intercept_anchor = np.broadcast_to(
-                np.nanmedian(intercept_anchor), (y_matrix.shape[0],)
-            )
-        return {
+        init: dict[str, Any] = {
             "log_sigma": jnp.asarray(log_sigma, dtype=jnp.float32),
             "alpha": jnp.asarray(alpha, dtype=jnp.float32),
-            "mu_center": jnp.asarray(mu_center_shared, dtype=jnp.float32),
+            "mu_center": jnp.asarray(mu_center, dtype=jnp.float32),
             "mu_trace_offset": jnp.asarray(mu_trace_offset, dtype=jnp.float32),
-            "separation": jnp.asarray(separation, dtype=jnp.float32),
-            "A": jnp.asarray(area, dtype=jnp.float32),
+            "A_total": jnp.asarray(A_total, dtype=jnp.float32),
+            "baseline_intercept": jnp.asarray(baseline_intercept, dtype=jnp.float32),
+            "baseline_slope": jnp.asarray(baseline_slope, dtype=jnp.float32),
             "sigma_y": jnp.asarray(sigma_y, dtype=jnp.float32),
-            "baseline_intercept": jnp.asarray(
-                np.clip(intercept_anchor, -499.0, 499.0), dtype=jnp.float32
-            ),
         }
+        if n_shoulder_peak > 0:
+            # separation: [n_shoulder_peak] — strictly inside (sep_low, sep_high)
+            sep_low = np.asarray(model_inputs["separation_low"], dtype=float)
+            sep_high = np.asarray(model_inputs["separation_high"], dtype=float)
+            sep_low_sh = sep_low[shoulder_peak_index]
+            sep_high_sh = sep_high[shoulder_peak_index]
+            sep_span_sh = np.maximum(sep_high_sh - sep_low_sh, 1e-12)
+            sep_eps = 1e-4 * sep_span_sh
+            # Initialise near the lower bound rather than the midpoint.
+            # Initialise at the data-driven sep_est (stored in model_inputs).
+            # With tight [0.5×, 2.5×] bounds, sep_est = sep_low + 0.25 * span,
+            # so this puts the chain immediately near the correct separation rather
+            # than at the geometric lower bound.
+            sep_est_all = np.asarray(
+                model_inputs.get("separation_est", np.zeros(n_peak)), dtype=float
+            )
+            sep_est_sh = sep_est_all[shoulder_peak_index]
+            sep_init = np.where(
+                (sep_est_sh > sep_low_sh + sep_eps)
+                & (sep_est_sh < sep_high_sh - sep_eps),
+                sep_est_sh,
+                sep_low_sh + 0.25 * sep_span_sh,
+            )
+            sep_init = np.clip(sep_init, sep_low_sh + sep_eps, sep_high_sh - sep_eps)
+            init["separation"] = jnp.asarray(sep_init, dtype=jnp.float32)
+
+            # area_split_shoulder: [n_trace, n_shoulder_peak]
+            A_main = A_init[:, shoulder_peak_index, 0]
+            A_total_sh = A_total[:, shoulder_peak_index]
+            area_split_shoulder = np.clip(
+                A_main / np.maximum(A_total_sh, 1e-8), 0.05, 0.95
+            )
+            init["area_split_shoulder"] = jnp.asarray(
+                area_split_shoulder, dtype=jnp.float32
+            )
+        return init
+
+    def print_prior_summary(self, *, use_aligned_time: bool = False) -> None:
+        """Print a human-readable summary of all prior parameters to stdout."""
+        if self.model_inputs is None:
+            mi = self._build_model_inputs(use_aligned_time=use_aligned_time)
+        else:
+            mi = self.model_inputs
+
+        n_trace = int(jnp.asarray(mi["x"]).shape[0])
+        n_peak = int(jnp.asarray(mi["mu_lo"]).shape[0])
+
+        mu_lo = np.asarray(mi["mu_lo"], dtype=float)
+        mu_hi = np.asarray(mi["mu_hi"], dtype=float)
+        mu_center_loc = np.asarray(mi["mu_center_loc"], dtype=float)
+        mu_center_scale = np.asarray(mi["mu_center_scale"], dtype=float)
+        sigma_prior_loc = np.asarray(mi["sigma_prior_loc"], dtype=float)
+        sigma_prior_scale = np.asarray(mi["sigma_prior_scale"], dtype=float)
+        alpha_prior_loc = np.asarray(mi["alpha_prior_loc"], dtype=float)
+        alpha_prior_scale = np.asarray(mi["alpha_prior_scale"], dtype=float)
+        area_total_loc = np.asarray(mi["area_total_loc"], dtype=float)
+        area_total_scale = np.asarray(mi["area_total_scale"], dtype=float)
+        sep_low = np.asarray(mi["separation_low"], dtype=float)
+        sep_high = np.asarray(mi["separation_high"], dtype=float)
+        shoulder_side = np.asarray(mi["shoulder_side"], dtype=int)
+        bl_int_loc = np.asarray(mi["baseline_intercept_loc"], dtype=float)
+        bl_int_scale = np.asarray(mi["baseline_intercept_scale"], dtype=float)
+        bl_sl_loc = np.asarray(mi["baseline_slope_loc"], dtype=float)
+        bl_sl_scale = np.asarray(mi["baseline_slope_scale"], dtype=float)
+        sigma_y_loc = np.asarray(mi["sigma_y_prior_loc"], dtype=float)
+
+        w = 100
+        print(f"\n{'=' * w}")
+        print(f"  Prior summary — {n_trace} traces, {n_peak} peaks")
+        print(f"{'=' * w}")
+
+        print("\n  Peak priors:")
+        print(
+            f"  {'#':>2}  {'window':>13}  {'mu_center':>18}  "
+            f"{'sigma(main)':>16}  {'alpha(main)':>16}  {'area_total':>18}  shoulder"
+        )
+        for i in range(n_peak):
+            side = {-1: "left", 0: "none", 1: "right"}.get(int(shoulder_side[i]), "?")
+            print(
+                f"  {i:>2}  [{mu_lo[i]:5.3f},{mu_hi[i]:5.3f}]"
+                f"  {mu_center_loc[i]:7.4f} ±{mu_center_scale[i]:.4f}"
+                f"  {sigma_prior_loc[i, 0]:.5f} ±{sigma_prior_scale[i, 0]:.5f}"
+                f"  {alpha_prior_loc[i, 0]:+.4f} ±{alpha_prior_scale[i, 0]:.4f}"
+                f"  {area_total_loc[i]:8.1f} ±{area_total_scale[i]:.1f}"
+                f"  {side}"
+            )
+            if side != "none":
+                print(
+                    f"  {'':>2}  {'(shoulder)':>13}"
+                    f"  {'':>18}"
+                    f"  {sigma_prior_loc[i, 1]:.5f} ±{sigma_prior_scale[i, 1]:.5f}"
+                    f"  {alpha_prior_loc[i, 1]:+.4f} ±{alpha_prior_scale[i, 1]:.4f}"
+                    f"  sep=[{sep_low[i]:.4f}, {sep_high[i]:.4f}]"
+                )
+
+        print("\n  Baseline priors (per trace):")
+        print(f"  {'#':>4}  {'intercept':>22}  {'slope':>22}  {'sigma_y_prior':>14}")
+        for i in range(n_trace):
+            print(
+                f"  {i:>4}"
+                f"  {bl_int_loc[i]:10.3f} ±{bl_int_scale[i]:.3f}"
+                f"  {bl_sl_loc[i]:10.4f} ±{bl_sl_scale[i]:.6f}"
+                f"  {sigma_y_loc[i]:12.3f}"
+            )
+        print(f"{'=' * w}\n")
 
     def fit(
         self,
         *,
         use_aligned_time: bool = True,
         num_warmup: int = 1000,
-        num_samples: int = 1000,
+        num_samples: int = 500,
         num_chains: int = 8,
         seed: int = 42,
         progress_bar: bool = True,
@@ -1333,14 +1809,24 @@ class Fitter:
         init_values = self._build_init_values_for_nuts(model_inputs)
 
         self.mcmc = MCMC(
-            NUTS(peak_model, init_strategy=init_to_value(values=init_values)),
+            NUTS(peak_model),  # , init_strategy=init_to_value(values=init_values)),
             num_warmup=int(num_warmup),
             num_samples=int(num_samples),
             num_chains=int(num_chains),
             progress_bar=bool(progress_bar),
             chain_method="parallel" if int(num_chains) > 1 else "sequential",
         )
-        self.mcmc.run(jax.random.PRNGKey(int(seed)), **model_inputs)
+        # Strip metadata-only keys that are not numpyro model parameters
+        _EXTRA_KEYS = {
+            "component_to_logical_index",
+            "separation_est",
+            "mu_init_model",
+            "sigma_init_model",
+            "alpha_init_model",
+            "area_total_scale",  # diagnostic metadata; model uses LogNormal CV=0.3 instead
+        }
+        model_kwargs = {k: v for k, v in model_inputs.items() if k not in _EXTRA_KEYS}
+        self.mcmc.run(jax.random.PRNGKey(int(seed)), **model_kwargs)
         self.samples = self.mcmc.get_samples()
         try:
             import arviz as az
@@ -1353,21 +1839,11 @@ class Fitter:
     def predict_mean(self, *, use_aligned_time: bool = True) -> jnp.ndarray:
         if self.samples is None:
             raise RuntimeError("Call fit() before predict_mean().")
-
-        x_values = self._time_axis(use_aligned_time=use_aligned_time)
-        A = jnp.asarray(self.samples["A"], dtype=jnp.float32)
-        mu = jnp.asarray(self.samples["mu"], dtype=jnp.float32)
-        sigma = jnp.asarray(self.samples["sigma"], dtype=jnp.float32)
-        alpha = jnp.asarray(
-            self._posterior_alpha_component_draws(
-                n_draw=int(A.shape[0]),
-                n_chrom=int(A.shape[1]),
-                n_component=int(A.shape[2]),
-            ),
-            dtype=jnp.float32,
-        )
-        draws = skew_mixture_area(x_values, A, mu, sigma, alpha)
-        return jnp.mean(draws, axis=0)
+        # mu_y is the full fitted signal (peaks + baseline) stored as deterministic
+        mu_y = jnp.asarray(
+            self.samples["mu_y"], dtype=jnp.float32
+        )  # [n_draw, n_trace, n_time]
+        return jnp.mean(mu_y, axis=0)
 
     def save_arviz_summary_txt(
         self,
@@ -1450,20 +1926,6 @@ class Fitter:
 
         if "baseline_intercept" in self.samples:
             baseline = np.asarray(self.samples["baseline_intercept"], dtype=float)
-        elif "baseline_intercept_delta" in self.samples:
-            delta = np.asarray(self.samples["baseline_intercept_delta"], dtype=float)
-            if self.model_inputs is None:
-                raise RuntimeError(
-                    "Model metadata is unavailable. Run fit() before plotting."
-                )
-            intercept_anchor = np.asarray(
-                self.model_inputs.get("intercept_anchor", np.zeros((n_chrom,))),
-                dtype=float,
-            ).reshape(-1)
-            if intercept_anchor.size != n_chrom:
-                fallback = float(np.nanmedian(intercept_anchor))
-                intercept_anchor = np.full((n_chrom,), fallback, dtype=float)
-            baseline = intercept_anchor[None, :] - delta
         else:
             baseline = np.zeros((n_draw, n_chrom), dtype=float)
 
@@ -1510,73 +1972,34 @@ class Fitter:
         if self.samples is None:
             raise RuntimeError("Call fit() before extracting posterior alpha draws.")
 
-        if "alpha_component" in self.samples:
-            alpha_values = np.asarray(self.samples["alpha_component"], dtype=float)
-        elif "alpha" in self.samples:
-            alpha_values = np.asarray(self.samples["alpha"], dtype=float)
-        else:
+        if "alpha" not in self.samples:
             raise ValueError("Posterior samples do not contain `alpha`.")
 
-        if alpha_values.ndim == 3:
-            alpha_component = alpha_values
-        elif alpha_values.ndim == 2:
-            if self.model_inputs is None:
-                raise RuntimeError(
-                    "Model metadata is unavailable. Run fit() before plotting."
-                )
-            component_to_logical = np.asarray(
-                self.model_inputs["component_to_logical_index"], dtype=int
-            ).reshape(-1)
-            if component_to_logical.size != n_component:
-                raise ValueError(
-                    "Component mapping size mismatch while expanding alpha: "
-                    f"expected {n_component}, got {component_to_logical.size}."
-                )
-            if int(np.max(component_to_logical, initial=-1)) >= int(
-                alpha_values.shape[1]
-            ):
-                raise ValueError(
-                    "Logical alpha axis is too small for component mapping."
-                )
-            alpha_by_component = alpha_values[:, component_to_logical]
-            alpha_component = np.broadcast_to(
-                alpha_by_component[:, None, :],
-                (alpha_values.shape[0], n_chrom, n_component),
-            )
-        else:
+        alpha_raw = np.asarray(
+            self.samples["alpha"], dtype=float
+        )  # [n_draw, n_peak, 2]
+        if alpha_raw.ndim != 3:
             raise ValueError(
-                "Posterior alpha has unsupported rank "
-                f"{alpha_values.ndim}; expected 2 or 3."
+                f"Posterior alpha has unexpected rank {alpha_raw.ndim}; expected 3 (draw, peak, 2)."
             )
+        n_draw_actual, n_peak, _ = alpha_raw.shape
+        # Flatten [n_draw, n_peak, 2] → [n_draw, 2*n_peak] then broadcast to [n_draw, n_chrom, 2*n_peak]
+        alpha_flat = alpha_raw.reshape(n_draw_actual, 2 * n_peak)  # [n_draw, 2*n_peak]
+        return np.broadcast_to(
+            alpha_flat[:, None, :], (n_draw_actual, n_chrom, 2 * n_peak)
+        )
 
-        if alpha_component.shape[0] != n_draw:
-            if alpha_component.shape[0] == 1:
-                alpha_component = np.broadcast_to(
-                    alpha_component,
-                    (n_draw, alpha_component.shape[1], alpha_component.shape[2]),
-                )
-            else:
-                raise ValueError(
-                    "Alpha draw axis mismatch: "
-                    f"expected {n_draw}, got {alpha_component.shape[0]}."
-                )
-        if alpha_component.shape[1] != n_chrom:
-            if alpha_component.shape[1] == 1:
-                alpha_component = np.broadcast_to(
-                    alpha_component,
-                    (alpha_component.shape[0], n_chrom, alpha_component.shape[2]),
-                )
-            else:
-                raise ValueError(
-                    "Alpha chromatogram axis mismatch: "
-                    f"expected {n_chrom}, got {alpha_component.shape[1]}."
-                )
-        if alpha_component.shape[2] != n_component:
-            raise ValueError(
-                "Alpha component axis mismatch: "
-                f"expected {n_component}, got {alpha_component.shape[2]}."
-            )
-        return alpha_component
+    _DEFAULT_TRACE_VARS: tuple[str, ...] = (
+        "log_sigma",
+        "alpha",
+        "mu_center",
+        "separation",
+        "A_total",
+        "area_split_shoulder",
+        "baseline_intercept",
+        "baseline_slope",
+        "sigma_y",
+    )
 
     def plot_arviz_trace(
         self,
@@ -1591,6 +2014,9 @@ class Fitter:
         import arviz as az
 
         idata = self._ensure_idata()
+        if var_names is None:
+            present = set(idata.posterior.data_vars)
+            var_names = [v for v in self._DEFAULT_TRACE_VARS if v in present]
         az.plot_trace(
             idata,
             var_names=var_names,
@@ -2228,6 +2654,791 @@ class Fitter:
         plt.close(figure)
         return save_path
 
+    def print_fwhm_diagnostics(self) -> None:
+        """Print per-peak FWHM sep_est tier breakdown and apex annotation details.
+
+        Call after :meth:`build_model_inputs` (which internally calls
+        ``_build_component_initializers``).  For shoulder peaks the output shows
+        which tier determined ``sep_est``, the intermediate values considered at
+        each tier, and a per-trace apex/HWHM summary so you can see whether
+        bimodal apex detection fired and where the shoulder was placed.
+        """
+        if self._fwhm_diag is None:
+            print("No FWHM diagnostics — call build_model_inputs() first.")
+            return
+
+        side_label = {0: "none", 1: "right", -1: "left"}
+        tier_label = {0: "pass2", 1: "T1-bimodal", 2: "T2-HWHM", 3: "T3-geometric"}
+
+        for d in self._fwhm_diag:
+            name = d["peak_name"]
+            side = d["side"]
+            print(
+                f"\n{'=' * 60}\n"
+                f"Peak '{name}'  window=[{d['low']:.4f}, {d['high']:.4f}]  "
+                f"shoulder={side_label.get(side, '?')}"
+            )
+            print(
+                f"  FWHM fit  T_main={d['T_main']:.4f}  "
+                f"sigma={d['sigma_loc']:.5f}  alpha={d['alpha_loc']:+.3f}"
+            )
+
+            if side == 0:
+                print("  (no shoulder — sep_est not computed)")
+                continue
+
+            print(f"  sep_est = {d['sep_est']:.5f}  [{tier_label[d['tier_used']]}]")
+
+            # Pass-2 summary (always shown for shoulder peaks)
+            p2_n = d.get("pass2_n_valid", 0)
+            p2_sep = d.get("pass2_sep_est")
+            p2_as = d.get("pass2_area_split")
+            p2_sep_str = f"{p2_sep:.5f}" if p2_sep is not None else "n/a"
+            p2_as_str = f"{p2_as:.3f}" if p2_as is not None else "n/a"
+            print(
+                f"  Pass 2     n_valid={p2_n}  sep_est={p2_sep_str}"
+                f"  area_split={p2_as_str}"
+                + ("  ← USED" if d["tier_used"] == 0 else "  (fallback to tier)")
+            )
+            # Per-trace pass-2 breakdown (shows which traces contributed and their SNRs)
+            p2_traces = d.get("pass2_trace_indices", [])
+            p2_apexes = d.get("pass2_sh_apex_times", [])
+            p2_snrs = d.get("pass2_snr_list", [])
+            if p2_traces:
+                print(
+                    "  Pass 2 per-trace contributions (SNR = shoulder/main-at-T_main):"
+                )
+                for _t, _apex, _snr in zip(p2_traces, p2_apexes, p2_snrs):
+                    print(f"    trace {_t:2d}  apex={_apex:.4f}  snr={_snr:.3f}")
+            elif p2_n == 0:
+                print(
+                    "  Pass 2: no traces passed SNR filter (min_shoulder_fraction=0.04)"
+                )
+
+            # Tier 1
+            n_in = int(np.sum(d["gate_keep_col"] & d["width_valid"]))
+            n_out = d["t1_n_cand"]
+            print(
+                f"\n  Tier 1 – bimodal apex:"
+                f"  in-gate={n_in}  out-of-gate shoulder-side={n_out}"
+            )
+            if n_out >= 2 and d["t1_sh_apexes"].size > 0:
+                sh = d["t1_sh_apexes"]
+                print(
+                    f"    shoulder apexes: min={sh.min():.4f}  "
+                    f"med={np.median(sh):.4f}  max={sh.max():.4f}"
+                )
+                print(f"    raw_sep = {d['t1_raw_sep']:.5f}", end="")
+                if d["t1_raw_sep"] > 0.003 * (d["high"] - d["low"]):
+                    print("  → FIRED")
+                else:
+                    print("  → too small (<0.003×span), skipped")
+            else:
+                print("    <2 shoulder candidates, skipped")
+
+            # Tier 2
+            print(
+                f"\n  Tier 2 – HWHM excess (opposite-side σ ref):"
+                f"  σ_ref={d['t2_sigma_ref']:.5f}  "
+                f"gauss_hwhm={d['t2_gauss_hwhm']:.5f}"
+            )
+            if d["t2_median_hwhm"] > 0:
+                print(
+                    f"    median hwhm_side={d['t2_median_hwhm']:.5f}  "
+                    f"excess={d['t2_excess']:.5f}",
+                    end="",
+                )
+                if d["t2_excess"] > 1e-6:
+                    print("  → FIRED")
+                else:
+                    print("  → excess ≤ 0, skipped")
+            else:
+                print("    no valid hwhm_side samples")
+
+            # Tier 3
+            print(
+                f"\n  Tier 3 – geometric fallback:"
+                f"  geo={d['t3_geo']:.5f}  2σ={2 * d['t3_sigma_fb']:.5f}",
+                end="",
+            )
+            if d["tier_used"] == 3:
+                print("  → FIRED")
+            else:
+                print("  → (not reached)")
+
+            # Per-trace apex summary
+            mt = d["mode_trace"]
+            gk = d["gate_keep_col"]
+            wv = d["width_valid"]
+            in_gate = gk & wv
+            out_sh = (~gk) & wv
+            print(
+                f"\n  Apex annotation across {len(mt)} traces:"
+                f"  in-gate={int(np.sum(in_gate))}"
+                f"  out-of-gate-valid={int(np.sum(out_sh))}"
+            )
+            if int(np.sum(in_gate)) > 0:
+                mg = mt[in_gate]
+                print(
+                    f"    in-gate apex:  med={np.nanmedian(mg):.4f}  "
+                    f"range=[{np.nanmin(mg):.4f}, {np.nanmax(mg):.4f}]"
+                )
+            if int(np.sum(out_sh)) > 0:
+                mo = mt[out_sh]
+                mo = mo[np.isfinite(mo)]
+                if mo.size > 0:
+                    print(
+                        f"    out-of-gate apex: med={np.nanmedian(mo):.4f}  "
+                        f"range=[{np.nanmin(mo):.4f}, {np.nanmax(mo):.4f}]"
+                    )
+
+            # HWHM asymmetry summary
+            wl = d["w_left"][in_gate]
+            wr = d["w_right"][in_gate]
+            wl = wl[np.isfinite(wl) & (wl > 0)]
+            wr = wr[np.isfinite(wr) & (wr > 0)]
+            if wl.size > 0 and wr.size > 0:
+                print(
+                    f"    HWHM left={np.median(wl):.5f}  "
+                    f"right={np.median(wr):.5f}  "
+                    f"ratio L/R={np.median(wl) / np.median(wr):.3f}"
+                )
+        print()
+
+    def plot_fwhm_apex_diagnostics(
+        self,
+        *,
+        save_path: str = "nu_bayes_fwhm_apex_diagnostics.png",
+        dpi: int = 150,
+        use_aligned_time: bool = True,
+    ) -> str:
+        """Per-peak diagnostic: apex scatter, HWHM asymmetry, and FWHM residual.
+
+        For every peak with a shoulder annotation this produces three rows:
+
+        * **Apex scatter** — trace index vs detected apex time, coloured by
+          gate membership (green = in-gate, red = out-of-gate valid,
+          grey = invalid).  Vertical lines show T_main and the estimated
+          shoulder position.
+        * **HWHM left/right** — per-trace left (blue) and right (orange) HWHM
+          with the Tier-2 reference ``gauss_hwhm`` overlaid.
+        * **FWHM residual** — signal minus the main-peak FWHM reconstruction
+          for each trace shown as light curves; the median residual is bold.
+          A vertical line marks the shoulder position so you can judge whether
+          residual structure lines up.
+
+        Call after :meth:`build_model_inputs`.
+        """
+        if self._fwhm_diag is None:
+            raise RuntimeError("Call build_model_inputs() first.")
+
+        import matplotlib.cm as cm
+        import matplotlib.pyplot as plt
+
+        shoulder_peaks = [d for d in self._fwhm_diag if d["side"] != 0]
+        if not shoulder_peaks:
+            print("No shoulder peaks found — nothing to plot.")
+            return save_path
+
+        time_axis = np.asarray(
+            self._time_axis(use_aligned_time=use_aligned_time), dtype=float
+        )
+        signal_np = np.asarray(
+            self.baseline_corrected_signal(use_aligned_time=use_aligned_time),
+            dtype=float,
+        )
+        n_trace = signal_np.shape[0]
+        n_sh = len(shoulder_peaks)
+
+        fig, axes = plt.subplots(3, n_sh, figsize=(5 * n_sh, 10), squeeze=False)
+        fig.suptitle("FWHM Apex Diagnostics", fontsize=12, fontweight="bold")
+
+        cmap = cm.get_cmap("coolwarm").resampled(n_trace)
+
+        for col, d in enumerate(shoulder_peaks):
+            name = d["peak_name"]
+            side = d["side"]
+            low, high = d["low"], d["high"]
+            T_main = d["T_main"]
+            sep_est = d["sep_est"]
+            direction = 1.0 if side > 0 else -1.0
+            sh_pos = T_main + direction * sep_est
+            tier_lbl = {0: "P2", 1: "T1", 2: "T2", 3: "T3"}[d["tier_used"]]
+
+            mt = d["mode_trace"]
+            gk = d["gate_keep_col"]
+            wv = d["width_valid"]
+            wl = d["w_left"]
+            wr = d["w_right"]
+
+            # ── Row 0: apex scatter ─────────────────────────────────────────
+            ax0 = axes[0, col]
+            trace_idx = np.arange(n_trace)
+            for t in trace_idx:
+                if not wv[t] or not np.isfinite(mt[t]):
+                    color, marker, zorder = "lightgrey", "x", 1
+                elif gk[t]:
+                    color, marker, zorder = "tab:green", "o", 3
+                else:
+                    color, marker, zorder = "tab:red", "^", 2
+                ax0.scatter(
+                    mt[t],
+                    t,
+                    color=color,
+                    marker=marker,
+                    s=30,
+                    zorder=zorder,
+                    linewidths=0.5,
+                )
+            ax0.axvline(
+                T_main, color="green", lw=1.5, ls="-", label=f"T_main={T_main:.4f}"
+            )
+            ax0.axvline(
+                sh_pos,
+                color="red",
+                lw=1.5,
+                ls="--",
+                label=f"sh_pos={sh_pos:.4f} [{tier_lbl}]",
+            )
+            if d["t1_sh_apexes"].size > 0:
+                ax0.axvline(
+                    float(np.median(d["t1_sh_apexes"])),
+                    color="orange",
+                    lw=1,
+                    ls=":",
+                    label=f"T1 sh_med={np.median(d['t1_sh_apexes']):.4f}",
+                )
+            ax0.set_xlim(low, high)
+            ax0.set_xlabel("Apex time [min]")
+            ax0.set_ylabel("Trace index")
+            ax0.set_title(
+                f"Peak '{name}' — apex scatter\nsep_est={sep_est:.4f} via {tier_lbl}"
+            )
+            ax0.legend(fontsize=7, loc="upper right")
+
+            # ── Row 1: HWHM left/right ─────────────────────────────────────
+            ax1 = axes[1, col]
+            for t in trace_idx:
+                if not wv[t]:
+                    continue
+                c = cmap(t / max(n_trace - 1, 1))
+                mk = "o" if gk[t] else "^"
+                ax1.scatter(
+                    t,
+                    wl[t] if np.isfinite(wl[t]) else np.nan,
+                    color="tab:blue",
+                    marker=mk,
+                    s=20,
+                    alpha=0.6,
+                )
+                ax1.scatter(
+                    t,
+                    wr[t] if np.isfinite(wr[t]) else np.nan,
+                    color="tab:orange",
+                    marker=mk,
+                    s=20,
+                    alpha=0.6,
+                )
+            if d["t2_gauss_hwhm"] > 0:
+                ax1.axhline(
+                    d["t2_gauss_hwhm"],
+                    color="black",
+                    lw=1,
+                    ls="--",
+                    label=f"T2 ref hwhm={d['t2_gauss_hwhm']:.4f}",
+                )
+            # dummy handles for legend
+            ax1.scatter([], [], color="tab:blue", s=20, label="HWHM left")
+            ax1.scatter([], [], color="tab:orange", s=20, label="HWHM right")
+            ax1.scatter([], [], color="grey", marker="^", s=20, label="out-of-gate")
+            ax1.set_xlabel("Trace index")
+            ax1.set_ylabel("HWHM [min]")
+            ax1.set_title(
+                f"HWHM asymmetry\n"
+                f"T2: excess={d['t2_excess']:.5f}  "
+                f"σ_ref={d['t2_sigma_ref']:.5f}"
+            )
+            ax1.legend(fontsize=7)
+
+            # ── Row 2: FWHM residual ───────────────────────────────────────
+            ax2 = axes[2, col]
+            # time_axis may be 2D [n_trace, n_time] after alignment; use first
+            # trace as 1D reference for the window mask (shifts are small).
+            t_ref = time_axis[0] if time_axis.ndim == 2 else time_axis
+            window_mask = (t_ref >= low) & (t_ref <= high)
+            t_win = t_ref[window_mask]
+            sig_win = signal_np[:, window_mask]
+            residuals_arr = self._compute_main_residuals_for_window(d, t_win, sig_win)
+            residuals = []
+            for t in trace_idx:
+                resid = residuals_arr[t]
+                residuals.append(resid)
+                if np.all(np.isfinite(resid)):
+                    c = cmap(t / max(n_trace - 1, 1))
+                    ax2.plot(t_win, resid, color=c, alpha=0.3, lw=0.8)
+
+            resid_stack = np.array(residuals)
+            valid_rows = np.all(np.isfinite(resid_stack), axis=1)
+            if np.any(valid_rows):
+                med_resid = np.nanmedian(resid_stack[valid_rows], axis=0)
+                ax2.plot(t_win, med_resid, color="black", lw=2, label="median residual")
+            ax2.axvline(
+                sh_pos, color="red", lw=1.5, ls="--", label=f"sh_pos={sh_pos:.4f}"
+            )
+            ax2.axhline(0, color="grey", lw=0.8, ls=":")
+            ax2.set_xlim(low, high)
+            ax2.set_xlabel("Time [min]")
+            ax2.set_ylabel("Signal residual")
+            ax2.set_title(
+                "FWHM residual (signal − main fit)\nshould show shoulder structure"
+            )
+            ax2.legend(fontsize=7)
+
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        return save_path
+
+    def plot_fwhm_prior_summary(
+        self,
+        *,
+        use_aligned_time: bool = True,
+        half_level: float = 0.5,
+        apex_gate_n_mad: float = 2.0,
+        save_path: str = "nu_bayes_fwhm_prior_summary.png",
+        dpi: int = 150,
+    ) -> str:
+        """Plot FWHM-derived prior features across all traces per peak.
+
+        Shows three panels per peak:
+        - FWHM scatter (kept vs rejected by apex gate)
+        - Left/right HWHM asymmetry (proxy for alpha prior)
+        - Inferred sigma scatter (from HWHM) with robust prior median overlay
+
+        This diagnostic links ``compute_peak_fwhm`` outputs to the prior
+        parameters printed by :meth:`print_prior_summary`.
+        """
+        if len(self.peaks) == 0:
+            raise ValueError("No peaks are defined.")
+
+        payload = self.compute_peak_fwhm(
+            use_aligned_time=use_aligned_time,
+            half_level=half_level,
+            apply_apex_gate=True,
+            apex_gate_n_mad=apex_gate_n_mad,
+        )
+        apex_time_all = np.asarray(payload["apex_time_all"], dtype=float)
+        left_time_all = np.asarray(payload["left_time_all"], dtype=float)
+        right_time_all = np.asarray(payload["right_time_all"], dtype=float)
+        fwhm_all = np.asarray(payload["fwhm_all"], dtype=float)
+        valid_trace = np.asarray(payload["valid_trace"], dtype=bool)
+        gate_keep = np.asarray(payload["gate_keep"], dtype=bool)
+
+        n_trace, n_peak = apex_time_all.shape
+        gaussian_hwhm_factor = float(np.sqrt(2.0 * np.log(2.0)))
+
+        # Derive sigma/alpha from HWHM for all traces.
+        w_left_all = apex_time_all - left_time_all  # [n_trace, n_peak]
+        w_right_all = right_time_all - apex_time_all  # [n_trace, n_peak]
+        valid_hwhm = (
+            valid_trace
+            & np.isfinite(w_left_all)
+            & (w_left_all > 1e-8)
+            & np.isfinite(w_right_all)
+            & (w_right_all > 1e-8)
+        )
+        sigma_from_fwhm = np.where(
+            valid_hwhm,
+            np.sqrt(
+                0.5
+                * (
+                    (np.where(valid_hwhm, w_left_all, 1.0) / gaussian_hwhm_factor) ** 2
+                    + (np.where(valid_hwhm, w_right_all, 1.0) / gaussian_hwhm_factor)
+                    ** 2
+                )
+            ),
+            np.nan,
+        )
+        # Asymmetry ratio: (right-left)/(right+left); positive → right-skewed → alpha>0
+        denom = np.where(valid_hwhm, w_left_all + w_right_all, np.nan)
+        asymmetry = np.where(
+            valid_hwhm, (w_right_all - w_left_all) / np.maximum(denom, 1e-12), np.nan
+        )
+
+        # Build per-peak prior estimates for overlay.
+        sorted_peaks = self._sorted_peaks()
+        mi = self.model_inputs
+        has_priors = mi is not None and "sigma_prior_loc" in mi
+        if has_priors:
+            sigma_prior_loc_np = np.asarray(
+                mi["sigma_prior_loc"], dtype=float
+            )  # [n_peak, 2]
+            shoulder_side_np = np.asarray(mi["shoulder_side"], dtype=int)
+        else:
+            sigma_prior_loc_np = np.full((n_peak, 2), np.nan)
+            shoulder_side_np = np.zeros(n_peak, dtype=int)
+
+        trace_indices = np.arange(n_trace)
+        n_cols = n_peak
+        n_rows = 3
+        figure, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            squeeze=False,
+            figsize=(4.0 * n_cols, 2.6 * n_rows),
+            constrained_layout=True,
+        )
+
+        for peak_idx in range(n_peak):
+            keep = gate_keep[:, peak_idx] & valid_hwhm[:, peak_idx]
+            reject = valid_hwhm[:, peak_idx] & ~keep
+
+            ax_fwhm = axes[0, peak_idx]
+            ax_asym = axes[1, peak_idx]
+            ax_sig = axes[2, peak_idx]
+
+            # Row 0: FWHM scatter
+            if np.any(keep):
+                ax_fwhm.scatter(
+                    trace_indices[keep] + 1,
+                    fwhm_all[keep, peak_idx],
+                    s=18,
+                    color="tab:blue",
+                    label="kept",
+                    linewidths=0,
+                )
+            if np.any(reject):
+                ax_fwhm.scatter(
+                    trace_indices[reject] + 1,
+                    fwhm_all[reject, peak_idx],
+                    s=18,
+                    color="0.55",
+                    label="rejected",
+                    alpha=0.5,
+                    linewidths=0,
+                )
+            if np.any(keep):
+                fwhm_median = float(np.nanmedian(fwhm_all[keep, peak_idx]))
+                ax_fwhm.axhline(
+                    fwhm_median,
+                    color="tab:orange",
+                    linestyle="--",
+                    linewidth=1.0,
+                    label=f"median={fwhm_median:.4f}",
+                )
+            ax_fwhm.set_title(f"Peak {peak_idx + 1}")
+            ax_fwhm.set_ylabel("FWHM [min]" if peak_idx == 0 else "")
+            ax_fwhm.grid(True, alpha=0.2)
+            if peak_idx == 0:
+                ax_fwhm.legend(fontsize=7, frameon=False)
+
+            # Row 1: HWHM asymmetry
+            if np.any(keep):
+                ax_asym.scatter(
+                    trace_indices[keep] + 1,
+                    asymmetry[keep, peak_idx],
+                    s=18,
+                    color="tab:blue",
+                    linewidths=0,
+                )
+            if np.any(reject):
+                ax_asym.scatter(
+                    trace_indices[reject] + 1,
+                    asymmetry[reject, peak_idx],
+                    s=18,
+                    color="0.55",
+                    alpha=0.5,
+                    linewidths=0,
+                )
+            ax_asym.axhline(0, color="0.4", linestyle=":", linewidth=0.8)
+            side_label = {-1: " (left shoulder)", 0: "", 1: " (right shoulder)"}.get(
+                int(shoulder_side_np[peak_idx]), ""
+            )
+            ax_asym.set_ylabel(f"(R-L)/(R+L){side_label}" if peak_idx == 0 else "")
+            ax_asym.grid(True, alpha=0.2)
+
+            # Row 2: sigma from FWHM
+            if np.any(keep):
+                ax_sig.scatter(
+                    trace_indices[keep] + 1,
+                    sigma_from_fwhm[keep, peak_idx],
+                    s=18,
+                    color="tab:blue",
+                    linewidths=0,
+                )
+            if np.any(reject):
+                ax_sig.scatter(
+                    trace_indices[reject] + 1,
+                    sigma_from_fwhm[reject, peak_idx],
+                    s=18,
+                    color="0.55",
+                    alpha=0.5,
+                    linewidths=0,
+                )
+            if has_priors and np.isfinite(sigma_prior_loc_np[peak_idx, 0]):
+                ax_sig.axhline(
+                    sigma_prior_loc_np[peak_idx, 0],
+                    color="tab:orange",
+                    linestyle="--",
+                    linewidth=1.1,
+                    label=f"prior σ_main={sigma_prior_loc_np[peak_idx, 0]:.4f}",
+                )
+            if (
+                has_priors
+                and int(shoulder_side_np[peak_idx]) != 0
+                and np.isfinite(sigma_prior_loc_np[peak_idx, 1])
+            ):
+                ax_sig.axhline(
+                    sigma_prior_loc_np[peak_idx, 1],
+                    color="tab:red",
+                    linestyle=":",
+                    linewidth=1.1,
+                    label=f"prior σ_sh={sigma_prior_loc_np[peak_idx, 1]:.4f}",
+                )
+            ax_sig.set_ylabel("σ from FWHM [min]" if peak_idx == 0 else "")
+            ax_sig.set_xlabel("Trace index")
+            ax_sig.grid(True, alpha=0.2)
+            if peak_idx == 0:
+                ax_sig.legend(fontsize=7, frameon=False)
+
+        figure.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        return save_path
+
+    def plot_prior_peak_fits(
+        self,
+        *,
+        use_aligned_time: bool = True,
+        save_path: str = "nu_bayes_prior_peak_fits.png",
+        column_mode: str = "peak",
+        chromatogram_indices: list[int] | None = None,
+        peak_indices: list[int] | None = None,
+        data_alpha: float = 0.4,
+        data_size: float = 8.0,
+        line_width: float = 1.5,
+        dpi: int = 150,
+    ) -> str:
+        """Plot FWHM-derived initialisation curves overlaid on observed data.
+
+        Same layout as :meth:`plot_posterior_peak_fits` but shows per-trace
+        point-estimate skew-normal curves derived from the FWHM analysis.
+        No HDI bands are drawn since these are point estimates, not posterior draws.
+
+        Green dashed = main component, red dashed = shoulder component,
+        blue solid = total (all peaks + baseline), orange dashed = baseline.
+        Can be called before :meth:`fit`; will build model inputs if needed.
+        """
+        if self.model_inputs is None:
+            self._build_model_inputs(use_aligned_time=use_aligned_time)
+        if column_mode not in {"chromatogram", "peak"}:
+            raise ValueError("column_mode must be 'chromatogram' or 'peak'.")
+
+        time = np.asarray(
+            self._time_axis(use_aligned_time=use_aligned_time), dtype=float
+        )
+        signal_observed = np.asarray(self.signal, dtype=float)
+        peak_masks = np.asarray(
+            self.get_peak_masks(use_aligned_time=use_aligned_time), dtype=bool
+        )
+        if peak_masks.shape[0] == 0:
+            raise ValueError("No peak masks available for prior plotting.")
+
+        n_chrom = int(time.shape[0])
+        n_peak = int(peak_masks.shape[0])
+        chrom_sel = (
+            list(range(n_chrom))
+            if chromatogram_indices is None
+            else [int(i) for i in chromatogram_indices]
+        )
+        peak_sel = (
+            list(range(n_peak))
+            if peak_indices is None
+            else [int(i) for i in peak_indices]
+        )
+        peak_sel_array = np.asarray(peak_sel, dtype=int)
+        include_full_window_column = column_mode == "peak" and len(peak_sel) > 1
+
+        # [n_chrom, n_peak, 2] arrays: axis -1 index 0 = main, 1 = shoulder
+        mu_init_np = np.asarray(self.model_inputs["mu_init_model"], dtype=float)
+        sigma_init_np = np.asarray(self.model_inputs["sigma_init_model"], dtype=float)
+        alpha_init_np = np.asarray(self.model_inputs["alpha_init_model"], dtype=float)
+        A_init_np = np.asarray(self.model_inputs["A_init"], dtype=float)
+        baseline_intercept = np.asarray(
+            self.model_inputs["baseline_intercept_loc"], dtype=float
+        )  # [n_chrom]
+        baseline_slope = np.asarray(
+            self.model_inputs["baseline_slope_loc"], dtype=float
+        )  # [n_chrom]
+
+        if column_mode == "chromatogram":
+            n_rows = len(peak_sel)
+            n_cols = len(chrom_sel)
+            row_labels = [f"Peak {pi + 1}" for pi in peak_sel]
+            col_labels = [f"Trace {ci + 1}" for ci in chrom_sel]
+        else:
+            n_rows = len(chrom_sel)
+            n_cols = len(peak_sel) + (1 if include_full_window_column else 0)
+            row_labels = [f"Trace {ci + 1}" for ci in chrom_sel]
+            col_labels = [f"Peak {pi + 1}" for pi in peak_sel]
+            if include_full_window_column:
+                col_labels.append("All peaks")
+
+        figure, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            squeeze=False,
+            figsize=(3.6 * n_cols, 2.6 * n_rows),
+            constrained_layout=True,
+        )
+
+        _comp_colors = ["tab:green", "tab:red"]
+        _comp_labels = ["main", "shoulder"]
+
+        for row_index in range(n_rows):
+            for col_index in range(n_cols):
+                ax = axes[row_index, col_index]
+                if column_mode == "chromatogram":
+                    peak_index = peak_sel[row_index]
+                    chrom_index = chrom_sel[col_index]
+                    finite_mask = np.isfinite(time[chrom_index]) & np.isfinite(
+                        signal_observed[chrom_index]
+                    )
+                    active = peak_masks[peak_index, chrom_index] & finite_mask
+                    peaks_for_cell = [peak_index]
+                else:
+                    chrom_index = chrom_sel[row_index]
+                    finite_mask = np.isfinite(time[chrom_index]) & np.isfinite(
+                        signal_observed[chrom_index]
+                    )
+                    if include_full_window_column and col_index == len(peak_sel):
+                        union_mask = np.any(
+                            peak_masks[peak_sel_array, chrom_index], axis=0
+                        )
+                        window_points = union_mask & finite_mask
+                        if int(np.sum(window_points)) >= 2:
+                            x_window = time[chrom_index, window_points]
+                            x_low = float(np.nanmin(x_window))
+                            x_high = float(np.nanmax(x_window))
+                            active = (
+                                finite_mask
+                                & (time[chrom_index] >= x_low)
+                                & (time[chrom_index] <= x_high)
+                            )
+                        else:
+                            active = window_points
+                        peaks_for_cell = list(peak_sel)
+                    else:
+                        peak_index = peak_sel[col_index]
+                        active = peak_masks[peak_index, chrom_index] & finite_mask
+                        peaks_for_cell = [peak_index]
+
+                if int(np.sum(active)) < 3:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "insufficient data",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        transform=ax.transAxes,
+                    )
+                    ax.grid(True, alpha=0.2)
+                    continue
+
+                x_active = np.asarray(time[chrom_index, active], dtype=float)
+                y_active = np.asarray(signal_observed[chrom_index, active], dtype=float)
+                order = np.argsort(x_active)
+                x_active = x_active[order]
+                y_active = y_active[order]
+
+                # Gather [n_comp_total, n_time] across all peaks for this cell.
+                # Each peak contributes 2 components (main + shoulder).
+                mu_c = np.concatenate(
+                    [mu_init_np[chrom_index, pi, :] for pi in peaks_for_cell]
+                )
+                sigma_c = np.concatenate(
+                    [sigma_init_np[chrom_index, pi, :] for pi in peaks_for_cell]
+                )
+                alpha_c = np.concatenate(
+                    [alpha_init_np[chrom_index, pi, :] for pi in peaks_for_cell]
+                )
+                A_c = np.concatenate(
+                    [A_init_np[chrom_index, pi, :] for pi in peaks_for_cell]
+                )
+
+                pdf = np.asarray(
+                    skew_normal_pdf(
+                        jnp.asarray(x_active, dtype=jnp.float32),
+                        jnp.asarray(mu_c, dtype=jnp.float32),
+                        jnp.asarray(sigma_c, dtype=jnp.float32),
+                        jnp.asarray(alpha_c, dtype=jnp.float32),
+                    ),
+                    dtype=float,
+                )  # [n_comp, n_time]
+
+                component_curves = A_c[:, None] * pdf  # [n_comp, n_time]
+                peak_total = np.sum(component_curves, axis=0)
+                bl = (
+                    baseline_intercept[chrom_index]
+                    + baseline_slope[chrom_index] * x_active
+                )
+                total_curve = peak_total + bl
+
+                # Observed data
+                ax.scatter(
+                    x_active,
+                    y_active,
+                    s=data_size,
+                    alpha=data_alpha,
+                    color="0.35",
+                    linewidths=0,
+                )
+
+                # Per-component init curves
+                for _ci in range(component_curves.shape[0]):
+                    _color = _comp_colors[min(_ci, len(_comp_colors) - 1)]
+                    _label = _comp_labels[min(_ci, len(_comp_labels) - 1)]
+                    ax.plot(
+                        x_active,
+                        component_curves[_ci],
+                        color=_color,
+                        linestyle="--",
+                        linewidth=max(0.9, 0.8 * line_width),
+                        alpha=0.85,
+                        label=_label,
+                    )
+
+                # Total (peaks + baseline)
+                ax.plot(
+                    x_active,
+                    total_curve,
+                    color="tab:blue",
+                    linewidth=line_width,
+                    label="total",
+                )
+
+                # Baseline
+                ax.plot(
+                    x_active,
+                    bl,
+                    color="tab:orange",
+                    linestyle="--",
+                    linewidth=max(1.0, 0.9 * line_width),
+                    label="baseline",
+                )
+
+                ax.grid(True, alpha=0.2)
+                if row_index == 0:
+                    ax.set_title(col_labels[col_index])
+                if col_index == 0:
+                    ax.set_ylabel(row_labels[row_index])
+                if row_index == (n_rows - 1):
+                    ax.set_xlabel("Time [min]")
+
+        figure.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        return save_path
+
     def plot_posterior_peak_fits(
         self,
         *,
@@ -2329,10 +3540,12 @@ class Fitter:
             raise ValueError(
                 "Posterior sample chromatogram axis does not match current data shape."
             )
-        baseline_draws = self._posterior_baseline_intercept_draws(
-            n_draw=int(A.shape[0]),
-            n_chrom=n_chrom,
-        )
+        baseline_intercept_draws = np.asarray(
+            self.samples["baseline_intercept"], dtype=float
+        )  # [n_draw, n_chrom]
+        baseline_slope_draws = np.asarray(
+            self.samples["baseline_slope"], dtype=float
+        )  # [n_draw, n_chrom]
 
         if column_mode == "chromatogram":
             n_rows = len(peak_sel)
@@ -2444,19 +3657,21 @@ class Fitter:
                     ),
                     dtype=float,
                 )
-                peak_draws = np.sum(A_draw[:, :, None] * pdf, axis=1)
-                baseline_active = baseline_draws[:, chrom_index][:, None]
+                # per-component peak draws (no baseline): [n_draw, n_component, n_time]
+                component_draws = A_draw[:, :, None] * pdf
+                peak_draws = np.sum(component_draws, axis=1)
+                # Baseline curve: [n_draw, n_time_active]
+                baseline_active = (
+                    baseline_intercept_draws[:, chrom_index, None]
+                    + baseline_slope_draws[:, chrom_index, None] * x_active[None, :]
+                )
                 total_draws = peak_draws + baseline_active
                 y_median = np.nanmedian(total_draws, axis=0)
                 y_low = np.nanquantile(total_draws, 0.025, axis=0)
                 y_high = np.nanquantile(total_draws, 0.975, axis=0)
-                baseline_median = float(np.nanmedian(baseline_active[:, 0]))
-                baseline_low = float(np.nanquantile(baseline_active[:, 0], 0.025))
-                baseline_high = float(np.nanquantile(baseline_active[:, 0], 0.975))
-                baseline_line = np.full_like(x_active, baseline_median, dtype=float)
-                baseline_low_line = np.full_like(x_active, baseline_low, dtype=float)
-                baseline_high_line = np.full_like(x_active, baseline_high, dtype=float)
+                baseline_line = np.nanmedian(baseline_active, axis=0)
 
+                # Observed data
                 ax.scatter(
                     x_active,
                     y_active,
@@ -2465,11 +3680,45 @@ class Fitter:
                     color="0.35",
                     linewidths=0,
                 )
+
+                # --- Per-component raw peak curves (peak signal only, no baseline) ---
+                # Plotted UNDER the total so the shoulder is separately visible.
+                _comp_colors = ["tab:green", "tab:red"]
+                _comp_styles = ["--", "--"]
+                _comp_labels = ["main", "shoulder"]
+                n_drawn_components = int(component_draws.shape[1])
+                for _ci in range(n_drawn_components):
+                    _raw = component_draws[:, _ci, :]  # [n_draw, n_time], peak only
+                    _median_raw = np.nanmedian(_raw, axis=0)
+                    _lo_raw = np.nanquantile(_raw, 0.025, axis=0)
+                    _hi_raw = np.nanquantile(_raw, 0.975, axis=0)
+                    _color = _comp_colors[min(_ci, len(_comp_colors) - 1)]
+                    _ls = _comp_styles[min(_ci, len(_comp_styles) - 1)]
+                    _label = _comp_labels[min(_ci, len(_comp_labels) - 1)]
+                    ax.plot(
+                        x_active,
+                        _median_raw,
+                        color=_color,
+                        linestyle=_ls,
+                        linewidth=max(0.9, 0.8 * line_width),
+                        alpha=0.85,
+                        label=_label,
+                    )
+                    ax.fill_between(
+                        x_active,
+                        _lo_raw,
+                        _hi_raw,
+                        color=_color,
+                        alpha=max(0.08, 0.5 * hdi_alpha),
+                    )
+
+                # --- Total fit (all peaks + baseline) ---
                 ax.plot(
                     x_active,
                     y_median,
                     color="tab:blue",
                     linewidth=line_width,
+                    label="total",
                 )
                 ax.fill_between(
                     x_active,
@@ -2478,19 +3727,15 @@ class Fitter:
                     color="tab:blue",
                     alpha=hdi_alpha,
                 )
+
+                # --- Baseline ---
                 ax.plot(
                     x_active,
                     baseline_line,
                     color="tab:orange",
                     linestyle="--",
                     linewidth=max(1.0, 0.9 * line_width),
-                )
-                ax.fill_between(
-                    x_active,
-                    baseline_low_line,
-                    baseline_high_line,
-                    color="tab:orange",
-                    alpha=min(0.6 * hdi_alpha, 0.18),
+                    label="baseline",
                 )
                 ax.grid(True, alpha=0.2)
 
@@ -2588,10 +3833,12 @@ class Fitter:
             raise ValueError(
                 "Posterior sample chromatogram axis does not match current data shape."
             )
-        baseline_draws = self._posterior_baseline_intercept_draws(
-            n_draw=int(A.shape[0]),
-            n_chrom=n_chrom,
-        )
+        baseline_intercept_draws = np.asarray(
+            self.samples["baseline_intercept"], dtype=float
+        )  # [n_draw, n_chrom]
+        baseline_slope_draws = np.asarray(
+            self.samples["baseline_slope"], dtype=float
+        )  # [n_draw, n_chrom]
 
         if column_mode == "chromatogram":
             n_rows = len(peak_sel)
@@ -2675,7 +3922,11 @@ class Fitter:
                     dtype=float,
                 )
                 peak_draws = np.sum(A_draw[:, :, None] * pdf, axis=1)
-                baseline_active = baseline_draws[:, chrom_index][:, None]
+                # Baseline curve: [n_draw, n_time_active]
+                baseline_active = (
+                    baseline_intercept_draws[:, chrom_index, None]
+                    + baseline_slope_draws[:, chrom_index, None] * x_active[None, :]
+                )
                 total_draws = peak_draws + baseline_active
 
                 residual_draws = y_active[None, :] - total_draws
@@ -2783,7 +4034,7 @@ class Fitter:
         time_step = self._median_time_step_per_chromatogram()
         self.shift_time = self.shift_samples * time_step
         self.aligned_time = self.time + self.shift_time[:, None]
-        self._baseline_estimate_cache.clear()
+        self._baseline_priors_cache.clear()
         self.model_inputs = None
         self.samples = None
         self.mcmc = None
@@ -2827,9 +4078,7 @@ class Fitter:
         baseline_mask = np.asarray(
             self.get_baseline_mask(use_aligned_time=use_aligned_time), dtype=bool
         )
-        baseline_estimates = self.get_baseline_estimates(
-            use_aligned_time=use_aligned_time
-        )
+        baseline_priors = self.get_baseline_priors(use_aligned_time=use_aligned_time)
         n_chromatograms = self.time.shape[0]
         cmap = plt.get_cmap("viridis")
         colors = [cmap(i / max(n_chromatograms - 1, 1)) for i in range(n_chromatograms)]
@@ -2880,8 +4129,7 @@ class Fitter:
                 ax.set_ylabel(f"Chromatogram {i + 1}")
             if baseline:
                 y_baseline = (
-                    baseline_estimates[i].slope * time_i
-                    + baseline_estimates[i].intercept
+                    baseline_priors.slope[i] * time_i + baseline_priors.intercept[i]
                 )
                 ax.plot(
                     time_i,
@@ -2919,125 +4167,98 @@ class Fitter:
         self,
         *,
         use_aligned_time: bool = True,
-        surrounding_points: int = 6,
-        save_path: str = "baseline_peak_edge_fit.png",
+        save_path: str = "baseline_anchor_fit.png",
         dpi: int = 150,
     ) -> str:
-        """Plot baseline-anchor diagnostics per chromatogram.
+        """Plot OLS baseline fit per chromatogram (one subplot per trace)."""
+        from .baseline import (
+            _DEFAULT_EDGE_FRACTION,
+            _DEFAULT_PERCENTILE,
+            _select_anchors,
+        )
 
-        Shows:
-            - surrounding points near anchor locations as scatter
-            - anchor points used for baseline estimation as scatter
-            - fitted baseline line
-        """
-        surrounding_points = max(int(surrounding_points), 0)
-        time = np.asarray(
-            self._time_axis(use_aligned_time=use_aligned_time), dtype=float
-        )
-        signal = np.asarray(self.signal, dtype=float)
-        baseline_estimates = self.get_baseline_estimates(
-            use_aligned_time=use_aligned_time
-        )
-        anchor_payload = self._collect_peak_edge_baseline_anchors(
-            use_aligned_time=use_aligned_time
-        )
-        x_anchor = np.asarray(anchor_payload["x_anchor"], dtype=float)
-        y_anchor = np.asarray(anchor_payload["y_anchor"], dtype=float)
-        anchor_indices = np.asarray(anchor_payload["anchor_indices"], dtype=int)
+        time_axis = self._time_axis(use_aligned_time=use_aligned_time)
+        time_np = np.asarray(time_axis, dtype=float)
+        signal_np = np.asarray(self.signal, dtype=float)
+        priors = self.get_baseline_priors(use_aligned_time=use_aligned_time)
+        intercepts = np.asarray(priors.intercept, dtype=float)
+        slopes = np.asarray(priors.slope, dtype=float)
 
-        n_trace = int(signal.shape[0])
-        figure, axes = plt.subplots(
+        anchor_mask = np.asarray(
+            _select_anchors(
+                time_axis,
+                self.signal,
+                peaks=self.peaks,
+                baselines=self.baselines,
+                edge_fraction=_DEFAULT_EDGE_FRACTION,
+                percentile=_DEFAULT_PERCENTILE,
+            ),
+            dtype=bool,
+        )
+
+        n_trace = int(signal_np.shape[0])
+        fig, axes = plt.subplots(
             n_trace,
             1,
             sharex=True,
             squeeze=False,
-            figsize=(10, 2.6 * n_trace),
+            figsize=(10, 2.5 * n_trace),
             constrained_layout=True,
         )
-        axes_1d = axes[:, 0]
+        cmap = plt.cm.viridis
+        colors = [cmap(i / max(n_trace - 1, 1)) for i in range(n_trace)]
 
-        for trace_index, ax in enumerate(axes_1d):
-            trace_time = time[trace_index]
-            trace_signal = signal[trace_index]
-            finite = np.isfinite(trace_time) & np.isfinite(trace_signal)
+        for ti, ax in enumerate(axes[:, 0]):
+            t = time_np[ti]
+            s = signal_np[ti]
+            finite = np.isfinite(t) & np.isfinite(s)
             if not np.any(finite):
                 ax.text(
                     0.5,
                     0.5,
-                    "no finite points",
+                    "no data",
                     ha="center",
                     va="center",
-                    fontsize=8,
                     transform=ax.transAxes,
                 )
-                ax.grid(True, alpha=0.2)
                 continue
 
-            valid_anchor_idx = anchor_indices[trace_index]
-            valid_anchor_idx = valid_anchor_idx[valid_anchor_idx >= 0]
-
-            surrounding_idx: np.ndarray
-            if valid_anchor_idx.size == 0:
-                surrounding_idx = np.asarray([], dtype=int)
-            else:
-                neighborhoods: list[np.ndarray] = []
-                for idx in valid_anchor_idx:
-                    start = max(0, int(idx) - surrounding_points)
-                    stop = min(int(trace_time.size), int(idx) + surrounding_points + 1)
-                    neighborhoods.append(np.arange(start, stop, dtype=int))
-                surrounding_idx = (
-                    np.unique(np.concatenate(neighborhoods))
-                    if neighborhoods
-                    else np.asarray([], dtype=int)
-                )
-                surrounding_idx = surrounding_idx[
-                    np.isfinite(trace_time[surrounding_idx])
-                    & np.isfinite(trace_signal[surrounding_idx])
-                ]
-
-            if surrounding_idx.size > 0:
+            color = colors[ti]
+            # Raw data (light)
+            ax.plot(t[finite], s[finite], color=color, alpha=0.3, linewidth=0.8)
+            # Anchor points used for OLS fit
+            anchors = finite & anchor_mask[ti]
+            if np.any(anchors):
                 ax.scatter(
-                    trace_time[surrounding_idx],
-                    trace_signal[surrounding_idx],
-                    s=8,
-                    alpha=0.45,
-                    color="0.45",
+                    t[anchors],
+                    s[anchors],
+                    s=10,
+                    color=color,
+                    alpha=0.9,
                     linewidths=0,
-                    label="surrounding",
+                    zorder=3,
+                    label="anchors" if ti == 0 else None,
                 )
-
-            anchor_valid = np.isfinite(x_anchor[trace_index]) & np.isfinite(
-                y_anchor[trace_index]
-            )
-            if np.any(anchor_valid):
-                ax.scatter(
-                    x_anchor[trace_index, anchor_valid],
-                    y_anchor[trace_index, anchor_valid],
-                    s=24,
-                    alpha=0.95,
-                    color="tab:red",
-                    linewidths=0,
-                    label="anchor used",
-                )
-
-            x_line = trace_time[finite]
-            order = np.argsort(x_line)
-            x_line = x_line[order]
-            slope = float(baseline_estimates[trace_index].slope)
-            intercept = float(baseline_estimates[trace_index].intercept)
-            y_line = slope * x_line + intercept
+            # OLS baseline line
+            t_range = t[finite]
+            y_line = intercepts[ti] + slopes[ti] * t_range
+            order = np.argsort(t_range)
             ax.plot(
-                x_line, y_line, color="tab:blue", linewidth=1.4, label="baseline fit"
+                t_range[order],
+                y_line[order],
+                color="tab:red",
+                linewidth=1.4,
+                label="OLS baseline" if ti == 0 else None,
             )
 
-            ax.set_ylabel(f"Trace {trace_index + 1}")
+            ax.set_ylabel(f"Trace {ti + 1}", fontsize=8)
             ax.grid(True, alpha=0.2)
-            if trace_index == 0:
-                ax.legend(loc="best", fontsize=8, frameon=False)
+            if ti == 0:
+                ax.legend(loc="best", fontsize=7, frameon=False)
 
-        axes_1d[-1].set_xlabel("Time [min]")
-        figure.savefig(save_path, dpi=dpi, bbox_inches="tight")
-        plt.close(figure)
+        axes[-1, 0].set_xlabel("Time [min]")
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
         return save_path
 
 
@@ -3051,9 +4272,9 @@ if __name__ == "__main__":
 
     arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
         -1, 3000
-    )[:70, :1000]
+    )[:10, :1000]
     time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        :70, :1000
+        :10, :1000
     ]
     sample_names = jnp.load("/Users/max/code/sahh-kinetics-hplc/folder_names.npy")
     chromatogram_names = jnp.load("/Users/max/code/sahh-kinetics-hplc/sample_names.npy")
@@ -3062,8 +4283,8 @@ if __name__ == "__main__":
 
     peaks = [
         PeakAnnotation(name="peak1", low=2.6, high=2.83),
-        PeakAnnotation(name="peak2", low=2.9, high=3.18),
-        PeakAnnotation(name="peak3", low=3.18, high=3.45),
+        PeakAnnotation(name="peak2", low=2.9, high=3.18, shoulder="right"),
+        # PeakAnnotation(name="peak3", low=3.18, high=3.45, shoulder=None),
     ]
 
     print("Initializing fitter...")
@@ -3090,8 +4311,7 @@ if __name__ == "__main__":
     print("Plotting baseline anchor diagnostics...")
     baseline_diag_path = fitter.plot_baseline_anchor_fit(
         use_aligned_time=True,
-        surrounding_points=8,
-        save_path="baseline_peak_edge_fit.png",
+        save_path="baseline_anchor_fit.png",
     )
     print(f"Saved baseline anchor diagnostics: {baseline_diag_path}")
 
@@ -3111,14 +4331,40 @@ if __name__ == "__main__":
         normalize_position=True,
     )
     print(f"Saved normalized FWHM plot: {fwhm_path}")
-    print("Fitting...")
+    fitter.print_prior_summary()
+    fitter.print_fwhm_diagnostics()
 
+    apex_diag_path = fitter.plot_fwhm_apex_diagnostics(
+        save_path="nu_bayes_fwhm_apex_diagnostics.png",
+        use_aligned_time=True,
+    )
+    print(f"Saved FWHM apex diagnostics: {apex_diag_path}")
+
+    prior_fit_path = fitter.plot_prior_peak_fits(
+        use_aligned_time=True,
+        save_path="nu_bayes_prior_peak_fits.png",
+        column_mode="peak",
+    )
+    print(f"Saved prior peak fits: {prior_fit_path}")
+    assert False
+    print("Fitting...")
     fitter.fit()
     summary_path = fitter.save_arviz_summary_txt("nu_bayes_arviz_summary.txt")
     print(f"Saved ArviZ summary: {summary_path}")
     trace_path = fitter.plot_arviz_trace(
         save_path="nu_bayes_trace.png",
-        var_names=["A", "mu", "sigma", "alpha", "baseline_intercept", "sigma_y"],
+        var_names=[
+            "A",
+            "mu_center",
+            "mu_trace_offset",
+            "sigma",
+            "alpha",
+            "area_split_shoulder",
+            "separation",
+            "baseline_intercept",
+            "baseline_slope",
+            "sigma_y",
+        ],
     )
     print(f"Saved ArviZ trace: {trace_path}")
     posterior_fit_path = fitter.plot_posterior_peak_fits(
@@ -3136,12 +4382,13 @@ if __name__ == "__main__":
 
     pair_path = fitter.plot_arviz_pair(
         save_path="nu_bayes_pair.png",
+        kind="kde",
         var_names=[
-            "A",
             "mu",
-            "sigma",
+            "separation",
             "alpha",
-            "baseline_intercept",
+            "A_total",
+            "area_split_shoulder",
             "sigma_y",
         ],
         max_subplots=10000,

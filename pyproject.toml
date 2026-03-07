@@ -2,6 +2,7 @@
 authors = [{email = "83341109+haeussma@users.noreply.github.com", name = "haeussma"}]
 dependencies = [
   "numpy>=2.1.0",
+  "scipy>=1.12.0",
   "calipytion>=1.0.2,<2.0.0",
   "pyenzyme>=2.1.0,<3.0.0",
   "pydantic>=2,<3",

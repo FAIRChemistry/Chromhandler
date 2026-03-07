@@ -8,26 +8,29 @@ import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class PeakAnnotation:
-    """Per-spectrum peak annotation with optional explicit mask.
+    """Per-spectrum peak annotation defining a single skew-normal component.
 
     Attributes:
         name: Logical peak name.
         low: Broad lower bound used for initialization and diagnostics.
         high: Broad upper bound used for initialization and diagnostics.
-        shoulder: Optional shoulder direction for double-peak fitting.
-        exclude_shoulder: Whether shoulder area should be excluded from totals.
+        shoulder: Optional side where a shoulder peak is expected.
     """
 
     name: str
     low: float
     high: float
     shoulder: Literal["left", "right"] | None = None
-    exclude_shoulder: bool = False
 
     def __post_init__(self) -> None:
         if float(self.high) <= float(self.low):
             raise ValueError(
                 f"Invalid annotation bounds for `{self.name}`: low={self.low}, high={self.high}"
+            )
+        if self.shoulder not in (None, "left", "right"):
+            raise ValueError(
+                "shoulder must be one of None, 'left', or 'right', "
+                f"got {self.shoulder!r}."
             )
 
 
@@ -44,6 +47,7 @@ class PeakPriorHints:
     area_loc: float
     area_scale: float
     trace_count: int
+    sep_est: float = 0.0  # data-driven mode separation estimate for shoulder peaks
 
 
 @dataclass(frozen=True)
@@ -91,52 +95,28 @@ class ChromatogramRecord:
         low: float,
         high: float,
         shoulder: Literal["left", "right"] | None = None,
-        exclude_shoulder: bool = False,
     ) -> None:
-        """Add a peak to the chromatogram.
+        """Add a peak annotation to the chromatogram.
 
         Args:
             name: Name of the peak.
-            low: Lower bound of the peak.
-            high: Upper bound of the peak.
-            shoulder: Shoulder side of the peak.
-            exclude_shoulder: Whether to exclude the shoulder from the peak.
-        """
+            low: Lower bound of the peak window.
+            high: Upper bound of the peak window.
+            shoulder: Optional expected shoulder side.
 
-        # check if low and high are within the time range
+        Raises:
+            ValueError: If bounds fall outside the time range or low >= high.
+        """
         if low < min(self.time) or high > max(self.time):
             raise ValueError(
                 "low and high must be within the time range, got "
                 f"low={low}, high={high}, time range={min(self.time)} to {max(self.time)}"
             )
-
-        # check if shoulder is valid
-        if shoulder not in (None, "left", "right"):
-            raise ValueError(
-                "invalid shoulder, must be None, 'left', or 'right', got "
-                f"shoulder={shoulder}"
-            )
-
-        # check if shoulder is None, 'exclude_shoulder' is also False
-        if shoulder is None and exclude_shoulder:
-            raise ValueError(
-                "exclude_shoulder is only valid when shoulder is not None, got "
-                f"shoulder={shoulder}, exclude_shoulder={exclude_shoulder}"
-            )
-
-        peak = PeakAnnotation(
-            name=name,
-            low=low,
-            high=high,
-            shoulder=shoulder,
-            exclude_shoulder=exclude_shoulder,
-        )
-        # if peak exists, replace it
+        peak = PeakAnnotation(name=name, low=low, high=high, shoulder=shoulder)
         for i, p in enumerate(self.peaks):
             if p.name == name:
                 self.peaks[i] = peak
                 return
-        # if peak does not exist, add it
         self.peaks.append(peak)
 
     def add_baseline(self, low: float, high: float) -> None:

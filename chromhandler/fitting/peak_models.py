@@ -1,202 +1,23 @@
-"""Skew-normal peak models for chromatographic fitting.
+"""Bi-skew-normal peak model for chromatographic fitting.
 
-This module exposes a single mixed NumPyro model named ``model`` that supports
-both single and double skew-normal peaks in the same fit.
-
-Model behavior is configured with component/logical-peak index metadata that is
-assembled by the fitter from user-facing peak definitions.
+Each logical peak is represented by two skew-normal components (main + shoulder).
+For non-shoulder peaks, the second component is deterministically disabled in the
+likelihood via zero area and identical location to the main component.
 """
 
 from __future__ import annotations
-
-from typing import Optional, Sequence
 
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 from jax.scipy.special import log_ndtr
 
-
-def _ensure_two_dimensional(values: jnp.ndarray, name: str) -> jnp.ndarray:
-    """Return an array with shape ``[num_spectra, num_points]``.
-
-    Args:
-        values: Input array with shape ``[num_points]`` or
-            ``[num_spectra, num_points]``.
-        name: Human-readable variable name for error messages.
-
-    Returns:
-        Two-dimensional float32 array.
-
-    Raises:
-        ValueError: If the input dimensionality is not 1D or 2D.
-    """
-    matrix = jnp.asarray(values, dtype=jnp.float32)
-    if matrix.ndim == 1:
-        return matrix[None, :]
-    if matrix.ndim == 2:
-        return matrix
-    raise ValueError(f"`{name}` must be 1D or 2D, got shape {matrix.shape}.")
+numpyro.set_host_device_count(8)
 
 
-def _to_component_matrix(
-    values: jnp.ndarray,
-    num_spectra: int,
-    num_components: int,
-    name: str,
-) -> jnp.ndarray:
-    """Broadcast or validate a component array to ``[num_spectra, num_components]``.
-
-    Args:
-        values: Array with shape ``[num_components]`` or
-            ``[num_spectra, num_components]``.
-        num_spectra: Number of spectra.
-        num_components: Number of model components.
-        name: Human-readable variable name for error messages.
-
-    Returns:
-        Two-dimensional float32 array.
-
-    Raises:
-        ValueError: If the array shape is incompatible.
-    """
-    array = jnp.asarray(values, dtype=jnp.float32)
-    if array.ndim == 1:
-        if array.shape[0] != num_components:
-            raise ValueError(
-                f"`{name}` has shape {array.shape}; expected [{num_components}]."
-            )
-        return jnp.broadcast_to(array[None, :], (num_spectra, num_components))
-
-    if array.ndim == 2:
-        if array.shape == (num_spectra, num_components):
-            return array
-        if array.shape == (1, num_components):
-            return jnp.broadcast_to(array, (num_spectra, num_components))
-        raise ValueError(
-            f"`{name}` has shape {array.shape}; expected "
-            f"[{num_spectra}, {num_components}] or [1, {num_components}]."
-        )
-
-    raise ValueError(f"`{name}` must be 1D or 2D, got shape {array.shape}.")
-
-
-def _to_logical_matrix(
-    values: jnp.ndarray,
-    num_spectra: int,
-    logical_count: int,
-    name: str,
-) -> jnp.ndarray:
-    """Broadcast or validate a logical-peak array to ``[num_spectra, logical_count]``."""
-    array = jnp.asarray(values, dtype=jnp.float32)
-    if array.ndim == 1:
-        if array.shape[0] != logical_count:
-            raise ValueError(
-                f"`{name}` has shape {array.shape}; expected [{logical_count}]."
-            )
-        return jnp.broadcast_to(array[None, :], (num_spectra, logical_count))
-
-    if array.ndim == 2:
-        if array.shape == (num_spectra, logical_count):
-            return array
-        if array.shape == (1, logical_count):
-            return jnp.broadcast_to(array, (num_spectra, logical_count))
-        raise ValueError(
-            f"`{name}` has shape {array.shape}; expected "
-            f"[{num_spectra}, {logical_count}] or [1, {logical_count}]."
-        )
-
-    raise ValueError(f"`{name}` must be 1D or 2D, got shape {array.shape}.")
-
-
-def _to_mask_matrix(
-    mask_values: jnp.ndarray,
-    num_spectra: int,
-    num_points: int,
-    name: str,
-) -> jnp.ndarray:
-    """Broadcast or validate a boolean mask to ``[num_spectra, num_points]``."""
-    mask = jnp.asarray(mask_values)
-    if mask.ndim == 1:
-        if mask.shape[0] != num_points:
-            raise ValueError(
-                f"`{name}` has shape {mask.shape}; expected [{num_points}]."
-            )
-        return jnp.broadcast_to(mask[None, :], (num_spectra, num_points)).astype(bool)
-
-    if mask.ndim == 2:
-        if mask.shape == (num_spectra, num_points):
-            return mask.astype(bool)
-        if mask.shape == (1, num_points):
-            return jnp.broadcast_to(mask, (num_spectra, num_points)).astype(bool)
-        raise ValueError(
-            f"`{name}` has shape {mask.shape}; expected "
-            f"[{num_spectra}, {num_points}] or [1, {num_points}]."
-        )
-
-    raise ValueError(f"`{name}` must be 1D or 2D, got shape {mask.shape}.")
-
-
-def _to_spectrum_vector(
-    values: float | jnp.ndarray,
-    num_spectra: int,
-    name: str,
-) -> jnp.ndarray:
-    """Broadcast or validate a per-spectrum vector to ``[num_spectra]``."""
-    vector = jnp.asarray(values, dtype=jnp.float32)
-    if vector.ndim == 0:
-        return jnp.full((num_spectra,), vector, dtype=jnp.float32)
-    if vector.ndim == 1:
-        if vector.shape[0] == num_spectra:
-            return vector
-        if vector.shape[0] == 1:
-            return jnp.broadcast_to(vector, (num_spectra,))
-        raise ValueError(
-            f"`{name}` has shape {vector.shape}; expected [{num_spectra}] or [1]."
-        )
-    raise ValueError(f"`{name}` must be scalar or 1D, got shape {vector.shape}.")
-
-
-def _build_peak_window_mask(
-    x: jnp.ndarray,
-    mu_lo: jnp.ndarray,
-    mu_hi: jnp.ndarray,
-) -> jnp.ndarray:
-    """Return a mask for points that fall into at least one component window."""
-    return jnp.any(
-        (x[..., None, :] >= mu_lo[..., :, None])
-        & (x[..., None, :] <= mu_hi[..., :, None]),
-        axis=-2,
-    )
-
-
-def _masked_standard_deviation(
-    values: jnp.ndarray,
-    mask: jnp.ndarray,
-    fallback: jnp.ndarray,
-) -> jnp.ndarray:
-    """Compute per-spectrum standard deviation on a masked matrix.
-
-    Args:
-        values: Residual values with shape ``[num_spectra, num_points]``.
-        mask: Boolean mask with the same shape.
-        fallback: Per-spectrum fallback scale, shape ``[num_spectra]``.
-
-    Returns:
-        Per-spectrum standard deviation estimate.
-    """
-    valid_count = jnp.sum(mask, axis=-1)
-    safe_count = jnp.maximum(valid_count, jnp.array(1.0, dtype=jnp.float32))
-
-    masked_values = jnp.where(mask, values, 0.0)
-    mean_value = jnp.sum(masked_values, axis=-1) / safe_count
-    centered = values - mean_value[:, None]
-    variance = jnp.sum(jnp.where(mask, centered**2, 0.0), axis=-1) / safe_count
-    standard_deviation = jnp.sqrt(
-        jnp.maximum(variance, jnp.array(1e-12, dtype=jnp.float32))
-    )
-
-    return jnp.where(valid_count > 2, standard_deviation, fallback)
+_SQRT_2_OVER_PI = jnp.sqrt(2.0 / jnp.pi)
+_ALPHA_ABS_MAX = 3.5
+_ALPHA_LOC_CLIP_FRAC = 0.98
 
 
 def log_skew_normal_pdf(
@@ -205,34 +26,15 @@ def log_skew_normal_pdf(
     sigma: jnp.ndarray,
     alpha: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Compute numerically stable skew-normal log-density values.
-
-    The skew-normal density is ``f(x) = 2/sigma * phi(z) * Phi(alpha * z)`` with
-    ``z = (x - mu) / sigma``.
-
-    Args:
-        x: Time values with shape ``[..., num_points]``.
-        mu: Peak centers with shape ``[..., num_components]``.
-        sigma: Peak widths with shape ``[..., num_components]``.
-        alpha: Skew parameters with shape ``[..., num_components]``.
-
-    Returns:
-        Log-density matrix with shape ``[..., num_components, num_points]``.
-    """
-    sigma_safe = jnp.maximum(jnp.asarray(sigma, dtype=jnp.float32), 1e-6)
-    x_array = jnp.asarray(x, dtype=jnp.float32)
-    mu_array = jnp.asarray(mu, dtype=jnp.float32)
-    alpha_array = jnp.asarray(alpha, dtype=jnp.float32)
-
-    z_value = (x_array[..., None, :] - mu_array[..., :, None]) / sigma_safe[
-        ..., :, None
-    ]
-    log_standard_normal = -0.5 * z_value**2 - 0.5 * jnp.log(2.0 * jnp.pi)
+    """Compute numerically stable skew-normal log-density."""
+    sigma_safe = jnp.maximum(sigma, 1e-6)
+    z = (x[..., None, :] - mu[..., :, None]) / sigma_safe[..., :, None]
+    log_phi = -0.5 * z**2 - 0.5 * jnp.log(2.0 * jnp.pi)
     return (
         jnp.log(2.0)
         - jnp.log(sigma_safe)[..., :, None]
-        + log_standard_normal
-        + log_ndtr(alpha_array[..., :, None] * z_value)
+        + log_phi
+        + log_ndtr(alpha[..., :, None] * z)
     )
 
 
@@ -242,7 +44,7 @@ def skew_normal_pdf(
     sigma: jnp.ndarray,
     alpha: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Compute skew-normal density values."""
+    """Skew-normal density values."""
     return jnp.exp(log_skew_normal_pdf(x, mu, sigma, alpha))
 
 
@@ -253,9 +55,8 @@ def skew_mixture_area(
     sigma: jnp.ndarray,
     alpha: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Compute area-scaled skew-normal mixture signal."""
-    probability_density = skew_normal_pdf(x, mu, sigma, alpha)
-    return jnp.sum(probability_density * A[..., :, None], axis=-2)
+    """Area-scaled skew-normal mixture signal."""
+    return jnp.sum(skew_normal_pdf(x, mu, sigma, alpha) * A[..., :, None], axis=-2)
 
 
 def skew_components_area(
@@ -265,559 +66,305 @@ def skew_components_area(
     sigma: jnp.ndarray,
     alpha: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Return area-scaled component curves for each skew-normal peak."""
+    """Area-scaled per-component curves."""
     return skew_normal_pdf(x, mu, sigma, alpha) * A[..., :, None]
 
 
+def _flatten_peak_components(values: jnp.ndarray) -> jnp.ndarray:
+    """Flatten ``[..., n_peak, 2]`` to ``[..., n_peak * 2]``."""
+    array = jnp.asarray(values)
+    if array.ndim < 2 or int(array.shape[-1]) != 2:
+        raise ValueError(f"Expected [..., n_peak, 2], got {array.shape}.")
+    return array.reshape(array.shape[:-2] + (array.shape[-2] * array.shape[-1],))
+
+
 def model(
-    x: jnp.ndarray,
-    y: Optional[jnp.ndarray],
-    mu_lo: jnp.ndarray,
-    mu_hi: jnp.ndarray,
-    sigma_min: float,
-    sigma_max: float,
-    logical_mu_lo: Sequence[float],
-    logical_mu_hi: Sequence[float],
-    logical_main_component_index: Sequence[int],
-    logical_shoulder_component_index: Sequence[int],
-    logical_shoulder_side: Sequence[int],
-    component_to_logical_index: Sequence[int],
-    component_include_in_total_area: Sequence[bool],
-    mu_init: Optional[jnp.ndarray] = None,
-    sigma_init: Optional[jnp.ndarray] = None,
-    A_init: Optional[jnp.ndarray] = None,
-    alpha_init: Optional[jnp.ndarray] = None,
-    mu_prior_loc: Optional[jnp.ndarray] = None,
-    mu_prior_scale: Optional[jnp.ndarray] = None,
-    sigma_prior_loc: Optional[jnp.ndarray] = None,
-    sigma_prior_scale: Optional[jnp.ndarray] = None,
-    alpha_prior_loc: Optional[jnp.ndarray] = None,
-    alpha_prior_scale: Optional[jnp.ndarray] = None,
-    intercept_anchor: Optional[jnp.ndarray] = None,
-    intercept_prior_mean: Optional[float] = None,
-    intercept_prior_scale: Optional[float] = None,
-    peak_mask: Optional[jnp.ndarray] = None,
-    alpha_prior_sd: float = 1.0,
+    x: jnp.ndarray,  # [n_trace, n_time]
+    y: jnp.ndarray | None,  # [n_trace, n_time] or None for prior predictive
+    mu_lo: jnp.ndarray,  # [n_peak]
+    mu_hi: jnp.ndarray,  # [n_peak]
+    shoulder_side: jnp.ndarray,  # [n_peak] in {-1, 0, +1}
+    shoulder_peak_index: jnp.ndarray,  # [n_shoulder_peak] subset of peak indices
+    A_init: jnp.ndarray,  # [n_trace, n_peak, 2]
+    mu_center_loc: jnp.ndarray,  # [n_peak]
+    mu_center_scale: jnp.ndarray,  # [n_peak]
+    separation_low: jnp.ndarray,  # [n_peak]
+    separation_high: jnp.ndarray,  # [n_peak]
+    sigma_prior_loc: jnp.ndarray,  # [n_peak, 2]
+    sigma_prior_scale: jnp.ndarray,  # [n_peak, 2]
+    alpha_prior_loc: jnp.ndarray,  # [n_peak, 2]
+    alpha_prior_scale: jnp.ndarray,  # [n_peak, 2]
+    area_total_loc: jnp.ndarray,  # [n_peak]
+    area_split_alpha: jnp.ndarray,  # [n_peak]
+    area_split_beta: jnp.ndarray,  # [n_peak]
+    baseline_intercept_loc: jnp.ndarray,  # [n_trace]
+    baseline_intercept_scale: jnp.ndarray,  # [n_trace]
+    baseline_slope_loc: jnp.ndarray,  # [n_trace]
+    baseline_slope_scale: jnp.ndarray,  # [n_trace]
+    sigma_y_prior_loc: jnp.ndarray,  # [n_trace]
+    peak_mask: jnp.ndarray | None = None,  # [n_trace, n_time]
 ) -> None:
-    """Mixed skew-normal model with single and double peaks in one graph.
+    """Bi-skew-normal peak model with direct per-trace linear baseline priors."""
+    n_trace, _ = x.shape
+    n_peak = int(mu_lo.shape[0])
+    shoulder_side_v = jnp.asarray(shoulder_side, dtype=jnp.float32).reshape(-1)
+    shoulder_enabled = shoulder_side_v != 0.0
+    shoulder_peak_index = jnp.asarray(shoulder_peak_index, dtype=jnp.int32).reshape(-1)
+    n_shoulder_peak = int(shoulder_peak_index.shape[0])
 
-    This function is the only model entry point used by the fitter.
-
-    Args:
-        x: Time values with shape ``[num_points]`` or ``[num_spectra, num_points]``.
-        y: Observed values with shape matching ``x``. Use ``None`` for prior
-            predictive sampling.
-        mu_lo: Lower component bounds with shape ``[num_components]`` or
-            ``[num_spectra, num_components]``.
-        mu_hi: Upper component bounds with shape ``[num_components]`` or
-            ``[num_spectra, num_components]``.
-        sigma_min: Global lower bound for component width.
-        sigma_max: Global upper bound for component width.
-        logical_mu_lo: Lower bounds for logical peaks.
-        logical_mu_hi: Upper bounds for logical peaks.
-        logical_main_component_index: Main component index per logical peak.
-        logical_shoulder_component_index: Shoulder component index per logical peak,
-            ``-1`` for single-peak logical entries.
-        logical_shoulder_side: Shoulder side code per logical peak:
-            ``-1`` for left, ``+1`` for right, ``0`` for no shoulder.
-        component_to_logical_index: Logical-peak index per model component.
-        component_include_in_total_area: Whether each component contributes to
-            chemical total area reporting.
-        mu_init: Optional center initialization matrix.
-        sigma_init: Optional width initialization matrix.
-        A_init: Optional area initialization matrix used as the center of the
-            component-wise ``A ~ Uniform(0.9 * A_init, 1.1 * A_init)`` prior.
-        alpha_init: Optional skew initialization matrix used as fallback prior
-            source when ``alpha_prior_loc`` / ``alpha_prior_scale`` are not
-            provided.
-        mu_prior_loc: Optional non-hierarchical center prior location per logical
-            peak (or per-spectrum logical peak matrix).
-        mu_prior_scale: Optional non-hierarchical center prior scale per logical
-            peak (or per-spectrum logical peak matrix).
-        sigma_prior_loc: Optional non-hierarchical width prior location per
-            logical peak (or per-spectrum logical-peak matrix).
-        sigma_prior_scale: Optional non-hierarchical width prior scale per
-            logical peak (or per-spectrum logical-peak matrix).
-        alpha_prior_loc: Optional non-hierarchical skew prior location per
-            logical peak (or per-spectrum logical-peak matrix).
-        alpha_prior_scale: Optional non-hierarchical skew prior scale per
-            logical peak (or per-spectrum logical-peak matrix).
-        intercept_anchor: Legacy baseline anchor input (currently unused).
-        intercept_prior_mean: Legacy baseline prior mean input (currently unused).
-        intercept_prior_scale: Legacy baseline prior scale input (currently unused).
-        peak_mask: Optional explicit likelihood mask for peak points.
-        alpha_prior_sd: Fallback scale for ``alpha`` when
-            ``alpha_prior_scale`` is not provided.
-
-    Raises:
-        ValueError: If metadata dimensions are inconsistent.
-    """
-    x_values = _ensure_two_dimensional(x, "x")
-    y_observed = None if y is None else _ensure_two_dimensional(y, "y")
-    num_spectra, num_points = x_values.shape
-
-    mu_lo_array = jnp.asarray(mu_lo, dtype=jnp.float32)
-    mu_hi_array = jnp.asarray(mu_hi, dtype=jnp.float32)
-    if mu_lo_array.ndim == 1 and mu_hi_array.ndim == 1:
-        num_components = int(mu_lo_array.shape[0])
-        mu_lo_matrix = jnp.broadcast_to(
-            mu_lo_array[None, :], (num_spectra, num_components)
-        )
-        mu_hi_matrix = jnp.broadcast_to(
-            mu_hi_array[None, :], (num_spectra, num_components)
-        )
-    elif mu_lo_array.ndim == 2 and mu_hi_array.ndim == 2:
-        num_components = int(mu_lo_array.shape[1])
-        mu_lo_matrix = mu_lo_array
-        mu_hi_matrix = mu_hi_array
-    else:
-        raise ValueError("`mu_lo` and `mu_hi` must both be 1D or both be 2D.")
-
-    main_index_array = jnp.asarray(
-        logical_main_component_index, dtype=jnp.int32
-    ).reshape(-1)
-    shoulder_index_array = jnp.asarray(
-        logical_shoulder_component_index, dtype=jnp.int32
-    ).reshape(-1)
-    shoulder_side_array = jnp.asarray(logical_shoulder_side, dtype=jnp.float32).reshape(
-        -1
+    finite_mask = (
+        jnp.ones((n_trace, x.shape[1]), dtype=bool) if y is None else jnp.isfinite(y)
     )
-    logical_low_array = jnp.asarray(logical_mu_lo, dtype=jnp.float32).reshape(-1)
-    logical_high_array = jnp.asarray(logical_mu_hi, dtype=jnp.float32).reshape(-1)
-
-    logical_count = int(main_index_array.shape[0])
-    if (
-        shoulder_index_array.shape[0] != logical_count
-        or shoulder_side_array.shape[0] != logical_count
-        or logical_low_array.shape[0] != logical_count
-        or logical_high_array.shape[0] != logical_count
-    ):
-        raise ValueError("Logical-peak metadata arrays must have identical lengths.")
-
-    component_to_logical_array = jnp.asarray(
-        component_to_logical_index, dtype=jnp.int32
-    ).reshape(-1)
-    component_include_array = jnp.asarray(
-        component_include_in_total_area, dtype=jnp.float32
-    ).reshape(-1)
-    if component_to_logical_array.shape[0] != num_components:
-        raise ValueError(
-            "`component_to_logical_index` length does not match the number of components."
-        )
-    if component_include_array.shape[0] != num_components:
-        raise ValueError(
-            "`component_include_in_total_area` length does not match the number of components."
-        )
-
-    default_peak_mask = _build_peak_window_mask(x_values, mu_lo_matrix, mu_hi_matrix)
-    if y_observed is None:
-        finite_mask = jnp.ones((num_spectra, num_points), dtype=bool)
-        y_finite = None
-    else:
-        finite_mask = jnp.isfinite(y_observed)
-        y_finite = jnp.where(finite_mask, y_observed, 0.0)
-
-    if peak_mask is None:
-        peak_observation_mask = default_peak_mask & finite_mask
-    else:
-        peak_observation_mask = (
-            _to_mask_matrix(peak_mask, num_spectra, num_points, "peak_mask")
-            & finite_mask
-        )
-
-    mu_initial_matrix = (
-        0.5 * (mu_lo_matrix + mu_hi_matrix)
-        if mu_init is None
-        else _to_component_matrix(mu_init, num_spectra, num_components, "mu_init")
+    likelihood_mask = (
+        (peak_mask & finite_mask) if peak_mask is not None else finite_mask
     )
+    y_obs = None if y is None else jnp.where(finite_mask, y, 0.0)
 
-    sigma_initial_matrix = (
-        jnp.broadcast_to(
-            jnp.maximum(
-                jnp.mean(mu_hi_matrix - mu_lo_matrix) / 6.0,
-                jnp.array(1e-4, dtype=jnp.float32),
+    # --- sigma [n_peak, 2]: LogNormal prior, shared across traces ---
+    sigma_loc_safe = jnp.maximum(sigma_prior_loc, 1e-8)
+    tau_sigma = jnp.sqrt(
+        jnp.log1p((jnp.maximum(sigma_prior_scale, 0.0) / sigma_loc_safe) ** 2)
+    )
+    # Sample sigma: main component for all peaks, shoulder only for shoulder peaks.
+    # Avoids wasted dimensions and improves posterior geometry for non-shoulder peaks.
+    log_sigma_main = numpyro.sample(
+        "log_sigma_main", dist.Normal(jnp.log(sigma_loc_safe[:, 0]), tau_sigma[:, 0])
+    )  # [n_peak]
+    sigma_main = jnp.exp(log_sigma_main)  # [n_peak]
+
+    numpyro.deterministic("sigma_main", sigma_main)
+
+    if n_shoulder_peak > 0:
+        log_sigma_shoulder = numpyro.sample(
+            "log_sigma_shoulder",
+            dist.Normal(
+                jnp.log(sigma_loc_safe[shoulder_peak_index, 1]),
+                tau_sigma[shoulder_peak_index, 1],
             ),
-            (num_spectra, num_components),
-        )
-        if sigma_init is None
-        else _to_component_matrix(sigma_init, num_spectra, num_components, "sigma_init")
-    )
-
-    if A_init is not None:
-        area_initial_matrix = _to_component_matrix(
-            A_init, num_spectra, num_components, "A_init"
-        )
-    elif y_observed is not None:
-        y_peak_only = jnp.where(peak_observation_mask, y_observed, -jnp.inf)
-        y_peak_maximum = jnp.max(y_peak_only, axis=-1)
-        y_full_maximum = jnp.max(y_finite, axis=-1)
-        y_scale = jnp.maximum(
-            jnp.where(jnp.isfinite(y_peak_maximum), y_peak_maximum, y_full_maximum),
-            jnp.array(1.0, dtype=jnp.float32),
-        )
-        area_initial_matrix = jnp.broadcast_to(
-            jnp.maximum(0.95 * y_scale[:, None], jnp.array(1e-6, dtype=jnp.float32)),
-            (num_spectra, num_components),
+        )  # [n_shoulder_peak]
+        sigma_shoulder = jnp.exp(log_sigma_shoulder)
+        numpyro.deterministic("sigma_shoulder", sigma_shoulder)
+        sigma_pair = (
+            jnp.zeros((n_peak, 2), dtype=x.dtype)
+            .at[:, 0]
+            .set(sigma_main)
+            .at[shoulder_peak_index, 1]
+            .set(sigma_shoulder)
         )
     else:
-        area_initial_matrix = jnp.ones((num_spectra, num_components), dtype=jnp.float32)
+        sigma_pair = jnp.stack(
+            [sigma_main, jnp.zeros_like(sigma_main)], axis=-1
+        )  # [n_peak, 2]
 
-    sigma_minimum = jnp.asarray(sigma_min, dtype=jnp.float32)
-    sigma_maximum = jnp.asarray(sigma_max, dtype=jnp.float32)
-    sigma_range = jnp.maximum(
-        sigma_maximum - sigma_minimum,
-        jnp.array(1e-4, dtype=jnp.float32),
+    sigma_flat = jnp.broadcast_to(
+        _flatten_peak_components(sigma_pair[None, :, :]), (n_trace, 2 * n_peak)
     )
-    sigma_main_initial = sigma_initial_matrix[:, main_index_array]
-    sigma_location_default = jnp.clip(
-        jnp.median(sigma_main_initial, axis=0),
-        sigma_minimum + 1e-4,
-        sigma_maximum - 1e-4,
-    )
-    sigma_mad = jnp.median(
-        jnp.abs(sigma_main_initial - sigma_location_default[None, :]),
-        axis=0,
-    )
-    sigma_robust_standard_deviation = 1.4826 * sigma_mad
-    sigma_scale_default = sigma_robust_standard_deviation + 0.02 * sigma_range
+    numpyro.deterministic("sigma", sigma_flat)
 
-    if sigma_prior_loc is None:
-        sigma_location_logical = sigma_location_default
-    else:
-        sigma_location_matrix = _to_logical_matrix(
-            sigma_prior_loc, num_spectra, logical_count, "sigma_prior_loc"
-        )
-        sigma_location_logical = jnp.median(sigma_location_matrix, axis=0)
-        sigma_location_logical = jnp.clip(
-            sigma_location_logical,
-            sigma_minimum + 1e-6,
-            sigma_maximum - 1e-6,
-        )
-
-    if sigma_prior_scale is None:
-        sigma_scale_logical = sigma_scale_default
-    else:
-        sigma_scale_matrix = _to_logical_matrix(
-            sigma_prior_scale, num_spectra, logical_count, "sigma_prior_scale"
-        )
-        sigma_scale_logical = jnp.median(sigma_scale_matrix, axis=0)
-        sigma_scale_logical = jnp.maximum(
-            sigma_scale_logical, jnp.array(1e-6, dtype=jnp.float32)
-        )
-
-    sigma_relative_scale = sigma_scale_logical / jnp.maximum(
-        sigma_location_logical, jnp.array(1e-6, dtype=jnp.float32)
+    # --- alpha [n_peak, 2]: smoothly bounded to (-alpha_max, +alpha_max) ---
+    # Sample main component for all peaks, shoulder only for shoulder peaks.
+    # Avoids wasted dimensions and improves posterior geometry.
+    # We keep the latent geometry unconstrained (Normal), then map through
+    # sigmoid + affine. This prevents impossible tails beyond +/- alpha_max
+    # without hard truncation.
+    alpha_unit_main = jnp.clip(
+        alpha_prior_loc[:, 0] / _ALPHA_ABS_MAX,
+        -_ALPHA_LOC_CLIP_FRAC,
+        _ALPHA_LOC_CLIP_FRAC,
     )
-    tau_sigma_logical = jnp.maximum(
-        jnp.sqrt(jnp.log1p(sigma_relative_scale**2)),
-        jnp.array(1e-6, dtype=jnp.float32),
+    alpha_prob_main = 0.5 * (alpha_unit_main + 1.0)
+    alpha_raw_loc_main = jnp.log(alpha_prob_main) - jnp.log1p(-alpha_prob_main)
+    local_jacobian_main = (
+        2.0
+        * _ALPHA_ABS_MAX
+        * jnp.maximum(alpha_prob_main * (1.0 - alpha_prob_main), 1e-3)
     )
-    numpyro.deterministic("tau_sigma", tau_sigma_logical)
-    log_sigma_location = jnp.log(sigma_location_logical)
-    log_sigma = numpyro.sample(
-        "log_sigma",
-        dist.TruncatedNormal(
-            loc=log_sigma_location,
-            scale=tau_sigma_logical,
-            low=jnp.broadcast_to(jnp.log(sigma_minimum), (logical_count,)),
-            high=jnp.broadcast_to(jnp.log(sigma_maximum), (logical_count,)),
+    alpha_raw_scale_main = jnp.maximum(
+        alpha_prior_scale[:, 0] / local_jacobian_main, 1e-3
+    )
+    alpha_main = numpyro.sample(
+        "alpha_main",
+        dist.TransformedDistribution(
+            dist.Normal(alpha_raw_loc_main, alpha_raw_scale_main),
+            [
+                dist.transforms.SigmoidTransform(),
+                dist.transforms.AffineTransform(
+                    loc=-_ALPHA_ABS_MAX, scale=2.0 * _ALPHA_ABS_MAX
+                ),
+            ],
         ),
-    )
-    sigma_logical = numpyro.deterministic("sigma_logical", jnp.exp(log_sigma))
-    sigma = numpyro.deterministic(
-        "sigma",
-        jnp.broadcast_to(
-            sigma_logical[None, component_to_logical_array],
-            (num_spectra, num_components),
-        ),
-    )
+    )  # [n_peak]
 
-    if alpha_prior_loc is None:
-        if alpha_init is None:
-            alpha_location_logical = jnp.zeros((logical_count,), dtype=jnp.float32)
-        else:
-            alpha_initial_matrix = _to_component_matrix(
-                alpha_init, num_spectra, num_components, "alpha_init"
-            )
-            alpha_main_initial = alpha_initial_matrix[:, main_index_array]
-            alpha_location_logical = jnp.median(alpha_main_initial, axis=0)
-            alpha_location_logical = jnp.where(
-                jnp.isfinite(alpha_location_logical),
-                alpha_location_logical,
-                jnp.zeros((logical_count,), dtype=jnp.float32),
-            )
+    if n_shoulder_peak > 0:
+        alpha_unit_shoulder = jnp.clip(
+            alpha_prior_loc[shoulder_peak_index, 1] / _ALPHA_ABS_MAX,
+            -_ALPHA_LOC_CLIP_FRAC,
+            _ALPHA_LOC_CLIP_FRAC,
+        )
+        alpha_prob_shoulder = 0.5 * (alpha_unit_shoulder + 1.0)
+        alpha_raw_loc_shoulder = jnp.log(alpha_prob_shoulder) - jnp.log1p(
+            -alpha_prob_shoulder
+        )
+        local_jacobian_shoulder = (
+            2.0
+            * _ALPHA_ABS_MAX
+            * jnp.maximum(alpha_prob_shoulder * (1.0 - alpha_prob_shoulder), 1e-3)
+        )
+        alpha_raw_scale_shoulder = jnp.maximum(
+            alpha_prior_scale[shoulder_peak_index, 1] / local_jacobian_shoulder, 1e-3
+        )
+        alpha_shoulder = numpyro.sample(
+            "alpha_shoulder",
+            dist.TransformedDistribution(
+                dist.Normal(alpha_raw_loc_shoulder, alpha_raw_scale_shoulder),
+                [
+                    dist.transforms.SigmoidTransform(),
+                    dist.transforms.AffineTransform(
+                        loc=-_ALPHA_ABS_MAX, scale=2.0 * _ALPHA_ABS_MAX
+                    ),
+                ],
+            ),
+        )  # [n_shoulder_peak]
+        alpha_pair = (
+            jnp.zeros((n_peak, 2), dtype=x.dtype)
+            .at[:, 0]
+            .set(alpha_main)
+            .at[shoulder_peak_index, 1]
+            .set(alpha_shoulder)
+        )
     else:
-        alpha_location_matrix = _to_logical_matrix(
-            alpha_prior_loc, num_spectra, logical_count, "alpha_prior_loc"
-        )
-        alpha_location_logical = jnp.median(alpha_location_matrix, axis=0)
+        alpha_pair = jnp.stack(
+            [alpha_main, jnp.zeros_like(alpha_main)], axis=-1
+        )  # [n_peak, 2]
 
-    if alpha_prior_scale is None:
-        if alpha_init is None:
-            alpha_scale_logical = jnp.full(
-                (logical_count,),
-                jnp.maximum(float(alpha_prior_sd), 1e-3),
-                dtype=jnp.float32,
-            )
-        else:
-            alpha_initial_matrix = _to_component_matrix(
-                alpha_init, num_spectra, num_components, "alpha_init"
-            )
-            alpha_main_initial = alpha_initial_matrix[:, main_index_array]
-            alpha_median = jnp.median(alpha_main_initial, axis=0)
-            alpha_mad = jnp.median(
-                jnp.abs(alpha_main_initial - alpha_median[None, :]),
-                axis=0,
-            )
-            alpha_scale_logical = jnp.maximum(
-                1.4826 * alpha_mad,
-                jnp.array(max(float(alpha_prior_sd), 1e-3), dtype=jnp.float32),
-            )
-    else:
-        alpha_scale_matrix = _to_logical_matrix(
-            alpha_prior_scale, num_spectra, logical_count, "alpha_prior_scale"
-        )
-        alpha_scale_logical = jnp.median(alpha_scale_matrix, axis=0)
-        alpha_scale_logical = jnp.maximum(
-            alpha_scale_logical, jnp.array(1e-3, dtype=jnp.float32)
-        )
+    # Store unflattened alpha_pair as deterministic for posterior extraction: [n_draw, n_peak, 2]
+    numpyro.deterministic("alpha", alpha_pair)
 
-    alpha_logical = numpyro.sample(
-        "alpha",
-        dist.Normal(
-            loc=alpha_location_logical,
-            scale=alpha_scale_logical,
-        ),
-    )
-    alpha_component = numpyro.deterministic(
-        "alpha_component",
-        jnp.broadcast_to(
-            alpha_logical[None, component_to_logical_array],
-            (num_spectra, num_components),
-        ),
+    # Flatten for model computation: [n_trace, 2*n_peak]
+    alpha_flat = jnp.broadcast_to(
+        _flatten_peak_components(alpha_pair[None, :, :]), (n_trace, 2 * n_peak)
     )
 
-    has_shoulder = shoulder_index_array >= 0
-    has_shoulder_float = has_shoulder.astype(jnp.float32)
-    shoulder_index_safe = jnp.where(has_shoulder, shoulder_index_array, 0)
-    shoulder_side_effective = shoulder_side_array * has_shoulder_float
-
-    logical_span = jnp.maximum(
-        logical_high_array - logical_low_array,
-        jnp.array(1e-4, dtype=jnp.float32),
-    )
-
-    mu_main_initial = mu_initial_matrix[:, main_index_array]
-    mu_shoulder_initial = mu_initial_matrix[:, shoulder_index_safe]
-    mu_center_initial = mu_main_initial + 0.5 * has_shoulder_float[None, :] * (
-        mu_shoulder_initial - mu_main_initial
-    )
-
-    mu_center_median = jnp.median(mu_center_initial, axis=0)
-    mu_center_mad = jnp.median(
-        jnp.abs(mu_center_initial - mu_center_median[None, :]),
-        axis=0,
-    )
-    mu_center_robust_standard_deviation = 1.4826 * mu_center_mad
-    mu_center_prior_scale_default = jnp.clip(
-        mu_center_robust_standard_deviation + 0.01 * logical_span,
-        jnp.array(1e-4, dtype=jnp.float32),
-        0.05 * logical_span,
-    )
-
-    if mu_prior_loc is None:
-        mu_center_prior_loc = mu_center_median
-    else:
-        mu_center_prior_loc_matrix = _to_logical_matrix(
-            mu_prior_loc, num_spectra, logical_count, "mu_prior_loc"
-        )
-        mu_center_prior_loc = jnp.median(mu_center_prior_loc_matrix, axis=0)
-    mu_center_prior_loc = jnp.clip(
-        mu_center_prior_loc, logical_low_array, logical_high_array
-    )
-
-    if mu_prior_scale is None:
-        mu_center_prior_scale = mu_center_prior_scale_default
-    else:
-        mu_center_prior_scale_matrix = _to_logical_matrix(
-            mu_prior_scale, num_spectra, logical_count, "mu_prior_scale"
-        )
-        mu_center_prior_scale = jnp.median(mu_center_prior_scale_matrix, axis=0)
-        mu_center_prior_scale = jnp.clip(
-            mu_center_prior_scale,
-            jnp.array(1e-6, dtype=jnp.float32),
-            jnp.maximum(0.5 * logical_span, jnp.array(1e-6, dtype=jnp.float32)),
-        )
-
+    # --- mode-center / trace offsets: non-centered parameterization (no hard clipping) ---
+    window_span = jnp.maximum(mu_hi - mu_lo, 1e-4)
+    # `mu_center` is intentionally sampled as a center-of-modes parameter (shared hierarchical prior).
     mu_center = numpyro.sample(
-        "mu_center",
-        dist.TruncatedNormal(
-            loc=mu_center_prior_loc,
-            scale=mu_center_prior_scale,
-            low=logical_low_array,
-            high=logical_high_array,
-        ),
+        "mu_center", dist.Normal(mu_center_loc, jnp.maximum(mu_center_scale, 1e-6))
     )
-    mu_trace_scale = numpyro.deterministic(
-        "mu_trace_scale",
-        jnp.clip(
-            0.15 * mu_center_prior_scale,
-            jnp.array(5e-4, dtype=jnp.float32),
-            0.20 * logical_span,
-        ),
-    )
+    # Increased trace scale: 0.5 × mu_center_scale (capped at 0.5 × window) allows substantial
+    # per-trace variation (e.g., ±0.01 min in 0.2 min window). Non-centered parameterization
+    # (offset from center) improves MCMC efficiency vs direct TruncatedNormal sampling.
+    mu_trace_scale = jnp.clip(0.5 * mu_center_scale, 1e-4, 0.5 * window_span)
     mu_trace_offset = numpyro.sample(
         "mu_trace_offset",
-        dist.Normal(0.0, mu_trace_scale).expand((num_spectra, logical_count)),
+        dist.Normal(0.0, jnp.maximum(mu_trace_scale, 1e-6)).expand((n_trace, n_peak)),
     )
-    mu_center_matrix = mu_center[None, :] + mu_trace_offset
-    mu_center_epsilon = 1e-6 * logical_span
-    mu_center_matrix = jnp.clip(
-        mu_center_matrix,
-        logical_low_array[None, :] + mu_center_epsilon[None, :],
-        logical_high_array[None, :] - mu_center_epsilon[None, :],
-    )
-    numpyro.deterministic("mu_center_trace", mu_center_matrix)
-    logical_low_matrix = jnp.broadcast_to(
-        logical_low_array[None, :], (num_spectra, logical_count)
-    )
-    logical_high_matrix = jnp.broadcast_to(
-        logical_high_array[None, :], (num_spectra, logical_count)
-    )
+    center_mode_trace = mu_center[None, :] + mu_trace_offset  # [n_trace, n_peak]
 
-    separation_initial = (
-        jnp.abs(mu_main_initial - mu_shoulder_initial) * has_shoulder_float[None, :]
-    )
-    separation_location = jnp.maximum(
-        jnp.mean(separation_initial, axis=0),
-        0.05 * logical_span * has_shoulder_float + 1e-4 * (1.0 - has_shoulder_float),
-    )
-    separation_scale = jnp.maximum(
-        0.35 * separation_location,
-        0.005 * logical_span * has_shoulder_float + 1e-4 * (1.0 - has_shoulder_float),
-    )
-    separation_minimum = 0.005 * logical_span * has_shoulder_float + 1e-5 * (
-        1.0 - has_shoulder_float
-    )
-    separation = numpyro.sample(
-        "separation",
-        dist.TruncatedNormal(
-            loc=separation_location,
-            scale=separation_scale,
-            low=separation_minimum,
-        ),
-    )
-
-    separation_matrix = jnp.broadcast_to(
-        separation[None, :], (num_spectra, logical_count)
-    )
-    maximum_separation = 2.0 * jnp.minimum(
-        mu_center_matrix - logical_low_matrix,
-        logical_high_matrix - mu_center_matrix,
-    )
-    separation_matrix = jnp.minimum(
-        separation_matrix,
-        jnp.maximum(maximum_separation, jnp.array(1e-6, dtype=jnp.float32)),
-    )
-
-    mu_shoulder_component = (
-        mu_center_matrix + 0.5 * shoulder_side_effective[None, :] * separation_matrix
-    )
-    mu_main_component = (
-        mu_center_matrix - 0.5 * shoulder_side_effective[None, :] * separation_matrix
-    )
-
-    mu_values = jnp.zeros((num_spectra, num_components), dtype=jnp.float32)
-    mu_values = mu_values.at[:, main_index_array].set(mu_main_component)
-    mu_values = mu_values.at[:, shoulder_index_safe].add(
-        mu_shoulder_component * has_shoulder_float[None, :]
-    )
-
-    mu = numpyro.deterministic("mu", mu_values)
-
-    area_initial_safe = jnp.maximum(
-        area_initial_matrix, jnp.array(1e-8, dtype=jnp.float32)
-    )
-    # Allow collapse to near-zero area when a peak is absent in a trace.
-    area_lower = jnp.full_like(area_initial_safe, jnp.array(1e-8, dtype=jnp.float32))
-    area_upper = jnp.maximum(
-        2.0 * area_initial_safe,
-        area_lower + jnp.array(1e-8, dtype=jnp.float32),
-    )
-    A = numpyro.sample("A", dist.Uniform(low=area_lower, high=area_upper))
-
-    shoulder_index_valid = shoulder_index_array >= 0
-    shoulder_index_safe = jnp.where(shoulder_index_valid, shoulder_index_array, 0)
-    shoulder_component_mask_f = jnp.zeros((num_components,), dtype=jnp.float32)
-    shoulder_component_mask_f = shoulder_component_mask_f.at[shoulder_index_safe].add(
-        shoulder_index_valid.astype(jnp.float32)
-    )
-    shoulder_component_mask = shoulder_component_mask_f > 0.0
-    main_component_mask = ~shoulder_component_mask
-
-    area = jnp.sum(A * main_component_mask[None, :])
-    area_sholder = jnp.sum(A * shoulder_component_mask[None, :])
-    area_total = area + area_sholder
-    numpyro.deterministic("area", area)
-    numpyro.deterministic("area_sholder", area_sholder)
-    numpyro.deterministic("area_total", area_total)
-
-    baseline_intercept = numpyro.sample(
-        "baseline_intercept",
-        dist.Uniform(
-            low=jnp.full((num_spectra,), -1000.0, dtype=jnp.float32),
-            high=jnp.full((num_spectra,), 10000.0, dtype=jnp.float32),
-        ),
-    )
-
-    peak_signal = skew_mixture_area(x_values, A, mu, sigma, alpha_component)
-    mu_y = peak_signal + baseline_intercept[:, None]
-    numpyro.deterministic("mu_y", mu_y)
-
-    if y_observed is None:
-        sigma_reference = jnp.maximum(
-            jnp.mean(sigma_initial_matrix, axis=-1),
-            jnp.array(1e-4, dtype=jnp.float32),
-        )
-        area_reference = jnp.maximum(
-            jnp.max(area_initial_matrix, axis=-1),
-            jnp.array(1.0, dtype=jnp.float32),
-        )
-        signal_scale = jnp.maximum(
-            area_reference / (2.5 * sigma_reference), jnp.array(1.0, dtype=jnp.float32)
-        )
-        noise_guess = jnp.maximum(
-            0.05 * signal_scale, jnp.array(1.0, dtype=jnp.float32)
+    sep_low = jnp.maximum(separation_low, 0.0)
+    sep_high = jnp.maximum(separation_high, sep_low + 1e-6)
+    # Only sample separation for shoulder peaks — non-shoulder separation is
+    # deterministically 0.  Sampling on a near-degenerate [0, 1e-6] interval
+    # for non-shoulder peaks causes immediate divergences.
+    # Use Uniform(low, high) — avoids the boundary-stacking that occurs when a
+    # TruncatedNormal is centred far from where the data wants to be.
+    if n_shoulder_peak > 0:
+        sep_raw = numpyro.sample(
+            "separation",
+            dist.Uniform(
+                low=sep_low[shoulder_peak_index],
+                high=sep_high[shoulder_peak_index],
+            ),
+        )  # [n_shoulder_peak]
+        separation = (
+            jnp.zeros((n_peak,), dtype=x.dtype).at[shoulder_peak_index].set(sep_raw)
         )
     else:
-        y_used_only = jnp.where(peak_observation_mask, jnp.abs(y_observed), 0.0)
-        signal_scale = jnp.maximum(
-            jnp.max(y_used_only, axis=-1),
-            jnp.array(1.0, dtype=jnp.float32),
-        )
-        residual = y_observed - mu_y
-        noise_guess = _masked_standard_deviation(
-            residual,
-            peak_observation_mask,
-            fallback=jnp.maximum(
-                0.02 * signal_scale, jnp.array(1.0, dtype=jnp.float32)
-            ),
-        )
+        separation = jnp.zeros((n_peak,), dtype=x.dtype)
 
-    sigma_y = numpyro.sample(
-        "sigma_y",
-        dist.LogNormal(
-            jnp.log(jnp.maximum(noise_guess, jnp.array(1e-6, dtype=jnp.float32))), 0.5
+    offset = 0.5 * separation[None, :] * shoulder_side_v[None, :]
+    mode_main = center_mode_trace - offset
+    mode_shoulder = center_mode_trace + offset
+    mode_pair = jnp.stack([mode_main, mode_shoulder], axis=-1)  # [n_trace, n_peak, 2]
+
+    # Note: Hard clipping removed. TruncatedNormal prior on center_mode_trace ensures bounds are
+    # respected, allowing smooth gradient flow through MCMC. Separation offsets can exceed initial
+    # bounds, which is acceptable since the likelihood will penalize poor fits.
+    numpyro.deterministic("mode", _flatten_peak_components(mode_pair))
+
+    # Derive skew-normal location from sampled mode + shape parameters.
+    delta_pair = alpha_pair / jnp.sqrt(1.0 + alpha_pair**2)  # [n_peak, 2]
+    mode_shift_pair = sigma_pair * delta_pair * _SQRT_2_OVER_PI  # [n_peak, 2]
+    mu_pair = mode_pair - mode_shift_pair[None, :, :]
+    mu = numpyro.deterministic("mu", _flatten_peak_components(mu_pair))
+
+    # --- Area parameterization: total area + split ---
+    # LogNormal prior: median = area_total_loc, CV = 0.3
+    # sigma_log = sqrt(log(1 + CV²)) = sqrt(log(1.09)) ≈ 0.294
+    # Prevents the "vanishing peak" degeneracy of Uniform(0, high): when A_total→0
+    # the peak vanishes from the likelihood, gradients on μ/σ/α collapse to zero,
+    # and NUTS gets stuck. LogNormal strongly penalises collapse toward zero.
+    area_loc_safe = jnp.maximum(area_total_loc, 1e-8)  # [n_peak]
+    _AREA_LOG_SIGMA = jnp.sqrt(jnp.log(1.0 + 0.3**2))  # ≈ 0.294, CV=30%
+    A_total = numpyro.sample(
+        "A_total",
+        dist.LogNormal(jnp.log(area_loc_safe), _AREA_LOG_SIGMA).expand(
+            (n_trace, n_peak)
         ),
     )
 
-    y_distribution = dist.Normal(mu_y, sigma_y[:, None]).mask(peak_observation_mask)
-    y_observed_masked = (
-        None
-        if y_observed is None
-        else jnp.where(peak_observation_mask, y_observed, mu_y)
+    if n_shoulder_peak > 0:
+        area_split_shoulder = numpyro.sample(
+            "area_split_shoulder",
+            dist.Uniform(0.0, 1.0).expand((n_trace, n_shoulder_peak)),
+        )
+        area_split_eff = jnp.ones((n_trace, n_peak), dtype=x.dtype)
+        area_split_eff = area_split_eff.at[:, shoulder_peak_index].set(
+            area_split_shoulder
+        )
+    else:
+        area_split_eff = jnp.ones((n_trace, n_peak), dtype=x.dtype)
+    numpyro.deterministic("area_split", area_split_eff)
+
+    A_main = A_total * area_split_eff
+    A_shoulder = A_total * (1.0 - area_split_eff) * shoulder_enabled[None, :]
+    A_pair = jnp.stack([A_main, A_shoulder], axis=-1)  # [n_trace, n_peak, 2]
+    A = numpyro.deterministic("A", _flatten_peak_components(A_pair))
+    numpyro.deterministic("area", jnp.sum(A, axis=-1))  # [n_trace]
+
+    # --- Baseline: per-trace normal priors from OLS estimates/SE ---
+    baseline_intercept = numpyro.sample(
+        "baseline_intercept",
+        dist.Normal(
+            baseline_intercept_loc,
+            jnp.maximum(baseline_intercept_scale, 1e-6),
+        ),
     )
-    numpyro.sample("y", y_distribution, obs=y_observed_masked)
+    baseline_slope = numpyro.sample(
+        "baseline_slope",
+        dist.Normal(
+            baseline_slope_loc,
+            jnp.maximum(baseline_slope_scale, 1e-8),
+        ),
+    )
+    baseline_curve = numpyro.deterministic(
+        "baseline_curve",
+        baseline_intercept[:, None] + baseline_slope[:, None] * x,
+    )
+
+    # --- Likelihood ---
+    peak_signal = skew_mixture_area(x, A, mu, sigma_flat, alpha_flat)
+    mu_y = numpyro.deterministic("mu_y", peak_signal + baseline_curve)
+
+    noise_guess = jnp.maximum(sigma_y_prior_loc, 1e-6)
+    sigma_y = numpyro.sample(
+        "sigma_y", dist.LogNormal(jnp.log(jnp.maximum(noise_guess, 1e-6)), 0.5)
+    )
+    numpyro.sample(
+        "y",
+        dist.Normal(mu_y, sigma_y[:, None]).mask(likelihood_mask),
+        obs=y_obs,
+    )
 
 
 __all__ = [
@@ -836,7 +383,9 @@ SAMPLED_PARAMETER_NAMES = (
     "mu_center",
     "mu_trace_offset",
     "separation",
-    "A",
+    "A_total",
+    "area_split_shoulder",  # sampled Beta; "area_split" is the deterministic wrapper
     "baseline_intercept",
+    "baseline_slope",
     "sigma_y",
 )
