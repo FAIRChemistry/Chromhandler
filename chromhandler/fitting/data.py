@@ -21,6 +21,7 @@ class PeakAnnotation:
     low: float
     high: float
     shoulder: Literal["left", "right"] | None = None
+    separation: float | None = None
 
     def __post_init__(self) -> None:
         if float(self.high) <= float(self.low):
@@ -31,6 +32,16 @@ class PeakAnnotation:
             raise ValueError(
                 "shoulder must be one of None, 'left', or 'right', "
                 f"got {self.shoulder!r}."
+            )
+        if self.shoulder is not None and self.separation is None:
+            raise ValueError(
+                f"Peak '{self.name}': 'separation' is required when 'shoulder' is set. "
+                "Provide the full inter-apex distance from main peak to shoulder peak "
+                "(e.g. PeakAnnotation(..., shoulder='right', separation=0.08))."
+            )
+        if self.separation is not None and float(self.separation) <= 0:
+            raise ValueError(
+                f"Peak '{self.name}': separation must be positive, got {self.separation}."
             )
 
 

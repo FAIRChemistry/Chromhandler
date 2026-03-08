@@ -1,337 +1,456 @@
+"""Chromatogram retention-time alignment via per-trace shift optimization.
+
+Public surface
+--------------
+``align_chromatograms``   — main entry point: coarse init + multi-start Adam
+``alignment_loss``        — MSE alignment loss (JAX, JIT-compatible)
+``shift_trace_linear``    — interpolation-based 1-D trace shift
+``shift_signal_vmap``     — vectorized shift over a batch of traces
+``ShiftAlignmentResult``  — result dataclass
+
+Algorithm
+---------
+1. Coarse integer-lag initialization via masked cross-correlation to template.
+2. Multi-start Adam refinement:  N perturbed copies of the coarse init are
+   optimized in parallel via ``jax.jit(jax.vmap(...))``.  The best result
+   (minimum final loss) is returned.
+3. Loss = MSE between shifted signal and mean template, restricted to the
+   caller-supplied mask (typically peak windows + baseline regions), plus
+   a small L2 penalty on the mean shift that keeps traces zero-centred.
+
+Intensity weighting
+-------------------
+Because the loss is sum-of-squared-residuals, high-intensity regions
+automatically receive larger gradient contributions and therefore dominate
+the alignment.  Restricting the mask to peak windows further concentrates
+the alignment on signal-bearing regions.  No explicit normalization is
+applied — high-intensity signals are trusted more by construction.
+"""
+
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class ShiftAlignmentResult:
-    """Single-stage retention-shift alignment result for signals [C, N]."""
+    """Result of chromatogram alignment.
 
-    shifts_samples: jnp.ndarray  # [C]
-    signal_aligned: jnp.ndarray  # [C, N]
-    template: jnp.ndarray  # [N]
+    Attributes
+    ----------
+    shifts_samples : jnp.ndarray  [C]
+        Per-trace shift in sample-index units (positive = shift right).
+    signal_aligned : jnp.ndarray  [C, N]
+        The original (unmodified) signal.  Alignment is X-axis-only: the
+        *time* axis is updated by the caller, not the signal values.
+    template : jnp.ndarray  [N]
+        Mean template computed from all traces after applying the best shifts.
+    loss_initial : float
+        Alignment loss before optimization.
+    loss_final : float
+        Alignment loss after optimization.
+    """
+
+    shifts_samples: jnp.ndarray
+    signal_aligned: jnp.ndarray
+    template: jnp.ndarray
     loss_initial: float
     loss_final: float
-    loss_history: Optional[jnp.ndarray] = None
+
+
+# ---------------------------------------------------------------------------
+# Trace shifting (interpolation)
+# ---------------------------------------------------------------------------
 
 
 def shift_trace_linear(
     signal_trace: jnp.ndarray,
     delta_samples: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Shift one 1D trace by a continuous amount using linear interpolation."""
+    """Shift one 1-D trace by a continuous amount using linear interpolation."""
     signal_trace = jnp.asarray(signal_trace, dtype=jnp.float32)
     delta_samples = jnp.asarray(delta_samples, dtype=jnp.float32)
 
-    num_points = signal_trace.shape[0]
-    index = jnp.arange(num_points, dtype=jnp.float32)
-    source_index = index - delta_samples
+    n = signal_trace.shape[0]
+    idx = jnp.arange(n, dtype=jnp.float32)
+    src = idx - delta_samples
 
-    left_index = jnp.floor(source_index).astype(jnp.int32)
-    right_index = left_index + 1
+    left = jnp.clip(jnp.floor(src).astype(jnp.int32), 0, n - 1)
+    right = jnp.clip(left + 1, 0, n - 1)
+    w_right = src - jnp.floor(src)
+    w_left = 1.0 - w_right
 
-    left_index = jnp.clip(left_index, 0, num_points - 1)
-    right_index = jnp.clip(right_index, 0, num_points - 1)
-
-    right_weight = source_index - jnp.floor(source_index)
-    left_weight = 1.0 - right_weight
-    return (
-        left_weight * signal_trace[left_index]
-        + right_weight * signal_trace[right_index]
-    )
+    return w_left * signal_trace[left] + w_right * signal_trace[right]
 
 
-shift_signal_by_trace_shifts = jax.vmap(
+shift_signal_vmap: jnp.ndarray = jax.vmap(
     shift_trace_linear,
     in_axes=(0, 0),
     out_axes=0,
-)  # [C,N], [C] -> [C,N]
+)  # [C, N], [C] -> [C, N]
 
 
-def _masked_template(
-    shifted_signal: jnp.ndarray,
-    mask: Optional[jnp.ndarray],
-) -> jnp.ndarray:
-    """Compute per-time template from aligned traces, optionally masked."""
+# ---------------------------------------------------------------------------
+# Template computation
+# ---------------------------------------------------------------------------
+
+
+def _compute_template(
+    shifted_signal: jnp.ndarray,   # [C, N]
+    mask: Optional[jnp.ndarray],   # [C, N] bool or None
+) -> jnp.ndarray:                   # [N]
+    """Per-timepoint template from aligned traces, optionally masked."""
     if mask is None:
         return jnp.mean(shifted_signal, axis=0)
 
     weights = jnp.asarray(mask, dtype=jnp.float32)
-    weight_sum = jnp.sum(weights, axis=0)
-    safe_weight_sum = jnp.maximum(weight_sum, jnp.array(1.0, dtype=jnp.float32))
-    return jnp.sum(shifted_signal * weights, axis=0) / safe_weight_sum
+    weight_sum = jnp.maximum(jnp.sum(weights, axis=0), 1.0)
+    return jnp.sum(shifted_signal * weights, axis=0) / weight_sum
 
 
-def _coarse_shift_initialization(
-    signal: jnp.ndarray,
-    mask: Optional[jnp.ndarray],
-    max_shift_samples: Optional[float],
-) -> jnp.ndarray:
-    """Estimate integer shift seeds by per-trace masked correlation to a template."""
-    signal_array = np.asarray(signal, dtype=np.float32)
-    num_chromatograms, num_points = signal_array.shape
-    if num_points < 3 or num_chromatograms == 0:
-        return jnp.zeros((num_chromatograms,), dtype=jnp.float32)
+# ---------------------------------------------------------------------------
+# Coarse integer-lag initialization (NumPy, one-time call)
+# ---------------------------------------------------------------------------
 
-    if mask is None:
-        mask_array = np.ones_like(signal_array, dtype=bool)
-    else:
-        mask_array = np.asarray(mask, dtype=bool)
 
-    template = np.asarray(_masked_template(signal, mask), dtype=np.float32)
+def _coarse_shift_init(
+    signal: np.ndarray,            # [C, N]
+    mask: np.ndarray | None,       # [C, N] bool or None
+    max_shift_samples: float | None,
+) -> np.ndarray:                   # [C] float32 integer lag estimates
+    """Estimate per-trace integer shifts via masked cross-correlation."""
+    C, N = signal.shape
+    if N < 3 or C == 0:
+        return np.zeros(C, dtype=np.float32)
 
-    if max_shift_samples is not None:
-        search_radius = int(max(1, np.ceil(float(max_shift_samples))))
-    else:
-        # Conservative default radius; users can enlarge via `max_shift_samples`.
-        search_radius = int(max(8, min(num_points // 50, 20)))
-    search_radius = min(search_radius, max(num_points - 2, 1))
-    lag_grid = np.arange(-search_radius, search_radius + 1, dtype=np.int32)
+    mask_arr = (
+        np.ones((C, N), dtype=bool)
+        if mask is None
+        else np.asarray(mask, dtype=bool)
+    )
 
-    initial = np.zeros((num_chromatograms,), dtype=np.float32)
-    for chrom_idx in range(num_chromatograms):
-        trace = signal_array[chrom_idx]
-        trace_mask = mask_array[chrom_idx]
-        if int(np.sum(trace_mask)) < 3:
-            continue
+    # Template = unweighted mean over valid (masked) values.
+    # Columns with no valid points (all-False mask) naturally produce NaN;
+    # suppress the spurious RuntimeWarning and replace with 0.
+    with np.errstate(all="ignore"):
+        template = np.nanmean(np.where(mask_arr, signal, np.nan), axis=0)
+    template = np.where(np.isfinite(template), template, 0.0)
 
-        best_score = -np.inf
-        best_lag = 0
-        for lag in lag_grid:
+    radius = (
+        int(np.ceil(max_shift_samples))
+        if max_shift_samples is not None
+        else min(max(8, N // 50), 20)
+    )
+    radius = min(radius, N - 2)
+
+    initial = np.zeros(C, dtype=np.float32)
+    for c in range(C):
+        trace, m = signal[c], mask_arr[c]
+        best_score, best_lag = -np.inf, 0
+        for lag in np.arange(-radius, radius + 1, dtype=np.int32):
+            lag = int(lag)
             if lag >= 0:
-                n_valid = num_points - int(lag)
-                trace_segment = trace[:n_valid]
-                template_segment = template[int(lag) :]
-                mask_segment = trace_mask[int(lag) :]
+                sl = slice(lag, None)
+                tl = slice(None, N - lag) if lag > 0 else slice(None, None)
             else:
-                offset = int(-lag)
-                n_valid = num_points - offset
-                trace_segment = trace[offset:]
-                template_segment = template[:n_valid]
-                mask_segment = trace_mask[:n_valid]
-
-            if n_valid < 3 or int(np.sum(mask_segment)) < 3:
+                sl = slice(None, lag)
+                tl = slice(-lag, None)
+            y = trace[sl][m[sl]]
+            t = template[tl][m[sl]]
+            if y.size < 3:
                 continue
-
-            y_values = np.asarray(trace_segment[mask_segment], dtype=np.float64)
-            t_values = np.asarray(template_segment[mask_segment], dtype=np.float64)
-            y_centered = y_values - float(np.mean(y_values))
-            t_centered = t_values - float(np.mean(t_values))
-            denominator = np.sqrt(
-                float(np.sum(y_centered * y_centered))
-                * float(np.sum(t_centered * t_centered))
-            )
-            if denominator <= 1e-12:
+            yc = y - y.mean()
+            tc = t - t.mean()
+            denom = np.sqrt((yc ** 2).sum() * (tc ** 2).sum())
+            if denom < 1e-12:
                 continue
-            score = float(np.sum(y_centered * t_centered) / denominator)
+            score = float((yc * tc).sum() / denom)
             if score > best_score:
-                best_score = score
-                best_lag = int(lag)
+                best_score, best_lag = score, lag
+        initial[c] = float(best_lag)
 
-        initial[chrom_idx] = float(best_lag)
-
-    return jnp.asarray(initial, dtype=jnp.float32)
+    return initial
 
 
-def single_stage_alignment_loss(
-    shifts_samples: jnp.ndarray,
-    signal: jnp.ndarray,
+# ---------------------------------------------------------------------------
+# Alignment loss (JAX, JIT-compatible)
+# ---------------------------------------------------------------------------
+
+
+def alignment_loss(
+    shifts_samples: jnp.ndarray,   # [C]
+    signal: jnp.ndarray,           # [C, N]
     mask: Optional[jnp.ndarray] = None,
     center_weight: float = 1e3,
 ) -> jnp.ndarray:
-    """Loss for global one-stage alignment of traces [C, N]."""
+    """MSE alignment loss for shift parameters.
+
+    Parameters
+    ----------
+    shifts_samples : [C]
+        Per-trace shifts to evaluate.
+    signal : [C, N]
+        Signal matrix (should have NaN replaced with 0 before calling).
+    mask : [C, N] bool or None
+        Restrict loss to masked timepoints.  None = use all points.
+    center_weight : float
+        Penalty coefficient on ``mean(shifts)^2``, keeps shifts zero-centred.
+    """
     signal = jnp.asarray(signal, dtype=jnp.float32)
     shifts_samples = jnp.asarray(shifts_samples, dtype=jnp.float32)
-    shifted_signal = shift_signal_by_trace_shifts(signal, shifts_samples)
 
-    template = _masked_template(shifted_signal, mask)
-    residual = shifted_signal - template[None, :]
+    shifted = shift_signal_vmap(signal, shifts_samples)
+    template = _compute_template(shifted, mask)
+    residual = shifted - template[None, :]
 
     if mask is None:
-        data_term = jnp.sum(residual**2)
+        data_term = jnp.sum(residual ** 2)
     else:
         mask_bool = jnp.asarray(mask, dtype=bool)
-        data_term = jnp.sum(jnp.where(mask_bool, residual**2, 0.0))
+        data_term = jnp.sum(jnp.where(mask_bool, residual ** 2, 0.0))
 
-    center_term = jnp.asarray(center_weight, dtype=jnp.float32) * (
-        jnp.mean(shifts_samples) ** 2
-    )
+    center_term = jnp.float32(center_weight) * jnp.mean(shifts_samples) ** 2
     return data_term + center_term
 
 
-def _adam_optimize(
-    initial_params: jnp.ndarray,
-    loss_fn: Callable[[jnp.ndarray], jnp.ndarray],
+# ---------------------------------------------------------------------------
+# Adam optimizer via lax.scan (vmappable)
+# ---------------------------------------------------------------------------
+
+
+def _adam_scan(
+    initial_params: jnp.ndarray,   # [C]
+    signal: jnp.ndarray,            # [C, N]
+    mask: Optional[jnp.ndarray],   # [C, N] bool or None
+    *,
     lr: float,
     n_steps: int,
-    max_shift_samples: Optional[float],
-    recenter_fn: Optional[Callable[[jnp.ndarray], jnp.ndarray]],
-    return_history: bool,
-) -> tuple[jnp.ndarray, float, float, Optional[jnp.ndarray]]:
-    """Adam optimizer for shift parameters."""
-    if n_steps <= 0:
-        raise ValueError("`n_steps` must be > 0.")
+    center_weight: float,
+    max_shift_samples: float | None,
+    enforce_zero_mean: bool,
+) -> tuple[jnp.ndarray, jnp.ndarray]:   # (final_params [C], final_loss scalar)
+    """Single Adam run using jax.lax.scan — safe to vmap.
 
-    params = jnp.asarray(initial_params, dtype=jnp.float32)
-    beta1 = jnp.asarray(0.9, dtype=jnp.float32)
-    beta2 = jnp.asarray(0.999, dtype=jnp.float32)
-    epsilon = jnp.asarray(1e-8, dtype=jnp.float32)
-    learning_rate = jnp.asarray(lr, dtype=jnp.float32)
-
-    first_moment = jnp.zeros_like(params)
-    second_moment = jnp.zeros_like(params)
-    loss_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-
-    loss_initial = float(loss_fn(params))
-    history = [] if return_history else None
-
-    for step_index in range(1, int(n_steps) + 1):
-        loss_value, gradient = loss_and_grad(params)
-        if return_history and history is not None:
-            history.append(loss_value)
-
-        first_moment = beta1 * first_moment + (1.0 - beta1) * gradient
-        second_moment = beta2 * second_moment + (1.0 - beta2) * (gradient**2)
-
-        first_unbiased = first_moment / (1.0 - beta1**step_index)
-        second_unbiased = second_moment / (1.0 - beta2**step_index)
-        params = params - learning_rate * first_unbiased / (
-            jnp.sqrt(second_unbiased) + epsilon
-        )
-
-        if max_shift_samples is not None:
-            clip_value = jnp.asarray(max_shift_samples, dtype=jnp.float32)
-            params = jnp.clip(params, -clip_value, clip_value)
-
-        if recenter_fn is not None:
-            params = recenter_fn(params)
-
-    loss_final = float(loss_fn(params))
-    history_out = None
-    if return_history and history is not None:
-        history_out = jnp.asarray(history, dtype=jnp.float32)
-
-    return params, loss_initial, loss_final, history_out
-
-
-def align_chromatogram_shifts(
-    signal: jnp.ndarray,
-    mask: Optional[jnp.ndarray] = None,
-    lr: float = 1e-2,
-    n_steps: int = 500,
-    center_weight: float = 1e3,
-    max_shift_samples: Optional[float] = None,
-    enforce_zero_mean: bool = True,
-    return_history: bool = False,
-) -> ShiftAlignmentResult:
-    """Align traces with one shift per chromatogram for signal shape [C, N]."""
-    signal = jnp.asarray(signal, dtype=jnp.float32)
-    if signal.ndim != 2:
-        raise ValueError(f"`signal` must be [C, N], got {signal.shape}")
-
-    finite_signal = jnp.isfinite(signal)
-    signal_clean = jnp.where(finite_signal, signal, 0.0)
-
-    mask_clean: Optional[jnp.ndarray]
-    if mask is None:
-        mask_clean = finite_signal
-    else:
-        mask_arr = jnp.asarray(mask, dtype=bool)
-        if mask_arr.shape != signal.shape:
-            raise ValueError(
-                f"`mask` must match signal shape {signal.shape}, got {mask_arr.shape}"
-            )
-        mask_clean = mask_arr & finite_signal
-
-    initial_shifts = _coarse_shift_initialization(
-        signal_clean,
-        mask_clean,
-        max_shift_samples=max_shift_samples,
-    )
-    if enforce_zero_mean:
-        initial_shifts = initial_shifts - jnp.mean(initial_shifts)
-    if max_shift_samples is not None:
-        clip_value = jnp.asarray(max_shift_samples, dtype=jnp.float32)
-        initial_shifts = jnp.clip(initial_shifts, -clip_value, clip_value)
-    recenter_fn = (lambda z: z - jnp.mean(z)) if enforce_zero_mean else None
-
-    def loss_fn(shifts: jnp.ndarray) -> jnp.ndarray:
-        return single_stage_alignment_loss(
-            shifts,
-            signal_clean,
-            mask=mask_clean,
-            center_weight=center_weight,
-        )
-
-    shifts_samples, loss_initial, loss_final, history = _adam_optimize(
-        initial_params=initial_shifts,
-        loss_fn=loss_fn,
-        lr=lr,
-        n_steps=n_steps,
-        max_shift_samples=max_shift_samples,
-        recenter_fn=recenter_fn,
-        return_history=return_history,
-    )
-
-    # X-axis-only contract: keep measured y-values unchanged.
-    signal_aligned = signal_clean
-    shifted_for_template = shift_signal_by_trace_shifts(signal_clean, shifts_samples)
-    template = _masked_template(shifted_for_template, mask_clean)
-
-    return ShiftAlignmentResult(
-        shifts_samples=shifts_samples,
-        signal_aligned=signal_aligned,
-        template=template,
-        loss_initial=loss_initial,
-        loss_final=loss_final,
-        loss_history=history,
-    )
-
-
-def align_groupwise_sample_shifts(
-    signal: jnp.ndarray,
-    mask: Optional[jnp.ndarray] = None,
-    lr: float = 1e-2,
-    n_steps: int = 500,
-    center_weight: float = 1e3,
-    max_shift_samples: Optional[float] = None,
-    enforce_zero_mean: bool = True,
-    return_history: bool = False,
-) -> ShiftAlignmentResult:
-    """Backward-compat wrapper for the former two-stage API.
-
-    This project now uses a single-stage aligner for 2D signals with shape
-    ``[n_chromatograms, n_timepoints]``. The wrapper is kept to avoid import
-    breakage in older modules and forwards to `align_chromatogram_shifts`.
+    No jax.jit calls inside: the outer jit(vmap(...)) handles compilation.
+    Python constants (max_shift_samples, enforce_zero_mean) become
+    compile-time branches during JAX tracing.
     """
-    signal = jnp.asarray(signal)
-    if signal.ndim != 2:
-        raise ValueError(
-            "Single-stage alignment requires 2D signal [n_chromatograms, n_timepoints], "
-            f"got {signal.shape}."
-        )
-    return align_chromatogram_shifts(
-        signal=signal,
-        mask=mask,
+    val_and_grad = jax.value_and_grad(
+        lambda s: alignment_loss(s, signal, mask=mask, center_weight=center_weight)
+    )
+
+    def step(carry: tuple, _: None) -> tuple[tuple, None]:
+        p, m, v, t = carry
+        _, g = val_and_grad(p)
+        t = t + jnp.int32(1)
+        m = jnp.float32(0.9) * m + jnp.float32(0.1) * g
+        v = jnp.float32(0.999) * v + jnp.float32(0.001) * g ** 2
+        m_hat = m / (jnp.float32(1.0) - jnp.float32(0.9) ** t)
+        v_hat = v / (jnp.float32(1.0) - jnp.float32(0.999) ** t)
+        p = p - jnp.float32(lr) * m_hat / (jnp.sqrt(v_hat) + jnp.float32(1e-8))
+        if max_shift_samples is not None:
+            p = jnp.clip(p, -max_shift_samples, max_shift_samples)
+        if enforce_zero_mean:
+            p = p - jnp.mean(p)
+        return (p, m, v, t), None
+
+    init_carry = (
+        jnp.asarray(initial_params, dtype=jnp.float32),
+        jnp.zeros_like(initial_params, dtype=jnp.float32),
+        jnp.zeros_like(initial_params, dtype=jnp.float32),
+        jnp.zeros((), dtype=jnp.int32),
+    )
+    (p_final, _, _, _), _ = jax.lax.scan(step, init_carry, None, length=int(n_steps))
+    final_loss = alignment_loss(p_final, signal, mask=mask, center_weight=center_weight)
+    return p_final, final_loss
+
+
+# ---------------------------------------------------------------------------
+# Multi-start optimization via jit(vmap(...))
+# ---------------------------------------------------------------------------
+
+
+def _multistart_optimize(
+    coarse_init: jnp.ndarray,       # [C]
+    signal: jnp.ndarray,             # [C, N]
+    mask: Optional[jnp.ndarray],    # [C, N] bool or None
+    *,
+    n_starts: int,
+    sigma_perturb: float,
+    seed: int,
+    lr: float,
+    n_steps: int,
+    center_weight: float,
+    max_shift_samples: float | None,
+    enforce_zero_mean: bool,
+) -> jnp.ndarray:   # [C] best shifts
+    """Run N perturbed Adam starts in parallel; return the best result.
+
+    Uses ``jax.jit(jax.vmap(run_one))`` to compile the whole batch once.
+    """
+    key = jax.random.PRNGKey(seed)
+    noise = jax.random.normal(key, shape=(n_starts - 1, coarse_init.shape[0]))
+    perturbed = coarse_init[None, :] + jnp.float32(sigma_perturb) * noise  # [n_starts-1, C]
+    all_inits = jnp.concatenate(
+        [coarse_init[None, :], perturbed], axis=0
+    )  # [n_starts, C]
+
+    if enforce_zero_mean:
+        all_inits = all_inits - jnp.mean(all_inits, axis=1, keepdims=True)
+    if max_shift_samples is not None:
+        all_inits = jnp.clip(all_inits, -max_shift_samples, max_shift_samples)
+
+    adam_kwargs = dict(
         lr=lr,
         n_steps=n_steps,
         center_weight=center_weight,
         max_shift_samples=max_shift_samples,
         enforce_zero_mean=enforce_zero_mean,
-        return_history=return_history,
+    )
+
+    run_one = functools.partial(_adam_scan, signal=signal, mask=mask, **adam_kwargs)
+
+    # jit(vmap(f)): compile the entire batch once
+    all_params, all_losses = jax.jit(jax.vmap(run_one))(all_inits)  # [n_starts, C], [n_starts]
+    return all_params[jnp.argmin(all_losses)]  # [C]
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def align_chromatograms(
+    signal: jnp.ndarray,
+    mask: Optional[jnp.ndarray] = None,
+    *,
+    lr: float = 1e-2,
+    n_steps: int = 500,
+    center_weight: float = 1e3,
+    max_shift_samples: Optional[float] = None,
+    enforce_zero_mean: bool = True,
+    n_starts: int = 16,
+    sigma_perturb: float = 3.0,
+    seed: int = 0,
+) -> ShiftAlignmentResult:
+    """Align traces with one shift per chromatogram.
+
+    Parameters
+    ----------
+    signal : [C, N]
+        Signal matrix (chromatograms × timepoints).
+    mask : [C, N] bool or None
+        Restrict alignment to these timepoints (e.g. peak windows + baseline
+        regions).  None = use all finite points.
+    lr : float
+        Adam learning rate.
+    n_steps : int
+        Adam iterations per start.
+    center_weight : float
+        Penalty on ``mean(shifts)^2`` to keep shifts zero-centred.
+    max_shift_samples : float or None
+        Hard bound on shift magnitudes (samples).
+    enforce_zero_mean : bool
+        Re-centre shifts after each step.
+    n_starts : int
+        Number of independent Adam starts.  Start 0 uses the coarse
+        correlation estimate; starts 1..n_starts-1 are perturbed copies.
+        Set to 1 to skip multi-start (faster, less robust).
+    sigma_perturb : float
+        Standard deviation of perturbation noise (samples) for starts 1+.
+    seed : int
+        PRNG seed for perturbation noise.
+
+    Returns
+    -------
+    ShiftAlignmentResult
+        Best shifts, original signal, aligned template, and loss values.
+        ``signal_aligned`` is the *original* signal — the caller is expected
+        to update the time axis: ``time += shifts_samples * dt``.
+    """
+    signal = jnp.asarray(signal, dtype=jnp.float32)
+    if signal.ndim != 2:
+        raise ValueError(f"`signal` must be [C, N], got shape {signal.shape}")
+
+    finite = jnp.isfinite(signal)
+    signal_clean = jnp.where(finite, signal, jnp.float32(0.0))
+
+    if mask is None:
+        mask_clean: Optional[jnp.ndarray] = finite
+    else:
+        mask_arr = jnp.asarray(mask, dtype=bool)
+        if mask_arr.shape != signal.shape:
+            raise ValueError(
+                f"`mask` shape {mask_arr.shape} does not match signal shape {signal.shape}"
+            )
+        mask_clean = mask_arr & finite
+
+    # Coarse integer-lag initialization (NumPy, one-time)
+    coarse_init = _coarse_shift_init(
+        np.asarray(signal_clean),
+        np.asarray(mask_clean) if mask_clean is not None else None,
+        max_shift_samples,
+    )
+    coarse_init_jax = jnp.asarray(coarse_init, dtype=jnp.float32)
+    if enforce_zero_mean:
+        coarse_init_jax = coarse_init_jax - jnp.mean(coarse_init_jax)
+    if max_shift_samples is not None:
+        coarse_init_jax = jnp.clip(coarse_init_jax, -max_shift_samples, max_shift_samples)
+
+    loss_initial = float(
+        alignment_loss(coarse_init_jax, signal_clean, mask=mask_clean, center_weight=center_weight)
+    )
+
+    adam_kwargs = dict(
+        lr=lr,
+        n_steps=n_steps,
+        center_weight=center_weight,
+        max_shift_samples=max_shift_samples,
+        enforce_zero_mean=enforce_zero_mean,
+    )
+
+    if n_starts == 1:
+        best_shifts, _ = _adam_scan(coarse_init_jax, signal_clean, mask_clean, **adam_kwargs)
+    else:
+        best_shifts = _multistart_optimize(
+            coarse_init_jax, signal_clean, mask_clean,
+            n_starts=n_starts,
+            sigma_perturb=sigma_perturb,
+            seed=seed,
+            **adam_kwargs,
+        )
+
+    loss_final = float(
+        alignment_loss(best_shifts, signal_clean, mask=mask_clean, center_weight=center_weight)
+    )
+
+    shifted_for_template = shift_signal_vmap(signal_clean, best_shifts)
+    template = _compute_template(shifted_for_template, mask_clean)
+
+    return ShiftAlignmentResult(
+        shifts_samples=best_shifts,
+        signal_aligned=signal_clean,   # X-axis-only: caller updates time, not signal
+        template=template,
+        loss_initial=loss_initial,
+        loss_final=loss_final,
     )
 
 
 __all__ = [
     "ShiftAlignmentResult",
-    "align_groupwise_sample_shifts",
-    "align_chromatogram_shifts",
-    "shift_signal_by_trace_shifts",
+    "align_chromatograms",
+    "alignment_loss",
+    "shift_signal_vmap",
     "shift_trace_linear",
-    "single_stage_alignment_loss",
 ]
