@@ -583,9 +583,9 @@ if __name__ == "__main__":
 
     arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
         -1, 3000
-    )[-4:, :1000]
+    )[:21, :1000]
     time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        -4:, :1000
+        :21, :1000
     ]
 
     baselines = [
@@ -593,14 +593,12 @@ if __name__ == "__main__":
         BaselineAnnotation(low=4, high=4.1),
     ]
     peaks = [
-        PeakAnnotation(
-            name="peak1", low=2.6, high=2.85, shoulder="right", separation=0.04
-        ),
+        PeakAnnotation(name="peak1", low=2.6, high=2.85),
         PeakAnnotation(
             name="peak2", low=2.85, high=3.15, shoulder="right", separation=0.08
         ),
         PeakAnnotation(
-            name="peak3", low=3.15, high=3.45, shoulder="right", separation=0.04
+            name="peak3", low=3.15, high=3.45, shoulder="left", separation=0.07
         ),
     ]
 
