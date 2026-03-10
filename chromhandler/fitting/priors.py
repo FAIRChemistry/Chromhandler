@@ -5,9 +5,9 @@ All priors are derived from:
 
 - **Apex-height-weighted centroid**      → mu_loc, mu_scale
 - **FWHM half-width geometry**           → sigma_loc, sigma_scale, alpha_loc, alpha_scale
-- **Gaussian area from apex × sigma**    → main_area_per_trace
-- **Trapezoid total-window integration** → total_area_per_trace
-- **Residual integration**               → artefact_shoulder_area_loc (artefact peaks only)
+- **Gaussian area from apex × sigma**    → dominant_area_loc_per_trace
+- **Trapezoid total-window integration** → area_total_loc_per_trace
+- **Residual integration**               → artefact_area_loc_shared (artefact peaks only)
 
 Pipeline
 --------
@@ -963,34 +963,34 @@ def geometric_priors_to_arrays(
     -------
     dict with keys:
 
-    - ``mu_center_loc``      [n_peak]          — apex-weighted centroid.
-    - ``mu_center_scale``    [n_peak]          — centroid spread across traces.
+    - ``apex_anchor_loc``    [n_peak]          — apex-weighted centroid.
+    - ``apex_anchor_scale``  [n_peak]          — centroid spread across traces.
     - ``sigma_loc``          [n_peak]          — FWHM-derived sigma prior centres.
     - ``sigma_scale``        [n_peak]          — FWHM-derived sigma prior scales.
     - ``alpha_loc``          [n_peak]          — FWHM-derived alpha prior centres.
     - ``alpha_scale``        [n_peak]          — FWHM-derived alpha prior scales.
     - ``window_lo``          [n_peak]          — window lower bounds.
     - ``window_hi``          [n_peak]          — window upper bounds.
-    - ``main_area_per_trace``       [n_peak, n_trace] — per-trace Gaussian main areas.
-    - ``total_area_per_trace``      [n_peak, n_trace] — per-trace total window areas.
-    - ``artefact_shoulder_area_prior`` [n_artefact]   — shared artefact shoulder area prior centres.
+    - ``dominant_area_loc_per_trace`` [n_peak, n_trace] — per-trace Gaussian dominant areas.
+    - ``area_total_loc_per_trace``    [n_peak, n_trace] — per-trace total window areas.
+    - ``artefact_area_loc_shared``    [n_artefact]      — shared artefact area prior centres.
     """
     return {
-        "mu_center_loc": np.array([p.mu_loc for p in priors], dtype=np.float32),
-        "mu_center_scale": np.array([p.mu_scale for p in priors], dtype=np.float32),
+        "apex_anchor_loc": np.array([p.mu_loc for p in priors], dtype=np.float32),
+        "apex_anchor_scale": np.array([p.mu_scale for p in priors], dtype=np.float32),
         "sigma_loc": np.array([p.sigma_loc for p in priors], dtype=np.float32),
         "sigma_scale": np.array([p.sigma_scale for p in priors], dtype=np.float32),
         "alpha_loc": np.array([p.alpha_loc for p in priors], dtype=np.float32),
         "alpha_scale": np.array([p.alpha_scale for p in priors], dtype=np.float32),
         "window_lo": np.array([p.window_lo for p in priors], dtype=np.float32),
         "window_hi": np.array([p.window_hi for p in priors], dtype=np.float32),
-        "main_area_per_trace": np.array(
+        "dominant_area_loc_per_trace": np.array(
             [p.main_area_per_trace for p in priors], dtype=np.float32
         ),  # [n_peak, n_trace]
-        "total_area_per_trace": np.array(
+        "area_total_loc_per_trace": np.array(
             [p.total_area_per_trace for p in priors], dtype=np.float32
         ),  # [n_peak, n_trace]
-        "artefact_shoulder_area_prior": np.array(
+        "artefact_area_loc_shared": np.array(
             [
                 p.artefact_shoulder_area_loc
                 for p in priors

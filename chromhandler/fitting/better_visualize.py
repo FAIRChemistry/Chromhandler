@@ -347,8 +347,8 @@ def plot_prior_traces(
     baseline_slope: np.ndarray,
     baseline_intercept_scale: np.ndarray,
     baseline_slope_scale: np.ndarray,
-    mu_center_loc: Optional[np.ndarray] = None,
-    mu_center_scale: Optional[np.ndarray] = None,
+    apex_anchor_loc: Optional[np.ndarray] = None,
+    apex_anchor_scale: Optional[np.ndarray] = None,
     approx_center_trace: Optional[np.ndarray] = None,
     approx_height_trace: Optional[np.ndarray] = None,
     approx_sigma_trace: Optional[np.ndarray] = None,
@@ -356,7 +356,7 @@ def plot_prior_traces(
     approx_fallback_trace: Optional[np.ndarray] = None,
     *,
     show_baseline: bool = True,
-    show_mu_prior: bool = True,
+    show_apex_anchor_prior: bool = True,
     show_gaussian_prior_peak: bool = True,
     show_peak_bounds: bool = True,
     figsize: Optional[tuple[float, float]] = None,
@@ -382,12 +382,12 @@ def plot_prior_traces(
         Baseline intercept prior scale, shape [n_trace].
     baseline_slope_scale : np.ndarray
         Baseline slope prior scale, shape [n_trace].
-    mu_center_loc : np.ndarray or None
-        Peak-center prior locations, shape [n_peak]. If provided, drawn as
+    apex_anchor_loc : np.ndarray or None
+        Peak anchor prior locations, shape [n_peak]. If provided, drawn as
         vertical lines in each corresponding peak window.
-    mu_center_scale : np.ndarray or None
-        Peak-center prior scales, shape [n_peak]. If provided, drawn as
-        vertical shaded bands spanning ``mu_center_loc ± mu_center_scale``.
+    apex_anchor_scale : np.ndarray or None
+        Peak anchor prior scales, shape [n_peak]. If provided, drawn as
+        vertical shaded bands spanning ``apex_anchor_loc ± apex_anchor_scale``.
     approx_center_trace : np.ndarray or None
         Dense Gaussian-approximation centers, shape [n_trace, n_peak].
     approx_height_trace : np.ndarray or None
@@ -402,9 +402,9 @@ def plot_prior_traces(
         shape [n_trace, n_peak].
     show_baseline : bool
         If True, overlay baseline prior with uncertainty band.
-    show_mu_prior : bool
-        If True and ``mu_center_loc`` / ``mu_center_scale`` are provided,
-        overlay the center prior as a vertical line with a shaded band.
+    show_apex_anchor_prior : bool
+        If True and ``apex_anchor_loc`` / ``apex_anchor_scale`` are provided,
+        overlay the anchor prior as a vertical line with a shaded band.
     show_gaussian_prior_peak : bool
         If True and all approximation arrays are provided, overlay the
         baseline-plus-Gaussian prior peak approximation.
@@ -447,9 +447,13 @@ def plot_prior_traces(
     b_slope = np.asarray(baseline_slope, dtype=float)
     b_intercept_scale = np.asarray(baseline_intercept_scale, dtype=float)
     b_slope_scale = np.asarray(baseline_slope_scale, dtype=float)
-    mu_loc = None if mu_center_loc is None else np.asarray(mu_center_loc, dtype=float)
-    mu_scale = (
-        None if mu_center_scale is None else np.asarray(mu_center_scale, dtype=float)
+    apex_loc = (
+        None if apex_anchor_loc is None else np.asarray(apex_anchor_loc, dtype=float)
+    )
+    apex_scale = (
+        None
+        if apex_anchor_scale is None
+        else np.asarray(apex_anchor_scale, dtype=float)
     )
     approx_center_arr = (
         None
@@ -477,17 +481,17 @@ def plot_prior_traces(
         else np.asarray(approx_fallback_trace, dtype=bool)
     )
 
-    if (mu_loc is None) != (mu_scale is None):
+    if (apex_loc is None) != (apex_scale is None):
         raise ValueError(
-            "mu_center_loc and mu_center_scale must either both be provided or both be omitted."
+            "apex_anchor_loc and apex_anchor_scale must either both be provided or both be omitted."
         )
-    if mu_loc is not None and mu_loc.shape[0] != n_peak:
+    if apex_loc is not None and apex_loc.shape[0] != n_peak:
         raise ValueError(
-            f"mu_center_loc must have length {n_peak}, got shape {mu_loc.shape}."
+            f"apex_anchor_loc must have length {n_peak}, got shape {apex_loc.shape}."
         )
-    if mu_scale is not None and mu_scale.shape[0] != n_peak:
+    if apex_scale is not None and apex_scale.shape[0] != n_peak:
         raise ValueError(
-            f"mu_center_scale must have length {n_peak}, got shape {mu_scale.shape}."
+            f"apex_anchor_scale must have length {n_peak}, got shape {apex_scale.shape}."
         )
     gaussian_inputs = [
         approx_center_arr,
@@ -602,12 +606,16 @@ def plot_prior_traces(
                             ),
                         )
 
-            if show_mu_prior and mu_loc is not None and mu_scale is not None:
+            if (
+                show_apex_anchor_prior
+                and apex_loc is not None
+                and apex_scale is not None
+            ):
                 add_vertical_prior_band(
                     ax,
-                    mu_loc[p],
-                    mu_scale[p],
-                    label="mu prior" if (t == 0 and p == 0) else "",
+                    apex_loc[p],
+                    apex_scale[p],
+                    label="anchor prior" if (t == 0 and p == 0) else "",
                     color="tab:orange",
                     alpha=0.18,
                     linewidth=1.5,
@@ -813,7 +821,7 @@ def plot_sigma_alpha_scatter(
 
 def _compute_skew_normal_component(
     x: jnp.ndarray,
-    mu: jnp.ndarray,
+    xi: jnp.ndarray,
     sigma: jnp.ndarray,
     alpha: jnp.ndarray,
     area: jnp.ndarray,
@@ -824,7 +832,7 @@ def _compute_skew_normal_component(
     ----------
     x : jnp.ndarray
         Time axis [n_window]
-    mu : jnp.ndarray
+    xi : jnp.ndarray
         Location parameter [n_total]
     sigma : jnp.ndarray
         Scale parameter [n_total]
@@ -839,11 +847,11 @@ def _compute_skew_normal_component(
         Component signal [n_total, n_window]
     """
     x_broad = x[None, :]  # [1, n_window]
-    mu_broad = mu[:, None]  # [n_total, 1]
+    xi_broad = xi[:, None]  # [n_total, 1]
     sigma_broad = sigma[:, None]  # [n_total, 1]
     alpha_broad = alpha[:, None]  # [n_total, 1]
 
-    z = (x_broad - mu_broad) / sigma_broad
+    z = (x_broad - xi_broad) / sigma_broad
     log_pdf = (
         -0.5 * z**2
         - 0.5 * jnp.log(2.0 * jnp.pi)
@@ -1033,18 +1041,19 @@ def plot_posterior_predictive(
     has_doublet_peaks = any(peak_is_doublet_mode(peak.mode) for peak in peaks)
     if has_doublet_peaks:
         try:
-            component_params["sigma"] = posterior.posterior["sigma"].values.reshape(
-                n_total, -1
-            )  # [n_total, n_comp]
-            component_params["alpha"] = posterior.posterior["alpha"].values.reshape(
-                n_total, -1
-            )  # [n_total, n_comp]
-            component_params["mu"] = posterior.posterior["mu"].values.reshape(
-                n_total, n_trace, -1
-            )  # [n_total, n_trace, n_comp]
-            component_params["A"] = posterior.posterior["A"].values.reshape(
-                n_total, n_trace, -1
-            )  # [n_total, n_trace, n_comp]
+            for name in (
+                "xi_l",
+                "xi_r",
+                "sigma_l",
+                "sigma_r",
+                "alpha_l",
+                "alpha_r",
+                "area_l",
+                "area_r",
+            ):
+                component_params[name] = posterior.posterior[name].values.reshape(
+                    n_total, n_trace, n_peak
+                )
         except KeyError:
             component_params = {}
 
@@ -1145,62 +1154,63 @@ def plot_posterior_predictive(
             # deterministic per-component arrays exported by the model.
             if bool(component_params) and peak_is_doublet_mode(peak.mode):
                 try:
-                    comp_1_idx = 2 * p
-                    comp_2_idx = comp_1_idx + 1
-
-                    sigma_1_flat = component_params["sigma"][:, comp_1_idx]
-                    sigma_2_flat = component_params["sigma"][:, comp_2_idx]
-                    alpha_1_flat = component_params["alpha"][:, comp_1_idx]
-                    alpha_2_flat = component_params["alpha"][:, comp_2_idx]
-                    mu_1_flat = component_params["mu"][:, t, comp_1_idx]
-                    mu_2_flat = component_params["mu"][:, t, comp_2_idx]
-                    area_1_flat = component_params["A"][:, t, comp_1_idx]
-                    area_2_flat = component_params["A"][:, t, comp_2_idx]
+                    sigma_l_flat = component_params["sigma_l"][:, t, p]
+                    sigma_r_flat = component_params["sigma_r"][:, t, p]
+                    alpha_l_flat = component_params["alpha_l"][:, t, p]
+                    alpha_r_flat = component_params["alpha_r"][:, t, p]
+                    xi_l_flat = component_params["xi_l"][:, t, p]
+                    xi_r_flat = component_params["xi_r"][:, t, p]
+                    area_l_flat = component_params["area_l"][:, t, p]
+                    area_r_flat = component_params["area_r"][:, t, p]
 
                     x_plot = jnp.asarray(np.asarray(x_posterior_axis, dtype=float))
 
-                    component_1 = _compute_skew_normal_component(
+                    component_l = _compute_skew_normal_component(
                         x_plot,
-                        jnp.asarray(mu_1_flat),
-                        jnp.asarray(sigma_1_flat),
-                        jnp.asarray(alpha_1_flat),
-                        jnp.asarray(area_1_flat),
+                        jnp.asarray(xi_l_flat),
+                        jnp.asarray(sigma_l_flat),
+                        jnp.asarray(alpha_l_flat),
+                        jnp.asarray(area_l_flat),
                     )
-                    component_2 = _compute_skew_normal_component(
+                    component_r = _compute_skew_normal_component(
                         x_plot,
-                        jnp.asarray(mu_2_flat),
-                        jnp.asarray(sigma_2_flat),
-                        jnp.asarray(alpha_2_flat),
-                        jnp.asarray(area_2_flat),
+                        jnp.asarray(xi_r_flat),
+                        jnp.asarray(sigma_r_flat),
+                        jnp.asarray(alpha_r_flat),
+                        jnp.asarray(area_r_flat),
                     )
 
                     if peak_is_artefact_mode(peak.mode):
-                        label_1 = "Main component (95% HDI)"
-                        label_2 = "Artefact component (95% HDI)"
+                        if peak.shoulder == "left":
+                            label_l = "Artefact component (95% HDI)"
+                            label_r = "Main component (95% HDI)"
+                        else:
+                            label_l = "Main component (95% HDI)"
+                            label_r = "Artefact component (95% HDI)"
                     else:
-                        label_1 = "Component 1 (95% HDI)"
-                        label_2 = "Component 2 (95% HDI)"
+                        label_l = "Left component (95% HDI)"
+                        label_r = "Right component (95% HDI)"
 
                     add_hdi_band(
                         ax,
                         x_posterior_axis,
-                        component_1,
+                        component_l,
                         color="gray",
                         alpha=0.25,
                         linewidth=1.2,
                         linestyle="-",
-                        label=label_1,
+                        label=label_l,
                     )
 
                     add_hdi_band(
                         ax,
                         x_posterior_axis,
-                        component_2,
+                        component_r,
                         color="gray",
                         alpha=0.15,
                         linewidth=1.0,
                         linestyle="--",
-                        label=label_2,
+                        label=label_r,
                     )
                 except (KeyError, IndexError, ValueError, AttributeError):
                     # If component reconstruction fails, skip silently and continue
@@ -1266,7 +1276,7 @@ def plot_trace(
         Posterior from ArviZ (result of az.from_numpyro()).
     var_names : list[str] or None
         Parameter names to plot. If None, plots all sampled parameters.
-        Can filter to subset for readability (e.g., ['center_per_trace', 'sigma_peak']).
+        Can filter to subset for readability (e.g., ['apex_center_per_trace', 'sigma_base']).
     figsize : tuple or None
         Figure size. If None, auto-scales based on number of variables.
 

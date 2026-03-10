@@ -388,11 +388,11 @@ class BetterFitter:
         prior_arrays = geometric_priors_to_arrays(priors)
 
         # Transpose per-trace area priors: [n_peak, n_trace] → [n_trace, n_peak]
-        prior_arrays["main_area_per_trace"] = self._stabilize_area_prior_matrix(
-            prior_arrays["main_area_per_trace"].T
+        prior_arrays["dominant_area_loc_per_trace"] = self._stabilize_area_prior_matrix(
+            prior_arrays["dominant_area_loc_per_trace"].T
         )
-        prior_arrays["total_area_per_trace"] = self._stabilize_area_prior_matrix(
-            prior_arrays["total_area_per_trace"].T
+        prior_arrays["area_total_loc_per_trace"] = self._stabilize_area_prior_matrix(
+            prior_arrays["area_total_loc_per_trace"].T
         )
 
         # Peak structure
@@ -493,11 +493,11 @@ class BetterFitter:
         figsize: tuple[float, float] | None = None,
         cmap: str = "viridis",
         show_baseline: bool = True,
-        show_mu_prior: bool = True,
+        show_apex_anchor_prior: bool = True,
         show_gaussian_prior_peak: bool = True,
         show_peak_bounds: bool = True,
     ) -> tuple[object, np.ndarray]:
-        """Plot raw traces with baseline, mu prior, and optional Gaussian prior peak."""
+        """Plot raw traces with baseline, apex-anchor prior, and Gaussian peak prior."""
         from .better_visualize import plot_prior_traces
 
         bp = self.baseline_priors()
@@ -520,7 +520,7 @@ class BetterFitter:
             approx_valid_trace=diagnostics.approx_valid_trace,
             approx_fallback_trace=diagnostics.approx_fallback_trace,
             show_baseline=show_baseline,
-            show_mu_prior=show_mu_prior,
+            show_apex_anchor_prior=show_apex_anchor_prior,
             show_gaussian_prior_peak=show_gaussian_prior_peak,
             show_peak_bounds=show_peak_bounds,
             figsize=figsize,
@@ -596,15 +596,15 @@ class BetterFitter:
             "artefact_peak_index",
             "free_peak_index",
             "nonfree_peak_index",
-            "mu_center_loc",
-            "mu_center_scale",
+            "apex_anchor_loc",
+            "apex_anchor_scale",
             "sigma_loc",
             "sigma_scale",
             "alpha_loc",
             "alpha_scale",
-            "main_area_per_trace",
-            "total_area_per_trace",
-            "artefact_shoulder_area_prior",
+            "dominant_area_loc_per_trace",
+            "area_total_loc_per_trace",
+            "artefact_area_loc_shared",
             "baseline_intercept_loc",
             "baseline_intercept_scale",
             "baseline_slope_loc",
@@ -677,9 +677,9 @@ if __name__ == "__main__":
 
     arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
         -1, 3000
-    )[-21:, :1000]
+    )[-4:, :1000]
     time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        -21:, :1000
+        -4:, :1000
     ]
 
     baselines = [
@@ -726,7 +726,7 @@ if __name__ == "__main__":
     print("=" * 80)
     fig, axes = fitter.plot_prior_traces(
         show_baseline=True,
-        show_mu_prior=True,
+        show_apex_anchor_prior=True,
         show_gaussian_prior_peak=True,
         show_peak_bounds=True,
     )
