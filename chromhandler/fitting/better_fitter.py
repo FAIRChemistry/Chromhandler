@@ -20,12 +20,23 @@ from rich import print
 
 from . import better_model
 from .baseline import BaselinePriors, estimate_baseline
-from .data import BaselineAnnotation, PeakAnnotation, baseline_to_mask
+from .data import (
+    PEAK_MODE_TO_CODE,
+    BaselineAnnotation,
+    PeakAnnotation,
+    baseline_to_mask,
+    peak_is_artefact_mode,
+    peak_is_free_mode,
+)
 from .priors import (
+    FwhmShapeDiagnostics,
     GeometricPeakPriors,
     build_geometric_priors,
     geometric_priors_to_arrays,
     summarise_priors,
+)
+from .priors import (
+    compute_fwhm_shape_diagnostics as build_fwhm_shape_diagnostics,
 )
 
 
@@ -41,7 +52,8 @@ class BetterFitter:
     signal:
         Signal matrix, shape ``[n_trace, n_time]``.
     peaks:
-        Annotated peak windows.  ``shoulder`` field controls single vs double peak.
+        Annotated peak windows. ``mode`` controls single vs artefact-doublet
+        or free-doublet behaviour.
     baselines:
         Explicit baseline regions used to anchor the linear baseline fit.
         The baseline estimation also uses the edges of each peak window, so
@@ -71,6 +83,16 @@ class BetterFitter:
         self.mcmc: MCMC | None = None
         self.samples: dict | None = None
         self.posterior: object | None = None  # arviz.InferenceData
+
+    @staticmethod
+    def _stabilize_area_prior_matrix(area_pt: np.ndarray) -> np.ndarray:
+        """Ensure area prior centers are strictly positive for LogNormal priors."""
+        col_median = np.where(
+            np.nanmedian(area_pt, axis=0) > 0,
+            np.nanmedian(area_pt, axis=0),
+            1e-3,
+        )
+        return np.where(area_pt > 0, area_pt, col_median[None, :] * 0.01)
 
     # ------------------------------------------------------------------
     # Validation
@@ -134,6 +156,12 @@ class BetterFitter:
         x = self.common_time()
         baseline = self.baseline_signal()
         return build_geometric_priors(self.peaks, x, self.signal, baseline)
+
+    def compute_fwhm_shape_diagnostics(self) -> FwhmShapeDiagnostics:
+        """Compute per-trace FWHM-derived main-peak shape diagnostics."""
+        x = self.common_time()
+        baseline = self.baseline_signal()
+        return build_fwhm_shape_diagnostics(self.peaks, x, self.signal, baseline)
 
     def noise_prior(self) -> np.ndarray:
         """Estimate per-trace observation noise from baseline-corrected signal.
@@ -317,30 +345,32 @@ class BetterFitter:
                 f"{float(self.shift_time[t]):>+12.6f}"  # type: ignore[index]
             )
 
-    def peak_structure(self) -> tuple[np.ndarray, np.ndarray]:
-        """Extract peak structure from annotations.
-
-        Returns
-        -------
-        shoulder_side : np.ndarray
-            Shape ``[n_peak]`` int: -1 (left shoulder), 0 (single), +1 (right shoulder).
-        shoulder_peak_index : np.ndarray
-            Indices of peaks with shoulders, shape ``[n_shoulder]``.
-        """
+    def peak_structure(self) -> dict[str, np.ndarray]:
+        """Extract mode-specific peak structure arrays from annotations."""
         n_peak = len(self.peaks)
-        shoulder_side = np.zeros(n_peak, dtype=int)
-        shoulder_indices = []
+        peak_mode_code = np.zeros(n_peak, dtype=np.int32)
+        artefact_side = np.zeros(n_peak, dtype=np.int32)
+        artefact_indices: list[int] = []
+        free_indices: list[int] = []
+        nonfree_indices: list[int] = []
 
         for i, peak in enumerate(self.peaks):
-            if peak.shoulder == "left":
-                shoulder_side[i] = -1
-                shoulder_indices.append(i)
-            elif peak.shoulder == "right":
-                shoulder_side[i] = 1
-                shoulder_indices.append(i)
-            # else: shoulder_side[i] = 0 (already set)
+            peak_mode_code[i] = PEAK_MODE_TO_CODE[peak.mode]
+            if not peak_is_free_mode(peak.mode):
+                nonfree_indices.append(i)
+            if peak_is_artefact_mode(peak.mode):
+                artefact_indices.append(i)
+                artefact_side[i] = -1 if peak.shoulder == "left" else 1
+            elif peak_is_free_mode(peak.mode):
+                free_indices.append(i)
 
-        return shoulder_side, np.array(shoulder_indices, dtype=int)
+        return {
+            "peak_mode_code": peak_mode_code,
+            "artefact_side": artefact_side,
+            "artefact_peak_index": np.array(artefact_indices, dtype=np.int32),
+            "free_peak_index": np.array(free_indices, dtype=np.int32),
+            "nonfree_peak_index": np.array(nonfree_indices, dtype=np.int32),
+        }
 
     def compute_model_inputs(self) -> dict[str, np.ndarray]:
         """Assemble all model inputs from data, priors, and baseline.
@@ -353,33 +383,20 @@ class BetterFitter:
         dict[str, np.ndarray]
             Keys: all parameters expected by ``model()``, values as numpy arrays.
         """
-        # Priors (area_per_trace = main-only area for shoulder peaks)
+        # Priors
         priors = self.compute_priors()
         prior_arrays = geometric_priors_to_arrays(priors)
 
-        # Transpose area_per_trace: [n_peak, n_trace] → [n_trace, n_peak], fill zeros
-        area_pt = prior_arrays["area_per_trace"].T  # [n_trace, n_peak]
-        col_median = np.where(
-            np.nanmedian(area_pt, axis=0) > 0,
-            np.nanmedian(area_pt, axis=0),
-            1e-3,
+        # Transpose per-trace area priors: [n_peak, n_trace] → [n_trace, n_peak]
+        prior_arrays["main_area_per_trace"] = self._stabilize_area_prior_matrix(
+            prior_arrays["main_area_per_trace"].T
         )
-        area_pt = np.where(area_pt > 0, area_pt, col_median[None, :] * 0.01)
-        prior_arrays["area_per_trace"] = area_pt  # [n_trace, n_peak]
-
-        # shoulder_area_prior [n_shoulder] comes directly from geometric_priors_to_arrays.
-        # No per-trace height ratio computation needed.
-
-        # Separation prior centres from user annotation: [n_shoulder]
-        # (mandatory when shoulder set). These will be used as LogNormal prior centres.
-        separation_loc = np.array(
-            [p.separation for p in self.peaks if p.shoulder is not None],
-            dtype=np.float32,
-        )  # [n_shoulder]
-        prior_arrays["separation_loc"] = separation_loc
+        prior_arrays["total_area_per_trace"] = self._stabilize_area_prior_matrix(
+            prior_arrays["total_area_per_trace"].T
+        )
 
         # Peak structure
-        shoulder_side, shoulder_peak_index = self.peak_structure()
+        peak_structure = self.peak_structure()
 
         # Baseline
         baseline_bp = self.baseline_priors()
@@ -400,8 +417,7 @@ class BetterFitter:
         # Assemble
         return {
             **prior_arrays,
-            "shoulder_side": shoulder_side,
-            "shoulder_peak_index": shoulder_peak_index,
+            **peak_structure,
             **baseline_arrays,
             **noise_arrays,
         }
@@ -443,6 +459,74 @@ class BetterFitter:
         print("-" * 20)
         for t in range(self.n_traces):
             print(f"{t:>5}  {sigma_y[t]:>12.3f}")
+
+    def plot_sigma_alpha_prior_diagnostics(
+        self,
+        *,
+        figsize: tuple[float, float] | None = None,
+        cmap: str = "viridis",
+    ) -> tuple[object, np.ndarray]:
+        """Plot per-trace FWHM-derived sigma-vs-alpha scatter for each peak."""
+        from .better_visualize import plot_sigma_alpha_scatter
+
+        diagnostics = self.compute_fwhm_shape_diagnostics()
+        priors = self.compute_priors()
+
+        fig, axes = plot_sigma_alpha_scatter(
+            self.peaks,
+            diagnostics.sigma_trace,
+            diagnostics.alpha_trace,
+            diagnostics.fwhm_valid_trace,
+            apex_height_trace=diagnostics.apex_height_trace,
+            sigma_loc=np.asarray([p.sigma_loc for p in priors], dtype=float),
+            sigma_scale=np.asarray([p.sigma_scale for p in priors], dtype=float),
+            alpha_loc=np.asarray([p.alpha_loc for p in priors], dtype=float),
+            alpha_scale=np.asarray([p.alpha_scale for p in priors], dtype=float),
+            figsize=figsize,
+            cmap=cmap,
+        )
+        return fig, axes
+
+    def plot_prior_traces(
+        self,
+        *,
+        figsize: tuple[float, float] | None = None,
+        cmap: str = "viridis",
+        show_baseline: bool = True,
+        show_mu_prior: bool = True,
+        show_gaussian_prior_peak: bool = True,
+        show_peak_bounds: bool = True,
+    ) -> tuple[object, np.ndarray]:
+        """Plot raw traces with baseline, mu prior, and optional Gaussian prior peak."""
+        from .better_visualize import plot_prior_traces
+
+        bp = self.baseline_priors()
+        peak_priors = self.compute_priors()
+        diagnostics = self.compute_fwhm_shape_diagnostics()
+
+        fig, axes = plot_prior_traces(
+            self.time,
+            self.signal,
+            self.peaks,
+            np.asarray(bp.intercept, dtype=float),
+            np.asarray(bp.slope, dtype=float),
+            np.asarray(bp.intercept_scale, dtype=float),
+            np.asarray(bp.slope_scale, dtype=float),
+            np.asarray([p.mu_loc for p in peak_priors], dtype=float),
+            np.asarray([p.mu_scale for p in peak_priors], dtype=float),
+            approx_center_trace=diagnostics.approx_center_trace,
+            approx_height_trace=diagnostics.approx_height_trace,
+            approx_sigma_trace=diagnostics.approx_sigma_trace,
+            approx_valid_trace=diagnostics.approx_valid_trace,
+            approx_fallback_trace=diagnostics.approx_fallback_trace,
+            show_baseline=show_baseline,
+            show_mu_prior=show_mu_prior,
+            show_gaussian_prior_peak=show_gaussian_prior_peak,
+            show_peak_bounds=show_peak_bounds,
+            figsize=figsize,
+            cmap=cmap,
+        )
+        return fig, axes
 
     # ------------------------------------------------------------------
     # MCMC Inference
@@ -495,21 +579,32 @@ class BetterFitter:
         # Convert all priors to JAX arrays for consistency
         for key in model_inputs:
             if isinstance(model_inputs[key], np.ndarray):
-                model_inputs[key] = jnp.asarray(model_inputs[key], dtype=jnp.float32)
+                value = model_inputs[key]
+                if np.issubdtype(value.dtype, np.integer):
+                    model_inputs[key] = jnp.asarray(value, dtype=jnp.int32)
+                elif np.issubdtype(value.dtype, np.bool_):
+                    model_inputs[key] = jnp.asarray(value, dtype=bool)
+                else:
+                    model_inputs[key] = jnp.asarray(value, dtype=jnp.float32)
 
         # Filter to only keys that the model expects
         model_param_names = {
             "x",
             "y",
-            "shoulder_side",
-            "shoulder_peak_index",
+            "peak_mode_code",
+            "artefact_side",
+            "artefact_peak_index",
+            "free_peak_index",
+            "nonfree_peak_index",
             "mu_center_loc",
             "mu_center_scale",
-            "log_sigma_low",
-            "log_sigma_high",
-            "area_per_trace",  # [n_trace, n_peak] per-trace main component area
-            "shoulder_area_prior",  # [n_shoulder] shared shoulder area prior centres
-            "separation_loc",  # [n_shoulder] separation prior centres from PeakAnnotation
+            "sigma_loc",
+            "sigma_scale",
+            "alpha_loc",
+            "alpha_scale",
+            "main_area_per_trace",
+            "total_area_per_trace",
+            "artefact_shoulder_area_prior",
             "baseline_intercept_loc",
             "baseline_intercept_scale",
             "baseline_slope_loc",
@@ -547,7 +642,7 @@ class BetterFitter:
         # Print ArviZ summary (filter to only vars that exist in posterior)
         available_vars = list(self.posterior.posterior.data_vars)
         summary_vars = [
-            v for v in better_model.SAMPLED_PARAMETER_NAMES if v in available_vars
+            v for v in better_model.SUMMARY_PARAMETER_NAMES if v in available_vars
         ]
         summary_df = az.summary(self.posterior, var_names=summary_vars)
         print("\n" + "=" * 80)
@@ -572,7 +667,6 @@ if __name__ == "__main__":
 
     from .better_visualize import (
         plot_posterior_predictive,
-        plot_prior_traces,
         plot_trace,
     )
 
@@ -583,54 +677,57 @@ if __name__ == "__main__":
 
     arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
         -1, 3000
-    )[:21, :1000]
+    )[-21:, :1000]
     time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        :21, :1000
+        -21:, :1000
     ]
 
     baselines = [
-        BaselineAnnotation(low=0, high=0.1),
-        BaselineAnnotation(low=4, high=4.1),
+        BaselineAnnotation(low=2.5, high=2.52),
+        BaselineAnnotation(low=3.5, high=3.6),
     ]
     peaks = [
-        PeakAnnotation(name="peak1", low=2.6, high=2.85),
+        PeakAnnotation(name="ino", low=2.52, high=2.9, mode="free_doublet"),
+        # PeakAnnotation(
+        #     name="peak2",
+        #     low=2.85,
+        #     high=3.15,
+        #     mode="artefact_doublet",
+        #     shoulder="right",
+        # ),
         PeakAnnotation(
-            name="peak2", low=2.85, high=3.15, shoulder="right", separation=0.08
-        ),
-        PeakAnnotation(
-            name="peak3", low=3.15, high=3.45, shoulder="left", separation=0.07
+            name="peak3",
+            low=3.15,
+            high=3.5,
+            mode="free_doublet",
+            shoulder=None,
         ),
     ]
 
     fitter = BetterFitter(time, arr, peaks=peaks, baselines=baselines)
 
-    print("=" * 80)
-    print("Aligning Chromatograms")
-    print("=" * 80)
-    fitter.align(n_starts=16, verbose=True)
-    print()
+    # print("=" * 80)
+    # print("Aligning Chromatograms")
+    # print("=" * 80)
+    # fitter.align(n_starts=16, verbose=True)
 
     fitter.print_priors()
+
+    fig, axes = fitter.plot_sigma_alpha_prior_diagnostics()
+    plt.savefig(
+        "better_fitter_sigma_alpha_prior_diagnostics.png", dpi=150, bbox_inches="tight"
+    )
+    print("✓ Saved: better_fitter_sigma_alpha_prior_diagnostics.png")
 
     # Visualize priors
     print()
     print("=" * 80)
     print("Generating Prior Visualization")
     print("=" * 80)
-    bp = fitter.baseline_priors()
-    peak_priors = fitter.compute_priors()
-    fig, axes = plot_prior_traces(
-        time,
-        arr,
-        peaks,
-        np.asarray(bp.intercept),
-        np.asarray(bp.slope),
-        np.asarray(bp.intercept_scale),
-        np.asarray(bp.slope_scale),
-        np.asarray([p.mu_loc for p in peak_priors], dtype=float),
-        np.asarray([p.mu_scale for p in peak_priors], dtype=float),
+    fig, axes = fitter.plot_prior_traces(
         show_baseline=True,
         show_mu_prior=True,
+        show_gaussian_prior_peak=True,
         show_peak_bounds=True,
     )
     plt.savefig("better_fitter_priors.png", dpi=150, bbox_inches="tight")
@@ -648,20 +745,12 @@ if __name__ == "__main__":
     print("Generating MCMC Trace Plots")
     print("=" * 80)
     if fitter.posterior is not None:
+        trace_var_names = [
+            name for name in better_model.SUMMARY_PARAMETER_NAMES if name != "sigma_y"
+        ]
         fig = plot_trace(
             fitter.posterior,
-            var_names=[
-                "sigma_main",
-                "sigma_scale_shoulder",
-                "alpha_main",
-                "mu_per_trace",
-                "A_main",
-                "A_sh_shared",
-                "separation",
-                "baseline_intercept",
-                "baseline_slope",
-                # "sigma_y",
-            ],
+            var_names=trace_var_names,
         )
         plt.savefig("better_fitter_trace.png", dpi=100, bbox_inches="tight")
         print("✓ Saved: better_fitter_trace.png")

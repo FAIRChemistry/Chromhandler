@@ -5,43 +5,75 @@ from typing import Literal
 
 import jax.numpy as jnp
 
+PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
+PEAK_MODE_TO_CODE: dict[PeakMode, int] = {
+    "single": 0,
+    "artefact_doublet": 1,
+    "free_doublet": 2,
+}
+
+
+def peak_component_count(mode: PeakMode) -> int:
+    """Return the number of mixture components implied by a peak mode."""
+    return 1 if mode == "single" else 2
+
+
+def peak_is_doublet_mode(mode: PeakMode) -> bool:
+    """Return True for all two-component peak modes."""
+    return peak_component_count(mode) == 2
+
+
+def peak_is_artefact_mode(mode: PeakMode) -> bool:
+    """Return True when the peak uses the artefact-doublet branch."""
+    return mode == "artefact_doublet"
+
+
+def peak_is_free_mode(mode: PeakMode) -> bool:
+    """Return True when the peak uses the free-doublet branch."""
+    return mode == "free_doublet"
+
 
 @dataclass(frozen=True)
 class PeakAnnotation:
-    """Per-spectrum peak annotation defining a single skew-normal component.
+    """Per-spectrum peak annotation defining one logical fitted peak window.
 
     Attributes:
         name: Logical peak name.
         low: Broad lower bound used for initialization and diagnostics.
         high: Broad upper bound used for initialization and diagnostics.
-        shoulder: Optional side where a shoulder peak is expected.
+        mode: Peak fitting mode for this window.
+        shoulder: Optional shoulder side used only for artefact doublets.
     """
 
     name: str
     low: float
     high: float
+    mode: PeakMode
     shoulder: Literal["left", "right"] | None = None
-    separation: float | None = None
 
     def __post_init__(self) -> None:
         if float(self.high) <= float(self.low):
             raise ValueError(
                 f"Invalid annotation bounds for `{self.name}`: low={self.low}, high={self.high}"
             )
+        if self.mode not in ("single", "artefact_doublet", "free_doublet"):
+            raise ValueError(
+                "mode must be one of 'single', 'artefact_doublet', or "
+                f"'free_doublet', got {self.mode!r}."
+            )
         if self.shoulder not in (None, "left", "right"):
             raise ValueError(
                 "shoulder must be one of None, 'left', or 'right', "
                 f"got {self.shoulder!r}."
             )
-        if self.shoulder is not None and self.separation is None:
+        if self.mode == "artefact_doublet" and self.shoulder is None:
             raise ValueError(
-                f"Peak '{self.name}': 'separation' is required when 'shoulder' is set. "
-                "Provide the full inter-apex distance from main peak to shoulder peak "
-                "(e.g. PeakAnnotation(..., shoulder='right', separation=0.08))."
+                f"Peak '{self.name}': artefact_doublet mode requires "
+                "'shoulder' to be 'left' or 'right'."
             )
-        if self.separation is not None and float(self.separation) <= 0:
+        if self.mode in ("single", "free_doublet") and self.shoulder is not None:
             raise ValueError(
-                f"Peak '{self.name}': separation must be positive, got {self.separation}."
+                f"Peak '{self.name}': mode '{self.mode}' requires shoulder=None."
             )
 
 
@@ -58,7 +90,7 @@ class PeakPriorHints:
     area_loc: float
     area_scale: float
     trace_count: int
-    sep_est: float = 0.0  # data-driven mode separation estimate for shoulder peaks
+    sep_est: float = 0.0  # data-driven component separation estimate for doublets
 
 
 @dataclass(frozen=True)
@@ -105,6 +137,7 @@ class ChromatogramRecord:
         name: str,
         low: float,
         high: float,
+        mode: PeakMode,
         shoulder: Literal["left", "right"] | None = None,
     ) -> None:
         """Add a peak annotation to the chromatogram.
@@ -113,7 +146,8 @@ class ChromatogramRecord:
             name: Name of the peak.
             low: Lower bound of the peak window.
             high: Upper bound of the peak window.
-            shoulder: Optional expected shoulder side.
+            mode: Peak fitting mode for the annotated window.
+            shoulder: Optional expected shoulder side for artefact doublets.
 
         Raises:
             ValueError: If bounds fall outside the time range or low >= high.
@@ -123,7 +157,13 @@ class ChromatogramRecord:
                 "low and high must be within the time range, got "
                 f"low={low}, high={high}, time range={min(self.time)} to {max(self.time)}"
             )
-        peak = PeakAnnotation(name=name, low=low, high=high, shoulder=shoulder)
+        peak = PeakAnnotation(
+            name=name,
+            low=low,
+            high=high,
+            mode=mode,
+            shoulder=shoulder,
+        )
         for i, p in enumerate(self.peaks):
             if p.name == name:
                 self.peaks[i] = peak
@@ -250,9 +290,9 @@ if __name__ == "__main__":
     time = jnp.array([jnp.arange(1, 10), jnp.arange(1, 10)])
 
     peaks = [
-        PeakAnnotation(name="peak1", low=0, high=4),
-        PeakAnnotation(name="peak3", low=3, high=10),
-        PeakAnnotation(name="peak2", low=1, high=2),
+        PeakAnnotation(name="peak1", low=0, high=4, mode="single"),
+        PeakAnnotation(name="peak3", low=3, high=10, mode="single"),
+        PeakAnnotation(name="peak2", low=1, high=2, mode="single"),
     ]
     mask = peaks_to_mask(peaks, time)
     print(mask)

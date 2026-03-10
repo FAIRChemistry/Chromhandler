@@ -1,46 +1,20 @@
-"""Bi-skew-normal chromatographic peak model with window-geometry priors.
+"""Mode-aware skew-normal chromatographic peak model.
 
-Public surface
---------------
-``log_skew_normal_pdf``  — numerically stable log-density
-``skew_normal_pdf``      — density
-``mixture_signal``       — area-scaled sum over all components
-``model``                — NumPyro model (NUTS-compatible)
+Supports three peak modes:
 
-Parametrization (main-apex convention)
----------------------------------------
-- ``mu_per_trace[t, p]`` = **mode (apex)** of the main peak for trace *t*, peak *p*.
-  This is NOT the skew-normal location parameter ξ.  The conversion
-  ``ξ = mode − σ·δ·√(2/π)``  (δ = α/√(1+α²)) is applied internally.
-- ``separation[sh]`` = full inter-apex distance (main apex → shoulder apex), signed by
-  ``shoulder_side``.  **Sampled** with LogNormal prior centred at user-provided value
-  (5% CV in log space).  User input provides the prior centre; flexibility allows
-  the MCMC to adjust separation if the data suggests it.
+- ``single``: one component per logical peak window.
+- ``artefact_doublet``: dominant component plus a signed artefact component
+  with shared cross-trace shoulder area and a tightly coupled second sigma
+  ``sigma_artefact_second``.
+- ``free_doublet``: true two-component peak with midpoint-centred retention
+  time, per-trace separation, per-trace total area, a nuisance split parameter,
+  a tightly coupled second sigma ``sigma_free_second``, and an
+  independently sampled bounded second alpha ``alpha_free_second``.
 
-Area parametrization (shared shoulder area)
---------------------------------------------
-- ``A_main[t, p]``  — per-trace main component area; prior centre = main-only
-  window area (shoulder contribution removed in ``priors.py``).
-- ``A_sh_shared[sh]`` — **shared scalar** shoulder area, constant across all
-  traces.  Physical rationale: the shoulder is a chromatographic artefact whose
-  absolute area depends on the instrument/column state, not the analyte
-  concentration.  A single shared scalar (rather than n_trace per-trace values)
-  encodes this constraint and drastically reduces the parameter count.
-
-Design differences from ``peak_models.py``
-------------------------------------------
-- **Sigma**: Shoulder sigma is coupled to main sigma via a sampled scaling factor
-  (range [0.5, 2.0]).  This allows flexibility while maintaining the geometric
-  constraint that both peaks come from the same column.
-- **Alpha**: Shoulder uses ``alpha_main[sh_idx]`` directly (same physical shape).
-- **Separation**: Fixed from user annotation — not sampled.  Eliminates the
-  separation ↔ area_ratio ridge that caused multi-modal posteriors.
-- **Shoulder area**: Single shared ``A_sh_shared`` scalar replaces the old
-  per-trace ``area_ratio_shoulder`` parameter.
-- Sigma and alpha are **shared across traces** (column chemistry is constant);
-  mu and A_main vary per trace.
-- Python ``if n_shoulder > 0`` guards are compile-time shape checks, not
-  dynamic control flow — safe for JAX tracing.
+The model samples latent parameters in mode-specific parameterizations, then
+exports generic deterministic per-component arrays ``mu``, ``sigma``,
+``alpha``, and ``A`` so downstream code can reconstruct components without
+knowing which branch produced them.
 """
 
 from __future__ import annotations
@@ -54,9 +28,11 @@ numpyro.set_host_device_count(8)
 
 # Mode → location shift: delta × sqrt(2/π), delta = alpha / sqrt(1 + alpha²)
 _SQRT_2_OVER_PI: float = float(jnp.sqrt(2.0 / jnp.pi))
-_ALPHA_MAX: float = 1.5  # hard bound via tanh transform
+_ALPHA_MAX: float = 2.5  # canonical hard bound via tanh transform
+_ALPHA_BOUND_EPS: float = 1e-4
+_RAW_ALPHA_SCALE_FLOOR: float = 1e-4
 
-# Area prior: LogNormal sigma for A_main → 95% CI ≈ [0.45×, 2.2×] observed area
+# Area prior: LogNormal sigma for per-trace primary/total areas
 _AREA_LOG_SIGMA: float = 0.4
 # Shared shoulder area prior: LogNormal sigma (30% CV) — allows slow column drift
 # while strongly enforcing the constant-artefact constraint across traces.
@@ -77,8 +53,8 @@ def log_skew_normal_pdf(
     """Numerically stable log skew-normal density.
 
     Parameters ``mu`` must be the skew-normal **location parameter ξ**, not the
-    mode.  The model passes ``mu_main_loc`` / ``mu_sh_loc`` (converted from
-    sampled modes via ``ξ = mode − σ·δ·√(2/π)``).
+    component modes. The model converts sampled component modes internally via
+    ``ξ = mode − σ·δ·√(2/π)`` before calling this density.
 
     Returns
     -------
@@ -126,25 +102,77 @@ def mixture_signal(
     return jnp.sum(A[:, :, None] * pdf, axis=1)  # [n_trace, n_time]
 
 
+def _bounded_alpha_prior_to_raw(
+    alpha_loc: jnp.ndarray,
+    alpha_scale: jnp.ndarray,
+    *,
+    alpha_max: float = _ALPHA_MAX,
+    bound_eps: float = _ALPHA_BOUND_EPS,
+    scale_floor: float = _RAW_ALPHA_SCALE_FLOOR,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Map bounded alpha priors to raw-space Normal parameters.
+
+    The model samples ``alpha_raw`` and transforms with
+    ``alpha = alpha_max * tanh(alpha_raw)``. This helper converts
+    bounded-space ``(alpha_loc, alpha_scale)`` to raw-space Normal
+    parameters via the inverse transform and a delta-method scale.
+    """
+    alpha_loc_arr = jnp.asarray(alpha_loc, dtype=jnp.float32)
+    alpha_scale_arr = jnp.asarray(alpha_scale, dtype=jnp.float32)
+    alpha_max_safe = max(float(alpha_max), 1e-6)
+    loc_clipped = jnp.clip(
+        alpha_loc_arr,
+        -alpha_max_safe + bound_eps,
+        alpha_max_safe - bound_eps,
+    )
+    raw_loc = jnp.arctanh(loc_clipped / alpha_max_safe)
+    derivative = alpha_max_safe * (1.0 - (loc_clipped / alpha_max_safe) ** 2)
+    raw_scale = alpha_scale_arr / jnp.maximum(derivative, scale_floor)
+    raw_scale = jnp.maximum(raw_scale, scale_floor)
+    return raw_loc, raw_scale
+
+
+def _lognormal_params_from_linear(
+    loc: jnp.ndarray,
+    scale: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Map linear-space location/scale summaries to LogNormal parameters."""
+    loc_safe = jnp.maximum(jnp.asarray(loc, dtype=jnp.float32), 1e-6)
+    scale_safe = jnp.maximum(jnp.asarray(scale, dtype=jnp.float32), 1e-6)
+    log_var = jnp.log1p((scale_safe / loc_safe) ** 2)
+    log_scale = jnp.maximum(jnp.sqrt(log_var), 1e-4)
+    log_loc = jnp.log(loc_safe) - 0.5 * log_var
+    return log_loc, log_scale
+
+
 # ---------------------------------------------------------------------------
 # NumPyro model
 # ---------------------------------------------------------------------------
+
+_MODE_SINGLE = 0
+_MODE_ARTEFACT_DOUBLET = 1
+_MODE_FREE_DOUBLET = 2
 
 
 def model(
     x: jnp.ndarray,  # [n_trace, n_time]
     y: jnp.ndarray | None,  # [n_trace, n_time]  or  None (prior predictive)
     # --- peak structure ---
-    shoulder_side: jnp.ndarray,  # [n_peak]  int: -1=left, 0=none, +1=right
-    shoulder_peak_index: jnp.ndarray,  # [n_shoulder]  indices into peaks
+    peak_mode_code: jnp.ndarray,  # [n_peak]  int: 0=single, 1=artefact_doublet, 2=free_doublet
+    artefact_side: jnp.ndarray,  # [n_peak]  int: -1=left, 0=none, +1=right
+    artefact_peak_index: jnp.ndarray,  # [n_artefact]  indices into peaks
+    free_peak_index: jnp.ndarray,  # [n_free]  indices into peaks
+    nonfree_peak_index: jnp.ndarray,  # [n_nonfree] indices into peaks
     # --- peak priors (from geometric_priors_to_arrays) ---
     mu_center_loc: jnp.ndarray,  # [n_peak]
     mu_center_scale: jnp.ndarray,  # [n_peak]
-    log_sigma_low: jnp.ndarray,  # [n_peak]
-    log_sigma_high: jnp.ndarray,  # [n_peak]
-    area_per_trace: jnp.ndarray,  # [n_trace, n_peak]  per-trace MAIN component area
-    shoulder_area_prior: jnp.ndarray,  # [n_shoulder]  shared shoulder area prior centres
-    separation_loc: jnp.ndarray,  # [n_shoulder]  user-provided separation prior centres
+    sigma_loc: jnp.ndarray,  # [n_peak]  FWHM-derived sigma prior centres
+    sigma_scale: jnp.ndarray,  # [n_peak]  FWHM-derived sigma prior scales
+    alpha_loc: jnp.ndarray,  # [n_peak]  FWHM-derived alpha prior centres
+    alpha_scale: jnp.ndarray,  # [n_peak]  FWHM-derived alpha prior scales
+    main_area_per_trace: jnp.ndarray,  # [n_trace, n_peak]  per-trace Gaussian primary-component area
+    total_area_per_trace: jnp.ndarray,  # [n_trace, n_peak]  per-trace total free-doublet area
+    artefact_shoulder_area_prior: jnp.ndarray,  # [n_artefact]  shared artefact shoulder area prior centres
     # --- baseline priors (from estimate_baseline) ---
     baseline_intercept_loc: jnp.ndarray,  # [n_trace]
     baseline_intercept_scale: jnp.ndarray,  # [n_trace]
@@ -153,187 +181,178 @@ def model(
     # --- noise prior ---
     sigma_y_prior_loc: jnp.ndarray,  # [n_trace]
 ) -> None:
-    """Bayesian bi-skew-normal chromatographic peak model.
-
-    Sampled variables
-    -----------------
-    ``log_sigma_main``         [n_peak]       — LogUniform sigma (main peaks only)
-    ``sigma_scale_raw_shoulder`` [n_shoulder]  — Normal(0, 0.5); mapped to [0.5, 2.0] via tanh;
-                                              multiplier for shoulder sigma
-    ``alpha_raw_main``  [n_peak]       — Normal(0, 0.5); alpha = ALPHA_MAX*tanh(raw), shared
-    ``mu_per_trace``    [n_trace, n_peak] — main peak apex (mode) per trace
-    ``A_main``          [n_trace, n_peak] — per-trace main component area
-    ``A_sh_shared``     [n_shoulder]      — shared shoulder area (constant across traces)
-    ``separation``      [n_shoulder]      — inter-apex distance per shoulder
-                                          LogNormal(log(user_input), 0.05); only when shoulders exist
-    ``baseline_intercept`` [n_trace]
-    ``baseline_slope``     [n_trace]
-    ``sigma_y``            [n_trace]      — observation noise
-
-    Deterministic quantities stored in posterior
-    --------------------------------------------
-    ``sigma_main``      [n_peak]            — exp(log_sigma_main)
-    ``sigma_scale_shoulder`` [n_shoulder]   — scaling factor ∈ [0.5, 2.0] for shoulder sigma
-    ``alpha_main``      [n_peak]            — ALPHA_MAX * tanh(alpha_raw_main)
-    ``alpha_shoulder``  [n_shoulder]        — alpha_main[sh_idx] (same shape, shared)
-    ``mu``              [n_trace, n_comp]   — skew-normal ξ params for all components
-    ``A``               [n_trace, n_comp]   — areas for all components
-    ``A_total``         [n_trace, n_peak]   — A_main + A_sh (diagnostic)
-    ``baseline_curve``  [n_trace, n_time]   — reconstructed baseline
-    ``mu_y``            [n_trace, n_time]   — posterior predictive mean
-    """
+    """Bayesian skew-normal peak model supporting single and doublet modes."""
     n_trace, _ = x.shape
     n_peak = int(mu_center_loc.shape[0])
-    n_shoulder = int(shoulder_peak_index.shape[0])
+    n_artefact = int(artefact_peak_index.shape[0])
+    n_free = int(free_peak_index.shape[0])
+    n_nonfree = int(nonfree_peak_index.shape[0])
     n_comp = 2 * n_peak  # main + shoulder slot for every peak
 
-    side = jnp.asarray(shoulder_side, dtype=jnp.float32)  # [n_peak]
-    shoulder_enabled = side != 0.0  # [n_peak] bool
-    sh_idx = jnp.asarray(shoulder_peak_index, dtype=jnp.int32)  # [n_shoulder]
-
-    # Guard: ensure Uniform bounds are strictly valid
-    log_sigma_lo = jnp.asarray(log_sigma_low, dtype=jnp.float32)
-    log_sigma_hi = jnp.maximum(
-        jnp.asarray(log_sigma_high, dtype=jnp.float32), log_sigma_lo + 1e-4
-    )
+    mode_code = jnp.asarray(peak_mode_code, dtype=jnp.int32)
+    artefact_side_v = jnp.asarray(artefact_side, dtype=jnp.float32)
+    artefact_idx = jnp.asarray(artefact_peak_index, dtype=jnp.int32)
+    free_idx = jnp.asarray(free_peak_index, dtype=jnp.int32)
+    nonfree_idx = jnp.asarray(nonfree_peak_index, dtype=jnp.int32)
+    free_mask = mode_code == _MODE_FREE_DOUBLET
 
     # ------------------------------------------------------------------ sigma
-    # Shared across traces: peak shape is determined by column chemistry.
-    log_sigma_main = numpyro.sample(
-        "log_sigma_main", dist.Uniform(log_sigma_lo, log_sigma_hi)
+    sigma_loc_safe = jnp.maximum(jnp.asarray(sigma_loc, dtype=jnp.float32), 1e-6)
+    sigma_scale_safe = jnp.maximum(jnp.asarray(sigma_scale, dtype=jnp.float32), 1e-6)
+    sigma_prior_loc = jnp.where(free_mask, 0.5 * sigma_loc_safe, sigma_loc_safe)
+    sigma_prior_scale = jnp.where(free_mask, 0.5 * sigma_scale_safe, sigma_scale_safe)
+    log_sigma_loc, log_sigma_scale = _lognormal_params_from_linear(
+        sigma_prior_loc,
+        sigma_prior_scale,
+    )
+    log_sigma_peak = numpyro.sample(
+        "log_sigma_peak", dist.Normal(log_sigma_loc, log_sigma_scale)
     )  # [n_peak]
-    sigma_main = numpyro.deterministic("sigma_main", jnp.exp(log_sigma_main))
+    sigma_peak = numpyro.deterministic("sigma_peak", jnp.exp(log_sigma_peak))
 
-    # Shoulder sigma: coupled to main sigma via a scaling factor.
-    # Sampled scaling factor ∈ [0.5, 2.0] allows flexibility while keeping shoulder
-    # width geometrically related to main peak width (same column → similar shapes,
-    # but shoulder may be slightly broader/narrower depending on separation/artifact).
-    if n_shoulder > 0:
-        # Scale factor sampled in unconstrained space, mapped to [0.5, 2.0] via tanh.
-        # Normal(0, 0.5) is centered at 0, which maps to scale=1.0 (no scaling).
-        # Range is log-symmetric: [0.5, 2.0] = [1/2, 2], centered at 1.0 in log space.
-        sigma_scale_raw_shoulder = numpyro.sample(
-            "sigma_scale_raw_shoulder",
-            dist.Normal(0.0, 0.5).expand([n_shoulder]),
-        )  # [n_shoulder]
-        # Map via tanh in log space: log_scale = ln(2) * tanh(x) ∈ [-ln2, ln2]
-        # scale = exp(log_scale) ∈ [0.5, 2.0], centered at 1.0
-        sigma_scale_shoulder = jnp.exp(
-            jnp.log(2.0) * jnp.tanh(sigma_scale_raw_shoulder)
-        )  # [n_shoulder]  ∈ [0.5, 2.0]
-        numpyro.deterministic("sigma_scale_shoulder", sigma_scale_shoulder)
-
-        # Construct sigma_pair: [n_peak, 2] where col 0=main, col 1=shoulder.
-        sigma_pair = (
-            jnp.zeros((n_peak, 2))
-            .at[:, 0]
-            .set(sigma_main)
-            .at[sh_idx, 1]
-            .set(sigma_scale_shoulder * sigma_main[sh_idx])  # coupled scaling
+    sigma_component = jnp.stack([sigma_peak, sigma_peak], axis=-1)  # [n_peak, 2]
+    if n_artefact > 0:
+        log_sigma_artefact_second = numpyro.sample(
+            "log_sigma_artefact_second",
+            dist.Normal(log_sigma_peak[artefact_idx], 0.15),
         )
-    else:
-        sigma_pair = jnp.stack([sigma_main, jnp.zeros_like(sigma_main)], axis=-1)
-    sigma_flat = sigma_pair.reshape(n_comp)  # [n_comp]
+        sigma_artefact_second = numpyro.deterministic(
+            "sigma_artefact_second",
+            jnp.exp(log_sigma_artefact_second),
+        )
+        sigma_component = sigma_component.at[artefact_idx, 1].set(sigma_artefact_second)
+    if n_free > 0:
+        log_sigma_free_second = numpyro.sample(
+            "log_sigma_free_second",
+            dist.Normal(log_sigma_peak[free_idx], 0.05),
+        )
+        sigma_free_second = numpyro.deterministic(
+            "sigma_free_second",
+            jnp.exp(log_sigma_free_second),
+        )
+        sigma_component = sigma_component.at[free_idx, 1].set(sigma_free_second)
+    sigma_flat = sigma_component.reshape(n_comp)
+    numpyro.deterministic("sigma", sigma_flat)
 
     # ------------------------------------------------------------------ alpha
-    # Shared skewness: same column chemistry → same elution profile shape.
-    alpha_raw_main = numpyro.sample(
-        "alpha_raw_main", dist.Normal(0.0, 0.5).expand([n_peak])
+    alpha_raw_loc, alpha_raw_scale = _bounded_alpha_prior_to_raw(
+        alpha_loc,
+        jnp.maximum(jnp.asarray(alpha_scale, dtype=jnp.float32), 1e-6),
+    )
+    alpha_raw_peak = numpyro.sample(
+        "alpha_raw_peak", dist.Normal(alpha_raw_loc, alpha_raw_scale)
     )  # [n_peak]
-    alpha_main = numpyro.deterministic(
-        "alpha_main", _ALPHA_MAX * jnp.tanh(alpha_raw_main)
+    alpha_peak = numpyro.deterministic(
+        "alpha_peak", _ALPHA_MAX * jnp.tanh(alpha_raw_peak)
     )  # [n_peak]
-
-    if n_shoulder > 0:
-        alpha_shoulder = numpyro.deterministic(
-            "alpha_shoulder", alpha_main[sh_idx]
-        )  # [n_shoulder]
-        alpha_pair = (
-            jnp.zeros((n_peak, 2))
-            .at[:, 0]
-            .set(alpha_main)
-            .at[sh_idx, 1]
-            .set(alpha_shoulder)
+    alpha_component = jnp.stack([alpha_peak, alpha_peak], axis=-1)
+    if n_free > 0:
+        alpha_raw_free_second = numpyro.sample(
+            "alpha_raw_free_second",
+            dist.Normal(alpha_raw_loc[free_idx], alpha_raw_scale[free_idx]),
         )
-    else:
-        alpha_pair = jnp.stack([alpha_main, jnp.zeros_like(alpha_main)], axis=-1)
-    alpha_flat = alpha_pair.reshape(n_comp)  # [n_comp]
+        alpha_free_second = numpyro.deterministic(
+            "alpha_free_second",
+            _ALPHA_MAX * jnp.tanh(alpha_raw_free_second),
+        )
+        alpha_component = alpha_component.at[free_idx, 1].set(alpha_free_second)
+    alpha_flat = alpha_component.reshape(n_comp)
+    numpyro.deterministic("alpha", alpha_flat)
 
-    # ------------------------------------------------------------------ mu
-    # Fully per-trace with shared prior.  mu_per_trace[t, p] = apex (MODE) of
-    # peak p in trace t — NOT the skew-normal location parameter ξ.
+    # ------------------------------------------------------------------ center
     mu_scale_safe = jnp.maximum(jnp.asarray(mu_center_scale), 1e-6)
-    mu_per_trace = numpyro.sample(
-        "mu_per_trace",
+    center_per_trace = numpyro.sample(
+        "center_per_trace",
         dist.Normal(mu_center_loc, mu_scale_safe).expand([n_trace, n_peak]),
     )  # [n_trace, n_peak]
 
-    # ------------------------------------------------------------------ separation
-    # Sampled per-shoulder with LogNormal prior centred at user-provided value.
-    # 5% CV allows flexibility while keeping separation near the user-provided estimate.
-    if n_shoulder > 0:
-        sep_loc_safe = jnp.maximum(jnp.asarray(separation_loc, dtype=jnp.float32), 1e-6)
-        separation = numpyro.sample(
-            "separation",
-            dist.LogNormal(jnp.log(sep_loc_safe), 0.05),
-        )  # [n_shoulder]
-        sep_all = jnp.zeros(n_peak).at[sh_idx].set(separation)
-    else:
-        sep_all = jnp.zeros(n_peak)
-
-    # Mode positions: main apex at mu_per_trace, shoulder offset by separation.
-    mode_main = mu_per_trace  # [n_trace, n_peak]
-    sep_offset = sep_all * side  # [n_peak]  signed by shoulder side
-    mode_shoulder = mu_per_trace + sep_offset[None, :]  # [n_trace, n_peak]
+    # ------------------------------------------------------------------ component modes
+    mode_component = jnp.stack([center_per_trace, center_per_trace], axis=-1)
+    if n_artefact > 0:
+        artefact_sep_loc = jnp.maximum(2.0 * sigma_loc_safe[artefact_idx], 1e-6)
+        separation_artefact = numpyro.sample(
+            "separation_artefact",
+            dist.LogNormal(jnp.log(artefact_sep_loc), 0.05),
+        )
+        mode_component = mode_component.at[:, artefact_idx, 1].set(
+            center_per_trace[:, artefact_idx]
+            + separation_artefact[None, :] * artefact_side_v[artefact_idx][None, :]
+        )
+    if n_free > 0:
+        u_sep_free = numpyro.sample(
+            "u_sep_free",
+            dist.Beta(2.0, 2.0).expand([n_trace, n_free]),
+        )
+        separation_free = numpyro.deterministic(
+            "separation_free",
+            3.0 * sigma_loc_safe[free_idx] * u_sep_free,
+        )
+        free_center = center_per_trace[:, free_idx]
+        half_sep = 0.5 * separation_free
+        mode_component = mode_component.at[:, free_idx, 0].set(free_center - half_sep)
+        mode_component = mode_component.at[:, free_idx, 1].set(free_center + half_sep)
 
     # Convert mode → skew-normal location parameter ξ:
     #   ξ = mode − σ·δ·√(2/π),   δ = α / √(1 + α²)
-    delta_pair = alpha_pair / jnp.sqrt(1.0 + alpha_pair**2)  # [n_peak, 2]
-    mode_shift = sigma_pair * delta_pair * _SQRT_2_OVER_PI  # [n_peak, 2]
-    mu_main_loc = mode_main - mode_shift[None, :, 0]  # [n_trace, n_peak]  — ξ_main
-    mu_sh_loc = (
-        mode_shoulder - mode_shift[None, :, 1]
-    )  # [n_trace, n_peak]  — ξ_shoulder
-
-    # Flatten [n_trace, n_peak, 2] → [n_trace, n_comp]
-    mu_flat = jnp.stack([mu_main_loc, mu_sh_loc], axis=-1).reshape(n_trace, n_comp)
+    delta_component = alpha_component / jnp.sqrt(1.0 + alpha_component**2)
+    mode_shift = sigma_component * delta_component * _SQRT_2_OVER_PI
+    mu_component = mode_component - mode_shift[None, :, :]
+    mu_flat = mu_component.reshape(n_trace, n_comp)
     numpyro.deterministic("mu", mu_flat)
 
     # ------------------------------------------------------------------ area
-    # A_main: per-trace, free to track analyte concentration.
-    # area_per_trace already represents main-only area (shoulder removed in priors.py).
-    main_area_safe = jnp.maximum(jnp.asarray(area_per_trace), 1e-8)  # [n_trace, n_peak]
-    A_main = numpyro.sample(
-        "A_main",
-        dist.LogNormal(jnp.log(main_area_safe), _AREA_LOG_SIGMA),
-    )  # [n_trace, n_peak]
+    area_component = jnp.zeros((n_trace, n_peak, 2), dtype=x.dtype)
+    area_total = jnp.zeros((n_trace, n_peak), dtype=x.dtype)
 
-    if n_shoulder > 0:
-        # A_sh_shared: single scalar per shoulder, shared across all traces.
-        # Physical rationale: shoulder = chromatographic artefact with constant
-        # absolute area — independent of analyte concentration.
-        # 30% CV (log sigma = 0.3) allows slow column/instrument drift.
-        sh_prior_safe = jnp.maximum(
-            jnp.asarray(shoulder_area_prior, dtype=jnp.float32), 1e-8
-        )  # [n_shoulder]
-        A_sh_shared = numpyro.sample(
-            "A_sh_shared",
-            dist.LogNormal(jnp.log(sh_prior_safe * 0.5), _SH_AREA_LOG_SIGMA),
-        )  # [n_shoulder]
+    if n_nonfree > 0:
+        primary_area_safe = jnp.maximum(
+            jnp.asarray(main_area_per_trace, dtype=jnp.float32)[:, nonfree_idx],
+            1e-8,
+        )
+        A_primary = numpyro.sample(
+            "A_primary",
+            dist.LogNormal(jnp.log(primary_area_safe), _AREA_LOG_SIGMA),
+        )
+        area_component = area_component.at[:, nonfree_idx, 0].set(A_primary)
+        area_total = area_total.at[:, nonfree_idx].set(A_primary)
 
-        # Broadcast shared scalar to all traces: A_sh[t, p] = A_sh_shared[sh] ∀ t
-        A_sh_per_trace = jnp.broadcast_to(
-            A_sh_shared[None, :], (n_trace, n_shoulder)
-        )  # [n_trace, n_shoulder]
-        A_sh_all = (
-            jnp.zeros((n_trace, n_peak)).at[:, sh_idx].set(A_sh_per_trace)
-        )  # [n_trace, n_peak]
-    else:
-        A_sh_all = jnp.zeros((n_trace, n_peak))
+    if n_artefact > 0:
+        artefact_shoulder_area_safe = jnp.maximum(
+            jnp.asarray(artefact_shoulder_area_prior, dtype=jnp.float32),
+            1e-8,
+        )
+        A_artefact_shared = numpyro.sample(
+            "A_artefact_shared",
+            dist.LogNormal(jnp.log(artefact_shoulder_area_safe), _SH_AREA_LOG_SIGMA),
+        )
+        A_artefact = jnp.broadcast_to(
+            A_artefact_shared[None, :],
+            (n_trace, n_artefact),
+        )
+        area_component = area_component.at[:, artefact_idx, 1].set(A_artefact)
+        area_total = area_total.at[:, artefact_idx].add(A_artefact)
 
-    A_sh = A_sh_all * shoulder_enabled[None, :]  # zero out non-shoulder slots
-    numpyro.deterministic("A_total", A_main + A_sh)
-    A_flat = jnp.stack([A_main, A_sh], axis=-1).reshape(n_trace, n_comp)
+    if n_free > 0:
+        total_area_safe = jnp.maximum(
+            jnp.asarray(total_area_per_trace, dtype=jnp.float32)[:, free_idx],
+            1e-8,
+        )
+        A_total_free = numpyro.sample(
+            "A_total_free",
+            dist.LogNormal(jnp.log(total_area_safe), _AREA_LOG_SIGMA),
+        )
+        w_free = numpyro.sample(
+            "w_free",
+            dist.Beta(2.0, 2.0).expand((n_trace, n_free)),
+        )
+        A_free_1 = A_total_free * w_free
+        A_free_2 = A_total_free * (1.0 - w_free)
+        area_component = area_component.at[:, free_idx, 0].set(A_free_1)
+        area_component = area_component.at[:, free_idx, 1].set(A_free_2)
+        area_total = area_total.at[:, free_idx].set(A_total_free)
+
+    numpyro.deterministic("A_total", area_total)
+    A_flat = area_component.reshape(n_trace, n_comp)
     numpyro.deterministic("A", A_flat)
 
     # ------------------------------------------------------------------ baseline
@@ -369,17 +388,21 @@ def model(
 
 
 # ---------------------------------------------------------------------------
-# Parameter names (for ArviZ / posterior extraction)
+# Summary parameter names (for ArviZ / posterior extraction)
 # ---------------------------------------------------------------------------
 
-SAMPLED_PARAMETER_NAMES = (
-    "log_sigma_main",
-    "alpha_raw_main",  # shared with shoulder (alpha_shoulder = alpha_main[sh_idx])
-    "mu_per_trace",  # [n_trace, n_peak] per-trace main peak apex (mode)
-    "A_main",  # [n_trace, n_peak] per-trace main component area
-    "A_sh_shared",  # [n_shoulder] shared artefact shoulder area; only when shoulders exist
-    "separation",  # [n_shoulder] inter-apex distance per shoulder; only when shoulders exist
-    "sigma_scale_raw_shoulder",  # [n_shoulder] raw scale (mapped to [0.5, 2.0]); only when shoulders exist
+SUMMARY_PARAMETER_NAMES = (
+    "sigma_peak",
+    "sigma_artefact_second",
+    "sigma_free_second",
+    "alpha_peak",
+    "alpha_free_second",
+    "center_per_trace",
+    "A_primary",
+    "A_artefact_shared",
+    "A_total_free",
+    "separation_artefact",
+    "separation_free",
     "baseline_intercept",
     "baseline_slope",
     "sigma_y",
