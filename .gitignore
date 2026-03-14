@@ -170,3 +170,7 @@ test.py
 .DS_Store
 uv.lock
 .vscode/
+paper
+CLAUDE.md
+example.ipynb
+ex_simple.ipynb
