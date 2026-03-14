@@ -29,23 +29,22 @@ def create_overview_panel(handler: Handler) -> Panel:
     overview_content = []
     overview_content.append(f"[bold]ID:[/bold] {handler.id}")
     overview_content.append(f"[bold]Name:[/bold] {handler.name}")
-    overview_content.append(f"[bold]Mode:[/bold] {handler.mode}")
 
-    # Add measurement summary
+    # Add sample summary
     total_peaks = sum(
         len(chrom.peaks)
-        for meas in handler.measurements
-        for chrom in meas.chromatograms
+        for sample in handler.samples
+        for chrom in sample.chromatograms
     )
     assigned_peaks = sum(
         1
-        for meas in handler.measurements
-        for chrom in meas.chromatograms
+        for sample in handler.samples
+        for chrom in sample.chromatograms
         for peak in chrom.peaks
         if peak.molecule_id
     )
 
-    overview_content.append(f"[bold]Measurements:[/bold] {len(handler.measurements)}")
+    overview_content.append(f"[bold]Samples:[/bold] {len(handler.samples)}")
     if total_peaks > 0:
         assignment_rate = (assigned_peaks / total_peaks) * 100
         overview_content.append(
@@ -71,16 +70,16 @@ def create_statistics_table(handler: Handler) -> Table:
     stats_table.add_column("Count", justify="right")
 
     # Calculate statistics
-    total_chromatograms = sum(len(meas.chromatograms) for meas in handler.measurements)
+    total_chromatograms = sum(len(sample.chromatograms) for sample in handler.samples)
     total_peaks = sum(
         len(chrom.peaks)
-        for meas in handler.measurements
-        for chrom in meas.chromatograms
+        for sample in handler.samples
+        for chrom in sample.chromatograms
     )
     assigned_peaks = sum(
         1
-        for meas in handler.measurements
-        for chrom in meas.chromatograms
+        for sample in handler.samples
+        for chrom in sample.chromatograms
         for peak in chrom.peaks
         if peak.molecule_id
     )
@@ -89,7 +88,7 @@ def create_statistics_table(handler: Handler) -> Table:
     component_counts = [
         ("Molecules", len(handler.molecules)),
         ("Proteins", len(handler.proteins)),
-        ("Measurements", len(handler.measurements)),
+        ("Samples", len(handler.samples)),
         ("Chromatograms", total_chromatograms),
         ("Total Peaks", total_peaks),
         ("Assigned Peaks", assigned_peaks),
@@ -160,55 +159,39 @@ def create_stats_and_species_content(handler: Handler) -> Table | Columns:
 
 
 def create_measurements_content(handler: Handler) -> Table:
-    """Create measurements content."""
+    """Create samples/chromatograms content."""
     measurements_emoji = _safe_emoji("📈", "DATA")
     measurements_table = Table(
-        title=f"{measurements_emoji} Measurements",
+        title=f"{measurements_emoji} Samples",
         show_header=True,
         header_style="bold cyan",
     )
-    measurements_table.add_column("ID", style="yellow", min_width=12)
+    measurements_table.add_column("Sample ID", style="yellow", min_width=12)
     measurements_table.add_column("Chromatograms", justify="center")
     measurements_table.add_column("Peaks", justify="center")
     measurements_table.add_column("Assigned", justify="center")
-    measurements_table.add_column("Data Value", justify="right")
-    measurements_table.add_column("Conditions")
+    measurements_table.add_column("Reaction Times (min)", justify="right")
 
-    for measurement in handler.measurements:  # Show all measurements
-        meas_peaks = sum(len(chrom.peaks) for chrom in measurement.chromatograms)
-        meas_assigned = sum(
+    for sample in handler.samples:
+        sample_peaks = sum(len(chrom.peaks) for chrom in sample.chromatograms)
+        sample_assigned = sum(
             1
-            for chrom in measurement.chromatograms
+            for chrom in sample.chromatograms
             for peak in chrom.peaks
             if peak.molecule_id
         )
 
-        # Format data
-        data_str = (
-            f"{measurement.data.value} {measurement.data.unit.id}"
-            if hasattr(measurement, "data") and measurement.data
-            else "N/A"
+        reaction_times = sorted(
+            {chrom.reaction_time for chrom in sample.chromatograms if chrom.reaction_time is not None}
         )
-
-        # Format conditions
-        conditions = []
-        if hasattr(measurement, "ph") and measurement.ph is not None:
-            conditions.append(f"pH: {measurement.ph}")
-        if hasattr(measurement, "temperature") and measurement.temperature is not None:
-            temp_unit = (
-                measurement.temperature_unit.name
-                if hasattr(measurement, "temperature_unit")
-                else "°C"
-            )
-            conditions.append(f"T: {measurement.temperature} {temp_unit}")
+        rt_str = ", ".join(f"{rt:.1f}" for rt in reaction_times) if reaction_times else "—"
 
         measurements_table.add_row(
-            measurement.id,
-            str(len(measurement.chromatograms)),
-            str(meas_peaks),
-            f"[green]{meas_assigned}[/green]" if meas_assigned > 0 else "0",
-            data_str,
-            " | ".join(conditions) if conditions else "—",
+            sample.id,
+            str(len(sample.chromatograms)),
+            str(sample_peaks),
+            f"[green]{sample_assigned}[/green]" if sample_assigned > 0 else "0",
+            rt_str,
         )
 
     return measurements_table
@@ -236,8 +219,8 @@ def create_peak_assignment_summary_table(
         multiple_peaks = result["measurements_with_multiple_peaks"]
         no_peaks = result["measurements_with_no_peaks"]
 
-        # Calculate total measurements for this molecule
-        total_measurements = len(handler.measurements)
+        # Calculate total samples for this molecule
+        total_measurements = len(handler.samples)
 
         # Safe emojis for status
         success_emoji = _safe_emoji("✅", "[OK]")
@@ -325,7 +308,7 @@ def print_peak_assignment_summary(
                 else ""
             )
             table.add_row(
-                warning["measurement_id"],
+                warning["sample_id"],
                 str(warning["num_peaks"]),
                 f"[{rts_str}]",
                 f"{warning['assigned_rt']:.3f}",
@@ -395,7 +378,7 @@ def display_rich_handler(
     # Debug information
     if debug:
         console.print(
-            f"[dim]Debug: Molecules: {len(handler.molecules)}, Proteins: {len(handler.proteins)}, Measurements: {len(handler.measurements)}[/dim]"
+            f"[dim]Debug: Molecules: {len(handler.molecules)}, Proteins: {len(handler.proteins)}, Samples: {len(handler.samples)}[/dim]"
         )
 
     # Collect all content panels
@@ -416,11 +399,11 @@ def display_rich_handler(
         console.print("[dim]Debug: No stats/species content to add[/dim]")
 
     # Only add sections that have content
-    if handler.measurements:
+    if handler.samples:
         content_panels.append(create_measurements_content(handler))
         if debug:
             console.print(
-                f"[dim]Debug: Added measurements content ({len(handler.measurements)} measurements)[/dim]"
+                f"[dim]Debug: Added samples content ({len(handler.samples)} samples)[/dim]"
             )
     elif debug:
         console.print("[dim]Debug: No measurements to add[/dim]")
@@ -468,7 +451,7 @@ def create_rich_handler_group(handler: Handler) -> Group:
         content_panels.append(stats_species)
 
     # Only add sections that have content
-    if handler.measurements:
+    if handler.samples:
         content_panels.append(create_measurements_content(handler))
 
     # Create a group of all content with spacing

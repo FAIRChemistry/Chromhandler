@@ -2,7 +2,7 @@ from loguru import logger
 from mdmodels.units.annotation import UnitDefinition
 from pydantic import BaseModel, Field
 
-from chromhandler.model import Measurement
+from chromhandler.model import Sample
 from chromhandler.utility import _resolve_chromatogram
 
 logger.level("INFO")
@@ -33,17 +33,26 @@ class InternalStandard(BaseModel):
 
     def _set_t0_signals(
         self,
-        measurement: "Measurement",
+        sample: "Sample",
     ) -> None:
-        """Sets the t0 signals of the molecule and the standard based on the data in the measurement."""
+        """Sets the t0 signals of the molecule and the standard from the t=0 chromatogram.
 
-        assert measurement.data.value == 0, """
-        No measurement data is available at t=0. Concentration calculation is not possible
-        without a measurement at t=0.
+        The first chromatogram in *sample* (sorted by reaction_time) is used as t=0.
         """
+        chroms_at_t0 = sorted(
+            (c for c in sample.chromatograms if c.reaction_time is not None),
+            key=lambda c: c.reaction_time,  # type: ignore[arg-type]
+        )
+        assert chroms_at_t0, (
+            "No chromatogram with a reaction_time found in the sample."
+        )
+        assert chroms_at_t0[0].reaction_time == 0, (
+            "No measurement data is available at t=0. Concentration calculation is not "
+            "possible without a chromatogram at reaction_time=0."
+        )
 
         for peak in _resolve_chromatogram(
-            chromatograms=measurement.chromatograms, wavelength=None
+            chromatograms=[chroms_at_t0[0]], wavelength=None
         ).peaks:
             if peak.molecule_id == self.molecule_id:
                 self.molecule_t0_signal = peak.area

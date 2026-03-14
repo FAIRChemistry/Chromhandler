@@ -1,0 +1,90 @@
+"""Handler-level peak and baseline annotation models.
+
+Distinct from :mod:`chromhandler.fitting.data` which holds MCMC fitting
+helpers. This module defines the window annotations a user places on a
+:class:`~chromhandler.handler.Handler`, and are the *single* annotation types
+passed through to :class:`~chromhandler.fitting.better_fitter.BetterFitter`.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, model_validator
+
+# Vocabulary aligned with the fitting module internals.
+PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
+ArtefactSide = Literal["left", "right"]
+
+
+class PeakAnnotation(BaseModel):
+    """A retention-time window annotation attached to a molecule.
+
+    Attributes:
+        molecule_id: ID of the molecule this window belongs to.
+        rt_min: Lower retention-time bound (minutes, inclusive).
+        rt_max: Upper retention-time bound (minutes, inclusive).
+        mode: Peak shape assumption — ``"single"`` (one component),
+            ``"free_doublet"`` (two independently positioned components),
+            ``"artefact_doublet"`` (main peak + fixed-side artefact shoulder).
+        artefact_side: Which side carries the shoulder; required when
+            *mode* is ``"artefact_doublet"``, must be ``None`` otherwise.
+
+    Example::
+
+        ann = PeakAnnotation(
+            molecule_id="s0",
+            rt_min=2.8,
+            rt_max=3.2,
+            mode="artefact_doublet",
+            artefact_side="right",
+        )
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    molecule_id: str
+    rt_min: float
+    rt_max: float
+    mode: PeakMode
+    artefact_side: ArtefactSide | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> PeakAnnotation:
+        if self.mode == "artefact_doublet" and self.artefact_side is None:
+            raise ValueError(
+                "artefact_side must be 'left' or 'right' when mode='artefact_doublet'."
+            )
+        if self.mode != "artefact_doublet" and self.artefact_side is not None:
+            raise ValueError(f"artefact_side must be None when mode='{self.mode}'.")
+        if self.rt_max <= self.rt_min:
+            raise ValueError(
+                f"rt_max ({self.rt_max}) must be greater than rt_min ({self.rt_min})."
+            )
+        return self
+
+
+class BaselineAnnotation(BaseModel):
+    """A retention-time window marking a baseline region.
+
+    Attributes:
+        rt_min: Lower retention-time bound (minutes, inclusive).
+        rt_max: Upper retention-time bound (minutes, inclusive).
+
+    Example::
+
+        bl = BaselineAnnotation(rt_min=0.5, rt_max=1.0)
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rt_min: float
+    rt_max: float
+
+    @model_validator(mode="after")
+    def _validate(self) -> BaselineAnnotation:
+        if self.rt_max <= self.rt_min:
+            raise ValueError(
+                f"rt_max ({self.rt_max}) must be greater than rt_min ({self.rt_min})."
+            )
+        return self

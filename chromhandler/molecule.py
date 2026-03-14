@@ -1,12 +1,175 @@
 from __future__ import annotations
 
 import json
-from typing import Optional
+from enum import Enum
+from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 from calipytion.model import Calibration
-from calipytion.tools.calibrator import Calibrator
-from mdmodels.units.annotation import UnitDefinitionAnnot
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from chromhandler.model import Estimate
+
+
+class CalibrationMethod(str, Enum):
+    """Calibration method used to build a :class:`LinearCalibration`."""
+
+    EXTERNAL = "external"
+    INTERNAL = "internal"
+
+
+class LinearCalibration(BaseModel):
+    """Linear peak-area → concentration calibration model.
+
+    Built by :meth:`~chromhandler.handler.Handler.calibrate_molecules` from
+    calibration-standard samples (``reaction_time == 0``) and stored on
+    :attr:`Molecule.calibration` after fitting.
+
+    The regression direction is::
+
+        area = slope × conc (+ intercept)
+
+    so the inverse (area → concentration) is::
+
+        conc = (area - intercept) / slope
+
+    When all calibration peaks carry posterior draws
+    (``Peak.area.samples`` non-empty), per-draw regressions are stored in
+    :attr:`slope_samples` / :attr:`intercept_samples` and
+    :meth:`area_to_conc` returns a full :class:`~chromhandler.model.Estimate`
+    with uncertainty.
+
+    Attributes:
+        method: Calibration method (always ``"external"`` at present).
+        fit_intercept: Whether the regression included an intercept term.
+        slope: OLS slope in *area / conc* units.
+        intercept: OLS intercept in *area* units (0.0 when
+            ``fit_intercept=False``).
+        r_squared: Coefficient of determination R².
+        residual_std: Standard error of the estimate.
+        n_standards: Number of calibration points used.
+        max_area: Highest measured area in the calibration set.
+        min_area: Lowest measured area in the calibration set.
+        max_conc: Highest known concentration in the calibration set.
+        min_conc: Lowest known concentration in the calibration set.
+        slope_samples: Per-draw OLS slopes (non-empty if posterior regression
+            was performed).
+        intercept_samples: Per-draw OLS intercepts (parallel to
+            ``slope_samples``).
+        conc_unit: String representation of the concentration unit.
+        chromatogram_ids: Chromatogram IDs whose peaks were used as standards.
+        concentrations: Known concentrations used for calibration (one per
+            standard), in the same order as :attr:`areas_mean`.
+        areas_mean: Mean areas used for calibration (one per standard).
+    """
+
+    model_config: ConfigDict = ConfigDict(validate_assignment=True)  # type: ignore
+
+    method: CalibrationMethod = CalibrationMethod.EXTERNAL
+    fit_intercept: bool = False
+
+    # --- Point-estimate regression parameters ---
+    slope: float = Field(description="OLS slope (area / conc).")
+    intercept: float = Field(default=0.0, description="OLS intercept (area units).")
+    r_squared: float = Field(description="Coefficient of determination R².")
+    residual_std: float = Field(description="Standard error of the estimate.")
+    n_standards: int = Field(description="Number of calibration points used.")
+
+    # --- Calibration range (for extrapolation guard) ---
+    max_area: float = Field(description="Highest measured area in calibration set.")
+    min_area: float = Field(description="Lowest measured area in calibration set.")
+    max_conc: float = Field(description="Highest known concentration in calibration set.")
+    min_conc: float = Field(description="Lowest known concentration in calibration set.")
+
+    # --- Posterior regression distributions ---
+    slope_samples: list[float] = Field(
+        default_factory=list,
+        description="Per-draw OLS slopes (non-empty when posterior regression was performed).",
+    )
+    intercept_samples: list[float] = Field(
+        default_factory=list,
+        description="Per-draw OLS intercepts, parallel to slope_samples.",
+    )
+
+    # --- Provenance ---
+    conc_unit: str = Field(default="", description="String representation of concentration unit.")
+    chromatogram_ids: list[str] = Field(
+        default_factory=list,
+        description="Chromatogram IDs whose peaks were used as standards.",
+    )
+
+    # --- Raw data (useful for plotting the calibration curve) ---
+    concentrations: list[float] = Field(
+        default_factory=list,
+        description="Known concentrations used for calibration.",
+    )
+    areas_mean: list[float] = Field(
+        default_factory=list,
+        description="Mean areas per standard, in the same order as concentrations.",
+    )
+
+    def area_to_conc(
+        self,
+        area: float,
+        extrapolate: bool = False,
+        n_samples: int | None = None,
+    ) -> "Estimate":
+        """Convert a peak area to a concentration :class:`~chromhandler.model.Estimate`.
+
+        When posterior regression distributions are available
+        (``slope_samples`` non-empty) and *n_samples* is given, the returned
+        :class:`~chromhandler.model.Estimate` carries full uncertainty from the
+        calibration posteriors.
+
+        Args:
+            area: The peak area to convert.
+            extrapolate: If ``False`` (default), raises :exc:`ValueError` when
+                *area* is outside the calibration range
+                [``min_area``, ``max_area``].
+            n_samples: If not ``None`` and posterior distributions exist, draw
+                this many random samples for the posterior-predictive
+                :class:`~chromhandler.model.Estimate`.
+
+        Returns:
+            :class:`~chromhandler.model.Estimate` with at minimum ``mean`` set.
+            When posterior samples are available, ``std``, ``q05``, ``q95``,
+            and optionally ``samples`` are also populated.
+
+        Raises:
+            ValueError: If ``extrapolate=False`` and *area* is outside the
+                calibration range.
+        """
+        from chromhandler.model import Estimate  # local — avoids circular import
+
+        if not extrapolate and (area < self.min_area or area > self.max_area):
+            raise ValueError(
+                f"area={area:.4g} is outside the calibration range "
+                f"[{self.min_area:.4g}, {self.max_area:.4g}]. "
+                "Pass extrapolate=True to allow extrapolation."
+            )
+
+        if self.slope_samples:
+            slopes = np.asarray(self.slope_samples)
+            intercepts = np.asarray(self.intercept_samples)
+            if n_samples is not None:
+                n_draw = min(n_samples, len(slopes))
+                idx = np.random.choice(len(slopes), size=n_draw, replace=False)
+                slopes = slopes[idx]
+                intercepts = intercepts[idx]
+            concs = (area - intercepts) / slopes
+            return Estimate(
+                mean=float(np.mean(concs)),
+                median=float(np.median(concs)),
+                std=float(np.std(concs)),
+                q05=float(np.quantile(concs, 0.05)),
+                q95=float(np.quantile(concs, 0.95)),
+                samples=concs.tolist() if n_samples is not None else [],
+            )
+
+        # Point estimate only
+        conc = (area - self.intercept) / self.slope
+        return Estimate(mean=conc)
 
 
 class Molecule(BaseModel):
@@ -24,29 +187,9 @@ class Molecule(BaseModel):
     name: str = Field(
         description="Name of the molecule",
     )
-    init_conc: Optional[float] = Field(
-        description="Initial concentration of the molecule at t=0",
-        default=None,
-    )
-    conc_unit: Optional[UnitDefinitionAnnot] = Field(
-        description="Unit of the concentration",
-        default=None,
-    )
-    retention_time: Optional[float] = Field(
-        description="Retention time of the molecule in minutes",
-        default=None,
-    )
-    wavelength: Optional[float] = Field(
-        description="Wavelength at which the molecule was detected",
-        default=None,
-    )
     standard: Optional[Calibration] = Field(
-        description="Calibration instance associated with the molecule",
+        description="Standard associated with the molecule",
         default=None,
-    )
-    retention_tolerance: float = Field(
-        description="Tolerance for the retention time of the molecule",
-        default=0.1,
     )
     constant: bool = Field(
         description="Boolean indicating whether the molecule concentration is constant throughout the experiment",
@@ -56,108 +199,10 @@ class Molecule(BaseModel):
         description="Boolean indicating whether the molecule is an internal standard",
         default=False,
     )
-    min_signal: float = Field(
-        description="Minimum signal threshold for peak assignment. Peaks must have an area >= this value to be assigned to this molecule.",
-        default=0.0,
+    calibration: Optional[LinearCalibration] = Field(
+        default=None,
+        description="Linear calibration model fitted from t=0 calibration standards.",
     )
-
-    @classmethod
-    def from_standard(
-        cls, standard: Calibration, init_conc: float, conc_unit: UnitDefinitionAnnot
-    ) -> Molecule:
-        """Creates a Molecule instance from a Calibration instance.
-
-        Args:
-            standard (Calibration): The calibration instance to create the molecule from.
-            init_conc (float): The initial concentration of the molecule.
-            conc_unit (UnitDefinition): The unit of the concentration.
-
-        Returns:
-            Molecule: The created Molecule instance.
-        """
-
-        assert standard.retention_time, """
-        The retention time of the calibration needs to be defined. 
-        Specify the `retention_time` attribute of the calibration.
-        """
-
-        return cls(
-            id=standard.molecule_id,
-            pubchem_cid=standard.pubchem_cid,
-            name=standard.molecule_name,
-            init_conc=init_conc,
-            conc_unit=conc_unit,
-            retention_time=standard.retention_time,
-            standard=standard,
-        )
-
-    def create_standard(
-        self,
-        areas: list[float],
-        concs: list[float],
-        conc_unit: str,
-        ph: float,
-        temperature: float,
-        temp_unit: UnitDefinitionAnnot = "Celsius",
-        visualize: bool = True,
-    ) -> Calibration:
-        """Creates a linear standard from the molecule's calibration data.
-
-        Args:
-            areas (list[float]): The areas of the molecule.
-            concs (list[float]): The concentrations of the molecule.
-            conc_unit (str): The unit of the concentration.
-            ph (float): The pH of the solution.
-            temperature (float): The temperature of the solution.
-            temp_unit (UnitDefinition): The unit of the temperature.
-            visualize (bool): Whether to visualize the standard.
-
-        Returns:
-            Calibration: The created Calibration instance.
-        """
-
-        calibrator = Calibrator(
-            molecule_id=self.id,
-            pubchem_cid=self.pubchem_cid,
-            molecule_name=self.name,
-            wavelength=self.wavelength,
-            concentrations=concs,
-            conc_unit=conc_unit,
-            signals=areas,
-        )
-        calibrator.models = []
-        model = calibrator.add_model(
-            name="linear",
-            signal_law=f"{self.id} * a",
-            lower_bound=0.001,
-            upper_bound=1e10,
-        )
-
-        calibrator.fit_models()
-        model.calibration_range.conc_lower = 0.0
-        model.calibration_range.signal_lower = 0.0
-
-        if visualize:
-            calibrator.visualize_static()
-
-        standard = calibrator.create_standard(
-            model=model,
-            ph=ph,
-            temperature=temperature,
-            temp_unit=temp_unit,
-        )
-
-        # check if the `conc` attribute of the molecule is defined and if, it must have the same baseunit names as the calibration unit
-        if self.conc_unit:
-            assert self.conc_unit.name == conc_unit, """
-            The concentration unit of the molecule does not match the calibration unit defined in its standard.
-            """
-        else:
-            self.conc_unit = conc_unit
-
-        self.standard = standard
-
-        return standard
 
     @classmethod
     def read_json(cls, path: str) -> Molecule:
@@ -187,11 +232,3 @@ class Molecule(BaseModel):
 
         with open(path, "w") as f:
             f.write(self.model_dump_json(indent=4))
-
-    @property
-    def has_retention_time(self) -> bool:
-        """
-        Checks if the molecule has a retention time defined. And if so,
-        it is assumed that the molecule is present in the chromatogram.
-        """
-        return self.retention_time is not None
