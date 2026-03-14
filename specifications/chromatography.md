@@ -1,35 +1,24 @@
 ---
-repo: "https://github.com/FAIRChemistry/chromatopy"
-prefix: "chromatopy"
+repo: "https://github.com/FAIRChemistry/chromhandler"
+prefix: "chromhander"
 ---
 
 # Chromatography Data Model
 
 ## Objects
 
-### Measurement
+### Sample
+
 
 - __id__
   - Type: string
-  - Description: Unique identifier of the measurement.
-- __data__
-  - Type: Data
-  - Description: Data of the measurement.
+  - Description: Unique identifier of the sample.
 - __chromatograms__
   - Type: Chromatogram[]
   - Description: Measured chromatogram and peaks.
-- __temperature__
-  - Type: float
-  - Description: Temperature of the measurement.
-- __temperature_unit__
-  - Type: UnitDefinition
-  - Description: Unit of temperature.
-- __ph__
-  - Type: float
-  - Description: pH of the measurement.
-- sample_name
-  - Type: string
-  - Description: Name of the sample.
+- initial_conditions
+  - Type: InitialCondition[]
+  - Description: Initial conditions of the sample.
 - timestamp
   - Type: string
   - Description: Timestamp of sample injection into the column.
@@ -44,66 +33,85 @@ prefix: "chromatopy"
   - Type: UnitDefinition
   - Description: Unit of injection volume.
 
-### Data
-
-- __value__
-  - Type: float
-  - Description: Timecourse data.
-- __unit__
-  - Type: UnitDefinition
-  - Description: Unit of the data.
-- __data_type__
-  - Type: DataType
-  - Description: Type of data. Eighter timecourse or calibration.
-
 
 ### Chromatogram
 
-- type
-  - Type: SignalType
-  - Description: Type of signal.
+- __id__
+  - Type: string
+  - Description: Unique identifier of the sample.
+- __sample_id__
+  - Type: string
+  - Description: Identifier of the sample this chromatogram is part of.
+- signal
+  - Type: float[]
+  - Description: Signal values.
+- time
+  - Type: float[]
+  - Description: Time values of the signal in minutes.
 - peaks
   - Type: Peak[]
   - Description: Peaks in the signal.
-- signals
-  - Type: float[]
-  - Description: Signal values.
-- times
-  - Type: float[]
-  - Description: Time values of the signal in minutes.
-- processed_signal
-  - Type: float[]
-  - Description: Processed signal values after signal processing.
 - wavelength
   - Type: float
   - Description: Wavelength of the signal in nm.
+- reaction_time
+  - Type: float
+  - Description: Time relative to reaction start
+- reaction_time_unit
+  - Type: UnitDefinition
+  - Description: Unit of reaction time
+
+### Estimate
+
+- __mean__
+  - Type: float
+  - Description: Mean value of the estimate.
+- median
+  - Type: float
+  - Description: Median of the estimate.
+- std
+  - Type: float
+  - Description: One sigma standard deviation of the estimate.
+- q05
+  - Type: float
+  - Description: 5th percentile of the estimate.
+- q95
+  - Type: float
+  - Description: 95th percentile of the estimate.
+- samples
+  - Type: float[]
+  - Description: Samples from the posterior distribution.
+
 
 ### Peak
 
-- __retention_time__
-  - Type: float
+- __chromatogram_id__
+  - Type: string
+  - Description: Identifier of the chromatogram this peak is part of.
+- __location__
+  - Type: Estimate
   - Description: Retention time of the peak in minutes.
 - __area__
-  - Type: float
+  - Type: Estimate
   - Description: Area of the peak.
+- skew
+  - Type: Estimate
+  - Description: Skew of the peak.
+- width
+  - Type: Estimate
+  - Description: Width of the peak.
 - molecule_id
   - Type: string
   - Description: Identifier of the molecule.
 - type
   - Type: string
   - Description: Type of peak (baseline-baseline / baseline-valley / ...)
-- width
-  - Type: float
-  - Description: Width of the peak at half height.
 - amplitude
   - Type: float
   - Description: Amplitude of the peak.
 - max_signal
   - Type: float
   - Description: Maximum signal of the peak.
-- skew
-  - Type: float
-  - Description: Skew of the peak.
 - percent_area
   - Type: float
   - Description: Percent area of the peak.
@@ -120,22 +128,14 @@ prefix: "chromatopy"
   - Type: float
   - Description: End time of the peak.
 
-### SignalType
+### InitialCondition
 
-```python
-UV = "uv/visible absorbance detector"
-FLD = "fluorescence detector"
-FID = "flame ionization detector"
-TCD = "thermal conductivity detector"
-RID = "refractive index detector"
-ELSD = "evaporative light scattering detector"
-MS = "mass spectrometry"
-DAD = "diode array detector"
-```
-
-### DataType
-
-```python
-TIMECOURSE = "timecourse"
-CALIBRATION = "calibration"
-```
+- __molecule_id__
+  - Type: string
+  - Description: Identifier of the molecule.
+- __init_conc__
+  - Type: float
+  - Description: Initial concentration of the molecule.
+- __conc_unit__
+  - Type: UnitDefinition
+  - Description: Unit of the concentration.
