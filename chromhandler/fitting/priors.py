@@ -3,7 +3,7 @@
 Combines window geometry, apex statistics, and FWHM-derived shape estimates.
 All priors are derived from:
 
-- **Apex-height-weighted centroid**      → mu_loc, mu_scale
+- **Apex-height-weighted centroid**      → apex_loc, apex_scale
 - **FWHM half-width geometry**           → sigma_loc, sigma_scale, alpha_loc, alpha_scale
 - **Gaussian area from apex × sigma**    → dominant_area_loc_per_trace
 - **Trapezoid total-window integration** → area_total_loc_per_trace
@@ -30,8 +30,9 @@ from typing import Final
 import jax.numpy as jnp
 import numpy as np
 
+from chromhandler.annotations import PeakAnnotation
+
 from .data import (
-    PeakAnnotation,
     PeakMode,
     peak_component_count,
     peak_is_artefact_mode,
@@ -48,7 +49,7 @@ _GAUSSIAN_FWHM_FACTOR: Final = 2.0 * _GAUSSIAN_HWHM_FACTOR
 _GAUSSIAN_AREA_FROM_HEIGHT_SIGMA: Final = math.sqrt(2.0 * math.pi)
 
 # Minimum height fraction for apex outlier rejection (fraction of max apex height)
-_MIN_APEX_HEIGHT_FRAC: Final = 0.05
+_MIN_APEX_HEIGHT_FRAC: Final = 0.0025
 _SINGLE_VALUE_SCALE_FRAC: Final = 0.05
 
 
@@ -63,9 +64,9 @@ class GeometricPeakPriors:
 
     Attributes
     ----------
-    mu_loc:
+    apex_loc:
         Apex-height-weighted centroid of the peak across traces [time units].
-    mu_scale:
+    apex_scale:
         Height-weighted standard deviation of apex positions across traces.
         Reflects retention-time drift between injections, not peak width.
     sigma_loc:
@@ -107,8 +108,8 @@ class GeometricPeakPriors:
     """
 
     mode: PeakMode
-    mu_loc: float
-    mu_scale: float
+    apex_loc: float
+    apex_scale: float
     sigma_loc: float
     sigma_scale: float
     alpha_loc: float
@@ -134,7 +135,7 @@ class GeometricPeakPriors:
             f"GeometricPeakPriors("
             f"window=[{self.window_lo:.4f}, {self.window_hi:.4f}], "
             f"mode={self.mode}, "
-            f"mu={self.mu_loc:.4f}±{self.mu_scale:.4f}, "
+            f"apex={self.apex_loc:.4f}±{self.apex_scale:.4f}, "
             f"sigma={self.sigma_loc:.4f}±{self.sigma_scale:.4f}, "
             f"alpha={self.alpha_loc:.3f}±{self.alpha_scale:.3f}, "
             f"ncomp={self.n_components}{art_str}, "
@@ -148,10 +149,10 @@ class FwhmShapeDiagnostics:
 
     Attributes
     ----------
-    mu_trace:
+    fwhm_apex_trace:
         Detected apex times per trace and peak window, shape ``[n_trace, n_peak]``.
         This is the FWHM-detected apex position used for diagnostics, not the
-        posterior ``center_per_trace`` latent from the model.
+        posterior ``apex`` latent from the model.
     apex_height_trace:
         Baseline-corrected apex heights, shape ``[n_trace, n_peak]``.
     sigma_trace:
@@ -165,7 +166,7 @@ class FwhmShapeDiagnostics:
     area_gaussian_trace:
         Per-trace Gaussian main-area estimates. FWHM-valid traces use their
         own per-trace apex and sigma; low-height fallback traces use the
-        shared ``mu_loc`` / ``sigma_loc`` approximation.
+        shared ``apex_loc`` / ``sigma_loc`` approximation.
         shape ``[n_trace, n_peak]``.
     area_total_trace:
         Per-trace total trapezoid-integrated window areas,
@@ -179,7 +180,7 @@ class FwhmShapeDiagnostics:
     fwhm_valid_trace:
         Boolean mask marking traces that produced a valid FWHM-based shape
         estimate in each peak window, shape ``[n_trace, n_peak]``.
-    approx_center_trace:
+    approx_apex_trace:
         Dense per-trace Gaussian-approximation centres, shape ``[n_trace, n_peak]``.
     approx_height_trace:
         Dense per-trace Gaussian-approximation heights, shape ``[n_trace, n_peak]``.
@@ -193,7 +194,7 @@ class FwhmShapeDiagnostics:
         approximation instead of a per-trace FWHM estimate, shape ``[n_trace, n_peak]``.
     """
 
-    mu_trace: np.ndarray
+    fwhm_apex_trace: np.ndarray
     apex_height_trace: np.ndarray
     sigma_trace: np.ndarray
     alpha_trace: np.ndarray
@@ -203,7 +204,7 @@ class FwhmShapeDiagnostics:
     area_residual_trace: np.ndarray
     height_valid_trace: np.ndarray
     fwhm_valid_trace: np.ndarray
-    approx_center_trace: np.ndarray
+    approx_apex_trace: np.ndarray
     approx_height_trace: np.ndarray
     approx_sigma_trace: np.ndarray
     approx_valid_trace: np.ndarray
@@ -356,7 +357,7 @@ def _height_weighted_apex(
         min_height_frac: Minimum apex height relative to the tallest trace.
 
     Returns:
-        ``(mu_loc, mu_scale, n_valid)``
+        ``(apex_loc, apex_scale, n_valid)``
     """
     if x_win.size == 0 or y_win.shape[1] == 0:
         raise ValueError("x_win and y_win must have non-zero size")
@@ -384,16 +385,35 @@ def _height_weighted_apex(
     if n_valid == 0:
         raise ValueError("No valid apex heights found")
 
-    mu_loc = _weighted_loc(apex_times, apex_heights, valid)
+    apex_loc = _weighted_loc(apex_times, apex_heights, valid)
     dt_floor = _median_dt(x_win)
-    mu_scale = _weighted_scale(
+    apex_scale = _weighted_scale(
         apex_times,
         apex_heights,
         valid,
-        mu_loc,
+        apex_loc,
         scale_floor=dt_floor,
     )
-    return mu_loc, mu_scale, n_valid
+    return apex_loc, apex_scale, n_valid
+
+
+def _robust_mad_scale(
+    values: np.ndarray,
+    *,
+    scale_floor: float = 1e-6,
+    single_value_scale_frac: float = _SINGLE_VALUE_SCALE_FRAC,
+) -> float:
+    """Return a robust scale estimate from the median absolute deviation."""
+    values_arr = np.asarray(values, dtype=float)
+    values_finite = values_arr[np.isfinite(values_arr)]
+    if values_finite.size == 0:
+        return float(scale_floor)
+    if values_finite.size == 1:
+        return max(single_value_scale_frac * abs(float(values_finite[0])), scale_floor)
+
+    center = float(np.median(values_finite))
+    mad = float(np.median(np.abs(values_finite - center)))
+    return max(1.4826 * mad, scale_floor)
 
 
 def _trace_fwhm_geometry(
@@ -614,7 +634,7 @@ def _main_peak_approximation(
     x_win: np.ndarray,
     y_win: np.ndarray,
     *,
-    mu_loc: float,
+    apex_loc: float,
     sigma_loc: float,
     geometry: _TraceFwhmGeometry,
 ) -> tuple[
@@ -623,7 +643,7 @@ def _main_peak_approximation(
     """Dense per-trace Gaussian main-peak approximation for one window.
 
     Valid FWHM traces use their own apex height/time and FWHM-derived sigma.
-    Low-height traces fall back to the shared ``mu_loc`` and ``sigma_loc``.
+    Low-height traces fall back to the shared ``apex_loc`` and ``sigma_loc``.
     """
     sigma_trace, _ = _fwhm_to_sigma_alpha(
         geometry.w_left,
@@ -634,16 +654,16 @@ def _main_peak_approximation(
 
     x_arr = np.asarray(x_win, dtype=float).ravel()
     y_arr = jnp.asarray(y_win, dtype=jnp.float32)
-    nearest_idx = int(np.argmin(np.abs(x_arr - float(mu_loc))))
+    nearest_idx = int(np.argmin(np.abs(x_arr - float(apex_loc))))
     nearest_height = jnp.maximum(
         jnp.where(jnp.isfinite(y_arr[:, nearest_idx]), y_arr[:, nearest_idx], 0.0),
         0.0,
     )
 
-    approx_center = jnp.where(
+    approx_apex = jnp.where(
         geometry.fwhm_valid,
         geometry.apex_time,
-        jnp.where(fallback_mask, float(mu_loc), jnp.nan),
+        jnp.where(fallback_mask, float(apex_loc), jnp.nan),
     )
     approx_height = jnp.where(
         geometry.fwhm_valid,
@@ -663,7 +683,7 @@ def _main_peak_approximation(
         approx_valid,
     )
     return (
-        approx_center,
+        approx_apex,
         approx_height,
         approx_sigma,
         area_gaussian,
@@ -713,7 +733,7 @@ def compute_fwhm_shape_diagnostics(
     n_peak = len(peaks)
     signal_corrected = signal - baseline
 
-    mu_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
+    fwhm_apex_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
     apex_height_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
     sigma_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
     alpha_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
@@ -723,25 +743,25 @@ def compute_fwhm_shape_diagnostics(
     area_residual_trace = np.zeros((n_trace, n_peak), dtype=np.float32)
     height_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
     fwhm_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
-    approx_center_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
+    approx_apex_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
     approx_height_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
     approx_sigma_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float32)
     approx_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
     approx_fallback_trace = np.zeros((n_trace, n_peak), dtype=bool)
 
     for peak_idx, peak in enumerate(peaks):
-        lo, hi = float(peak.low), float(peak.high)
+        lo, hi = float(peak.rt_min), float(peak.rt_max)
         mask = (x >= lo) & (x <= hi) & np.isfinite(x)
 
         if not np.any(mask):
             raise ValueError(
-                f"Peak '{peak.name}' window [{lo:.4f}, {hi:.4f}] "
+                f"Peak '{peak.molecule_id}' window [{lo:.4f}, {hi:.4f}] "
                 f"contains no finite data points in x."
             )
 
         x_win = x[mask]
         y_win = signal_corrected[:, mask]
-        mu_loc_j, _, _ = _height_weighted_apex(
+        apex_loc_j, _, _ = _height_weighted_apex(
             x_win,
             y_win,
             min_height_frac=min_height_frac,
@@ -764,7 +784,7 @@ def compute_fwhm_shape_diagnostics(
             jnp.nan,
         )
         (
-            approx_center_j,
+            approx_apex_j,
             approx_height_j,
             approx_sigma_j,
             area_gaussian_j,
@@ -773,13 +793,13 @@ def compute_fwhm_shape_diagnostics(
         ) = _main_peak_approximation(
             x_win,
             y_win,
-            mu_loc=mu_loc_j,
+            apex_loc=apex_loc_j,
             sigma_loc=sigma_loc_j,
             geometry=geometry_j,
         )
         area_residual_j = _residual_area(total_area_j, area_gaussian_j, approx_valid_j)
 
-        mu_trace[:, peak_idx] = np.asarray(
+        fwhm_apex_trace[:, peak_idx] = np.asarray(
             jnp.where(geometry_j.fwhm_valid, geometry_j.apex_time, jnp.nan),
             dtype=np.float32,
         )
@@ -797,14 +817,14 @@ def compute_fwhm_shape_diagnostics(
             geometry_j.height_valid, dtype=bool
         )
         fwhm_valid_trace[:, peak_idx] = np.asarray(geometry_j.fwhm_valid, dtype=bool)
-        approx_center_trace[:, peak_idx] = np.asarray(approx_center_j, dtype=np.float32)
+        approx_apex_trace[:, peak_idx] = np.asarray(approx_apex_j, dtype=np.float32)
         approx_height_trace[:, peak_idx] = np.asarray(approx_height_j, dtype=np.float32)
         approx_sigma_trace[:, peak_idx] = np.asarray(approx_sigma_j, dtype=np.float32)
         approx_valid_trace[:, peak_idx] = np.asarray(approx_valid_j, dtype=bool)
         approx_fallback_trace[:, peak_idx] = np.asarray(approx_fallback_j, dtype=bool)
 
     return FwhmShapeDiagnostics(
-        mu_trace=mu_trace,
+        fwhm_apex_trace=fwhm_apex_trace,
         apex_height_trace=apex_height_trace,
         sigma_trace=sigma_trace,
         alpha_trace=alpha_trace,
@@ -814,7 +834,7 @@ def compute_fwhm_shape_diagnostics(
         area_residual_trace=area_residual_trace,
         height_valid_trace=height_valid_trace,
         fwhm_valid_trace=fwhm_valid_trace,
-        approx_center_trace=approx_center_trace,
+        approx_apex_trace=approx_apex_trace,
         approx_height_trace=approx_height_trace,
         approx_sigma_trace=approx_sigma_trace,
         approx_valid_trace=approx_valid_trace,
@@ -879,19 +899,19 @@ def build_geometric_priors(
     results: list[GeometricPeakPriors] = []
 
     for peak in peaks:
-        lo, hi = float(peak.low), float(peak.high)
+        lo, hi = float(peak.rt_min), float(peak.rt_max)
         mask = (x >= lo) & (x <= hi) & np.isfinite(x)
 
         if not np.any(mask):
             raise ValueError(
-                f"Peak '{peak.name}' window [{lo:.4f}, {hi:.4f}] "
+                f"Peak '{peak.molecule_id}' window [{lo:.4f}, {hi:.4f}] "
                 f"contains no finite data points in x."
             )
 
         x_win = x[mask]  # [n_win]
         y_win = signal_corrected[:, mask]  # [n_trace, n_win]
 
-        mu_loc, mu_scale, n_valid = _height_weighted_apex(x_win, y_win)
+        apex_loc, apex_scale_legacy, n_valid = _height_weighted_apex(x_win, y_win)
         sigma_loc, sigma_scale, alpha_loc, alpha_scale, geometry = (
             _shape_priors_from_fwhm(
                 x_win,
@@ -908,7 +928,7 @@ def build_geometric_priors(
         ) = _main_peak_approximation(
             x_win,
             y_win,
-            mu_loc=mu_loc,
+            apex_loc=apex_loc,
             sigma_loc=sigma_loc,
             geometry=geometry,
         )
@@ -929,8 +949,8 @@ def build_geometric_priors(
         results.append(
             GeometricPeakPriors(
                 mode=peak.mode,
-                mu_loc=mu_loc,
-                mu_scale=mu_scale / 4,
+                apex_loc=apex_loc,
+                apex_scale=apex_scale_legacy / 4,
                 sigma_loc=sigma_loc,
                 sigma_scale=sigma_scale,
                 alpha_loc=alpha_loc,
@@ -945,6 +965,70 @@ def build_geometric_priors(
         )
 
     return results
+
+
+def refine_apex_priors_with_trace_shift(
+    priors: list[GeometricPeakPriors],
+    diagnostics: FwhmShapeDiagnostics,
+    *,
+    apex_scale_floor: float = 1e-4,
+    trace_shift_scale_floor: float = 1e-6,
+) -> tuple[list[GeometricPeakPriors], float]:
+    """Refine apex scales for the shared trace-shift hierarchy.
+
+    The shared trace shift is estimated from the per-trace median apex
+    deviations across peaks with valid FWHM apex measurements. The per-peak
+    apex scales are then recomputed from the residual deviations after
+    removing that shared trace shift. Peaks without enough residual data fall
+    back to their legacy apex spread.
+    """
+    if not priors:
+        return [], float(trace_shift_scale_floor)
+
+    fwhm_apex = np.asarray(diagnostics.fwhm_apex_trace, dtype=float)
+    fwhm_valid = np.asarray(diagnostics.fwhm_valid_trace, dtype=bool)
+    if fwhm_apex.shape[1] != len(priors):
+        raise ValueError(
+            "refine_apex_priors_with_trace_shift requires one diagnostics column "
+            "per peak prior."
+        )
+
+    apex_loc = np.asarray([p.apex_loc for p in priors], dtype=float)
+    legacy_apex_scale = np.asarray([p.apex_scale for p in priors], dtype=float)
+    delta = np.where(fwhm_valid, fwhm_apex - apex_loc[None, :], np.nan)
+
+    shift_hat = np.full(delta.shape[0], np.nan, dtype=float)
+    for trace_idx in range(delta.shape[0]):
+        delta_trace = delta[trace_idx]
+        finite_delta = delta_trace[np.isfinite(delta_trace)]
+        if finite_delta.size >= 2:
+            shift_hat[trace_idx] = float(np.median(finite_delta))
+
+    trace_shift_scale = _robust_mad_scale(
+        shift_hat,
+        scale_floor=trace_shift_scale_floor,
+    )
+
+    apex_scale_refined = legacy_apex_scale.copy()
+    for peak_idx in range(delta.shape[1]):
+        valid_residual = np.isfinite(delta[:, peak_idx]) & np.isfinite(shift_hat)
+        residual = delta[valid_residual, peak_idx] - shift_hat[valid_residual]
+        if residual.size >= 2:
+            apex_scale_refined[peak_idx] = _robust_mad_scale(
+                residual,
+                scale_floor=apex_scale_floor,
+            )
+        else:
+            apex_scale_refined[peak_idx] = max(
+                float(legacy_apex_scale[peak_idx]),
+                float(apex_scale_floor),
+            )
+
+    refined_priors = [
+        dataclasses.replace(prior, apex_scale=float(apex_scale_refined[idx]))
+        for idx, prior in enumerate(priors)
+    ]
+    return refined_priors, float(trace_shift_scale)
 
 
 def geometric_priors_to_arrays(
@@ -963,8 +1047,8 @@ def geometric_priors_to_arrays(
     -------
     dict with keys:
 
-    - ``apex_anchor_loc``    [n_peak]          — apex-weighted centroid.
-    - ``apex_anchor_scale``  [n_peak]          — centroid spread across traces.
+    - ``apex_loc``           [n_peak]          — apex-weighted centroid.
+    - ``apex_scale``         [n_peak]          — local apex spread after removing shared trace drift.
     - ``sigma_loc``          [n_peak]          — FWHM-derived sigma prior centres.
     - ``sigma_scale``        [n_peak]          — FWHM-derived sigma prior scales.
     - ``alpha_loc``          [n_peak]          — FWHM-derived alpha prior centres.
@@ -976,8 +1060,8 @@ def geometric_priors_to_arrays(
     - ``artefact_area_loc_shared``    [n_artefact]      — shared artefact area prior centres.
     """
     return {
-        "apex_anchor_loc": np.array([p.mu_loc for p in priors], dtype=np.float32),
-        "apex_anchor_scale": np.array([p.mu_scale for p in priors], dtype=np.float32),
+        "apex_loc": np.array([p.apex_loc for p in priors], dtype=np.float32),
+        "apex_scale": np.array([p.apex_scale for p in priors], dtype=np.float32),
         "sigma_loc": np.array([p.sigma_loc for p in priors], dtype=np.float32),
         "sigma_scale": np.array([p.sigma_scale for p in priors], dtype=np.float32),
         "alpha_loc": np.array([p.alpha_loc for p in priors], dtype=np.float32),
@@ -1015,7 +1099,7 @@ def summarise_priors(priors: list[GeometricPeakPriors]) -> str:
         Multi-line table suitable for logging or ``print()``.
     """
     lines = [
-        f"{'Peak':>4}  {'mode':>17}  {'window':>18}  {'mu_loc':>8}  {'mu_scale':>8}  "
+        f"{'Peak':>4}  {'mode':>17}  {'window':>18}  {'apex_loc':>8}  {'apex_scale':>10}  "
         f"{'σ_loc':>7}  {'σ_scale':>8}  "
         f"{'α_loc':>7}  {'α_scale':>8}  {'art_sh':>10}  {'ncomp':>5}  {'nvalid':>6}",
         "-" * 128,
@@ -1030,7 +1114,7 @@ def summarise_priors(priors: list[GeometricPeakPriors]) -> str:
             f"{i:>4}  "
             f"{p.mode:>17}  "
             f"[{p.window_lo:.3f},{p.window_hi:.3f}]  "
-            f"{p.mu_loc:>8.4f}  {p.mu_scale:>8.5f}  "
+            f"{p.apex_loc:>8.4f}  {p.apex_scale:>10.5f}  "
             f"{p.sigma_loc:>7.5f}  {p.sigma_scale:>8.5f}  "
             f"{p.alpha_loc:>7.3f}  {p.alpha_scale:>8.4f}  "
             f"{sh_area_str:>10}  "
@@ -1045,5 +1129,6 @@ __all__ = [
     "build_geometric_priors",
     "compute_fwhm_shape_diagnostics",
     "geometric_priors_to_arrays",
+    "refine_apex_priors_with_trace_shift",
     "summarise_priors",
 ]

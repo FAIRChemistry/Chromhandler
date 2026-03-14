@@ -1,80 +1,54 @@
-"""Data classes for chromatography fitting."""
+"""Fitting-internal helpers and data types.
+
+:class:`PeakAnnotation` and :class:`BaselineAnnotation` have been consolidated
+into :mod:`chromhandler.annotations` and are re-exported from here for
+backwards compatibility within the fitting subpackage.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import jax.numpy as jnp
 
+from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+
+# ---------------------------------------------------------------------------
+# Mode constants and helpers
+# ---------------------------------------------------------------------------
+
 PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
-PEAK_MODE_TO_CODE: dict[PeakMode, int] = {
+PEAK_MODE_TO_CODE: dict[str, int] = {
     "single": 0,
     "artefact_doublet": 1,
     "free_doublet": 2,
 }
 
 
-def peak_component_count(mode: PeakMode) -> int:
+def peak_component_count(mode: str) -> int:
     """Return the number of mixture components implied by a peak mode."""
     return 1 if mode == "single" else 2
 
 
-def peak_is_doublet_mode(mode: PeakMode) -> bool:
+def peak_is_doublet_mode(mode: str) -> bool:
     """Return True for all two-component peak modes."""
     return peak_component_count(mode) == 2
 
 
-def peak_is_artefact_mode(mode: PeakMode) -> bool:
+def peak_is_artefact_mode(mode: str) -> bool:
     """Return True when the peak uses the artefact-doublet branch."""
     return mode == "artefact_doublet"
 
 
-def peak_is_free_mode(mode: PeakMode) -> bool:
+def peak_is_free_mode(mode: str) -> bool:
     """Return True when the peak uses the free-doublet branch."""
     return mode == "free_doublet"
 
 
-@dataclass(frozen=True)
-class PeakAnnotation:
-    """Per-spectrum peak annotation defining one logical fitted peak window.
-
-    Attributes:
-        name: Logical peak name.
-        low: Broad lower bound used for initialization and diagnostics.
-        high: Broad upper bound used for initialization and diagnostics.
-        mode: Peak fitting mode for this window.
-        shoulder: Optional shoulder side used only for artefact doublets.
-    """
-
-    name: str
-    low: float
-    high: float
-    mode: PeakMode
-    shoulder: Literal["left", "right"] | None = None
-
-    def __post_init__(self) -> None:
-        if float(self.high) <= float(self.low):
-            raise ValueError(
-                f"Invalid annotation bounds for `{self.name}`: low={self.low}, high={self.high}"
-            )
-        if self.mode not in ("single", "artefact_doublet", "free_doublet"):
-            raise ValueError(
-                "mode must be one of 'single', 'artefact_doublet', or "
-                f"'free_doublet', got {self.mode!r}."
-            )
-        if self.shoulder not in (None, "left", "right"):
-            raise ValueError(
-                "shoulder must be one of None, 'left', or 'right', "
-                f"got {self.shoulder!r}."
-            )
-        if self.mode == "artefact_doublet" and self.shoulder is None:
-            raise ValueError(
-                f"Peak '{self.name}': artefact_doublet mode requires "
-                "'shoulder' to be 'left' or 'right'."
-            )
-        if self.mode in ("single", "free_doublet") and self.shoulder is not None:
-            raise ValueError(
-                f"Peak '{self.name}': mode '{self.mode}' requires shoulder=None."
-            )
+# ---------------------------------------------------------------------------
+# Supporting dataclasses
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -93,19 +67,6 @@ class PeakPriorHints:
     sep_est: float = 0.0  # data-driven component separation estimate for doublets
 
 
-@dataclass(frozen=True)
-class BaselineAnnotation:
-    """Baseline annotation for a chromatogram.
-
-    Attributes:
-        low: Lower bound of the baseline region.
-        high: Upper bound of the baseline region.
-    """
-
-    low: float
-    high: float
-
-
 @dataclass
 class ChromatogramRecord:
     """One chromatogram with optional annotations.
@@ -115,7 +76,8 @@ class ChromatogramRecord:
         chromatogram_id: Unique chromatogram identifier.
         time: 1D retention-time axis.
         signal: 1D signal vector.
-        peaks: Per-chromatogram peaks.
+        peaks: Per-chromatogram peak annotations.
+        baselines: Per-chromatogram baseline annotations.
     """
 
     sample_id: str
@@ -134,73 +96,56 @@ class ChromatogramRecord:
 
     def add_peak(
         self,
-        name: str,
-        low: float,
-        high: float,
+        molecule_id: str,
+        rt_min: float,
+        rt_max: float,
         mode: PeakMode,
-        shoulder: Literal["left", "right"] | None = None,
+        artefact_side: Literal["left", "right"] | None = None,
     ) -> None:
-        """Add a peak annotation to the chromatogram.
-
-        Args:
-            name: Name of the peak.
-            low: Lower bound of the peak window.
-            high: Upper bound of the peak window.
-            mode: Peak fitting mode for the annotated window.
-            shoulder: Optional expected shoulder side for artefact doublets.
-
-        Raises:
-            ValueError: If bounds fall outside the time range or low >= high.
-        """
-        if low < min(self.time) or high > max(self.time):
+        """Add a peak annotation to the chromatogram (replace by molecule_id if exists)."""
+        if rt_min < min(self.time) or rt_max > max(self.time):
             raise ValueError(
-                "low and high must be within the time range, got "
-                f"low={low}, high={high}, time range={min(self.time)} to {max(self.time)}"
+                "rt_min and rt_max must be within the time range, got "
+                f"rt_min={rt_min}, rt_max={rt_max}, "
+                f"time range={min(self.time)} to {max(self.time)}"
             )
         peak = PeakAnnotation(
-            name=name,
-            low=low,
-            high=high,
+            molecule_id=molecule_id,
+            rt_min=rt_min,
+            rt_max=rt_max,
             mode=mode,
-            shoulder=shoulder,
+            artefact_side=artefact_side,
         )
         for i, p in enumerate(self.peaks):
-            if p.name == name:
+            if p.molecule_id == molecule_id:
                 self.peaks[i] = peak
                 return
         self.peaks.append(peak)
 
-    def add_baseline(self, low: float, high: float) -> None:
-        """Add a baseline to the chromatogram.
-
-        Args:
-            low: Lower bound of the baseline.
-            high: Upper bound of the baseline.
-
-        Raises:
-            ValueError: If low and high are not within the time range or low is not less than high.
-            ValueError: If baseline already exists.
-        """
-
-        # check if low and high are within the time range
-        if low < min(self.time) or high > max(self.time):
+    def add_baseline(self, rt_min: float, rt_max: float) -> None:
+        """Add a baseline annotation (no duplicates allowed)."""
+        if rt_min < min(self.time) or rt_max > max(self.time):
             raise ValueError(
-                "low and high must be within the time range, got "
-                f"low={low}, high={high}, time range={min(self.time)} to {max(self.time)}"
+                "rt_min and rt_max must be within the time range, got "
+                f"rt_min={rt_min}, rt_max={rt_max}, "
+                f"time range={min(self.time)} to {max(self.time)}"
             )
-
-        # check if low is less than high
-        if low >= high:
-            raise ValueError(f"low must be less than high, got low={low}, high={high}")
-
-        baseline = BaselineAnnotation(low=low, high=high)
-
-        # check if baseline section exists
-        for i, b in enumerate(self.baselines):
-            if b.low == low and b.high == high:
-                raise ValueError(f"baseline already exists, got low={low}, high={high}")
-
+        if rt_min >= rt_max:
+            raise ValueError(
+                f"rt_min must be less than rt_max, got rt_min={rt_min}, rt_max={rt_max}"
+            )
+        baseline = BaselineAnnotation(rt_min=rt_min, rt_max=rt_max)
+        for b in self.baselines:
+            if b.rt_min == rt_min and b.rt_max == rt_max:
+                raise ValueError(
+                    f"baseline already exists, got rt_min={rt_min}, rt_max={rt_max}"
+                )
         self.baselines.append(baseline)
+
+
+# ---------------------------------------------------------------------------
+# Array helpers
+# ---------------------------------------------------------------------------
 
 
 def get_chromatogram_tensor(chromatograms: list[ChromatogramRecord]) -> jnp.ndarray:
@@ -213,86 +158,41 @@ def get_chromatogram_tensor(chromatograms: list[ChromatogramRecord]) -> jnp.ndar
 def stack_and_pad_signal(
     x_lists: list[list[float]], y_lists: list[list[float]]
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Stack and pad data lists into a single tensor.
-    Checks for longest list within each list and pads the shorter lists with zeros to the length of the longest list.
-    Returns a tuple of the padded tensors.
-    """
-
-    if not len(x_lists) == len(y_lists):
+    """Stack and pad data lists into a single tensor (NaN-padded to equal length)."""
+    if len(x_lists) != len(y_lists):
         raise ValueError("x_lists and y_lists must have the same length")
 
-    max_x_length = max(len(x) for x in x_lists)
-    max_y_length = max(len(y) for y in y_lists)
-    max_length = max(max_x_length, max_y_length)
-    padded_x_lists = [x + [float("nan")] * (max_length - len(x)) for x in x_lists]
-    padded_y_lists = [y + [float("nan")] * (max_length - len(y)) for y in y_lists]
+    max_length = max(
+        max(len(x) for x in x_lists),
+        max(len(y) for y in y_lists),
+    )
+    padded_x = [x + [float("nan")] * (max_length - len(x)) for x in x_lists]
+    padded_y = [y + [float("nan")] * (max_length - len(y)) for y in y_lists]
 
-    x_arrays = jnp.array(padded_x_lists)
-    y_arrays = jnp.array(padded_y_lists)
-    return x_arrays, y_arrays
+    return jnp.array(padded_x), jnp.array(padded_y)
 
 
 def region_to_mask(low: float, high: float, time: jnp.ndarray) -> jnp.ndarray:
-    """Mask True for all time points in [low, high].
-
-    Args:
-        low: Lower time bound (inclusive).
-        high: Upper time bound (inclusive).
-        time: 2D array of time values (e.g. from stack_and_pad_signal), shape
-            (n_chromatograms, n_timepoints). Padded positions may be NaN.
-
-    Returns:
-        Boolean array same shape as time: True where low <= t <= high and t is
-        not NaN.
-    """
+    """Mask True for all time points in [low, high]."""
     return (time >= low) & (time <= high)
 
 
 def baseline_to_mask(
     baselines: list[BaselineAnnotation], time: jnp.ndarray
 ) -> jnp.ndarray:
-    """Boolean mask True for time points in any baseline region [low, high].
-
-    Args:
-        baselines: List of baseline annotations.
-        time: 2D array of time values (e.g. from stack_and_pad_signal), shape
-            (n_chromatograms, n_timepoints). Padded positions may be NaN.
-
-    Returns:
-        Boolean array same shape as time: True where time falls in any baseline.
-    """
+    """Boolean mask True for time points in any baseline region."""
     if not baselines:
         return jnp.zeros(time.shape, dtype=bool)
-    masks = jnp.stack([region_to_mask(b.low, b.high, time) for b in baselines])
+    masks = jnp.stack([region_to_mask(b.rt_min, b.rt_max, time) for b in baselines])
     return jnp.any(masks, axis=0)
 
 
 def peaks_to_mask(peaks: list[PeakAnnotation], time: jnp.ndarray) -> jnp.ndarray:
-    """Boolean mask True for time points in any peak region [low, high].
+    """Boolean mask True for time points in any peak region.
 
-    Returns:
-        Boolean array shape (n_peaks, n_chromatograms, n_timepoints). mask[i]
-        is True only for time points in [peaks[i].low, peaks[i].high].
+    Returns shape ``(n_peaks, n_chromatograms, n_timepoints)``.
     """
-
-    peak_centers = jnp.array([(p.low + p.high) / 2 for p in peaks])
-    # sort peaks by center
+    peak_centers = jnp.array([(p.rt_min + p.rt_max) / 2 for p in peaks])
     sorted_indices = jnp.argsort(peak_centers)
     sorted_peaks = [peaks[i] for i in sorted_indices]
-
-    return jnp.stack([region_to_mask(p.low, p.high, time) for p in sorted_peaks])
-
-
-if __name__ == "__main__":
-    from rich import print
-
-    baselines = [BaselineAnnotation(low=1, high=2), BaselineAnnotation(low=4, high=5)]
-    time = jnp.array([jnp.arange(1, 10), jnp.arange(1, 10)])
-
-    peaks = [
-        PeakAnnotation(name="peak1", low=0, high=4, mode="single"),
-        PeakAnnotation(name="peak3", low=3, high=10, mode="single"),
-        PeakAnnotation(name="peak2", low=1, high=2, mode="single"),
-    ]
-    mask = peaks_to_mask(peaks, time)
-    print(mask)
+    return jnp.stack([region_to_mask(p.rt_min, p.rt_max, time) for p in sorted_peaks])

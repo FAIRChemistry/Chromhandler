@@ -9,14 +9,149 @@ Provides reusable plotting methods for:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
 
-from .data import PeakAnnotation, peak_is_artefact_mode, peak_is_doublet_mode
+from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+
+# ---------------------------------------------------------------------------
+# Full-trace overview
+# ---------------------------------------------------------------------------
+
+
+def plot_trace_rows(
+    time: np.ndarray,
+    signal: np.ndarray,
+    peaks: list[PeakAnnotation],
+    *,
+    figsize: Optional[tuple[float, float]] = None,
+    t_min: float | None = None,
+    t_max: float | None = None,
+    trace_color: str = "black",
+    trace_linewidth: float = 1.0,
+    peak_alpha: float = 0.14,
+    show_peak_legend: bool = True,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Plot all chromatograms as stacked full-trace rows.
+
+    Each trace is drawn on its own axes across the selected time range. Peak
+    windows are shown as semi-transparent vertical spans with distinct
+    ``tab10`` colors.
+    """
+    time_arr = np.asarray(time, dtype=float)
+    signal_arr = np.asarray(signal, dtype=float)
+
+    if time_arr.shape != signal_arr.shape:
+        raise ValueError(
+            f"time and signal must share shape, got {time_arr.shape} vs {signal_arr.shape}."
+        )
+    if time_arr.ndim != 2:
+        raise ValueError("time and signal must be 2-D [n_trace, n_time].")
+    if t_min is not None and t_max is not None and float(t_min) >= float(t_max):
+        raise ValueError(
+            f"plot_trace_rows requires t_min < t_max, got {t_min} and {t_max}."
+        )
+
+    n_trace, _ = time_arr.shape
+    if figsize is None:
+        figsize = (12, max(2.2 * n_trace, 3.0))
+
+    fig, axes = plt.subplots(
+        n_trace,
+        1,
+        figsize=figsize,
+        sharex=True,
+        squeeze=False,
+    )
+    axes_col = axes[:, 0]
+
+    peak_colors = [plt.get_cmap("tab10")(i % 10) for i in range(len(peaks))]
+
+    for t, ax in enumerate(axes_col):
+        x_trace = time_arr[t]
+        y_trace = signal_arr[t]
+        finite = np.isfinite(x_trace) & np.isfinite(y_trace)
+        if t_min is not None:
+            finite &= x_trace >= float(t_min)
+        if t_max is not None:
+            finite &= x_trace <= float(t_max)
+
+        for peak, color in zip(peaks, peak_colors, strict=False):
+            span_lo = (
+                peak.rt_min if t_min is None else max(float(peak.rt_min), float(t_min))
+            )
+            span_hi = (
+                peak.rt_max if t_max is None else min(float(peak.rt_max), float(t_max))
+            )
+            if span_lo >= span_hi:
+                continue
+            ax.axvspan(span_lo, span_hi, color=color, alpha=peak_alpha, linewidth=0)
+            ax.axvline(
+                peak.rt_min, color=color, alpha=0.55, linewidth=0.9, linestyle="--"
+            )
+            ax.axvline(
+                peak.rt_max,
+                color=color,
+                alpha=0.55,
+                linewidth=0.9,
+                linestyle="--",
+            )
+
+        if np.any(finite):
+            ax.plot(
+                x_trace[finite],
+                y_trace[finite],
+                color=trace_color,
+                linewidth=trace_linewidth,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No finite data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=9,
+                color="red",
+            )
+
+        ax.set_ylabel(f"T{t}", fontsize=8)
+        ax.grid(True, alpha=0.25, linestyle="--")
+        ax.tick_params(labelsize=8)
+        if t_min is not None or t_max is not None:
+            ax.set_xlim(
+                float(t_min) if t_min is not None else None,
+                float(t_max) if t_max is not None else None,
+            )
+
+    axes_col[-1].set_xlabel("Time", fontsize=9)
+
+    if show_peak_legend and peaks:
+        legend_handles = [
+            Patch(
+                facecolor=color,
+                edgecolor=color,
+                alpha=peak_alpha + 0.18,
+                label=peak.molecule_id,
+            )
+            for peak, color in zip(peaks, peak_colors, strict=False)
+        ]
+        axes_col[0].legend(
+            handles=legend_handles, fontsize=8, loc="best", ncol=min(4, len(peaks))
+        )
+
+    fig.suptitle(
+        f"Chromatogram Overview: {n_trace} traces", fontsize=12, fontweight="bold"
+    )
+    fig.tight_layout()
+    return fig, axes_col
+
 
 # ---------------------------------------------------------------------------
 # Prior shading helper
@@ -102,10 +237,10 @@ def add_peak_window_bounds(
         Line width.
     """
     ax.axvline(
-        peak.low, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
+        peak.rt_min, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
     )
     ax.axvline(
-        peak.high, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
+        peak.rt_max, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
     )
 
 
@@ -182,6 +317,7 @@ def add_sigma_alpha_prior_density(
     y_data: Optional[np.ndarray] = None,
     cmap: str = "viridis",
     n_grid: int = 220,
+    set_limits: bool = True,
 ) -> None:
     """Plot a diagonal 2-D Gaussian prior as filled quartile contour bands."""
     alpha_loc_f = float(alpha_loc)
@@ -251,8 +387,59 @@ def add_sigma_alpha_prior_density(
         alpha=0.8,
     )
 
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
+    if set_limits:
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+
+
+def _check_peak_vector(
+    values: Optional[np.ndarray],
+    name: str,
+    n_peak: int,
+) -> Optional[np.ndarray]:
+    """Validate an optional per-peak vector argument."""
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.shape[0] != n_peak:
+        raise ValueError(f"{name} must have length {n_peak}, got shape {arr.shape}.")
+    return arr
+
+
+def _limits_from_values(
+    values: np.ndarray,
+    *,
+    pad_frac: float,
+    pad_floor: float,
+) -> tuple[float, float] | None:
+    """Return padded limits from a 1-D numeric array, or ``None`` if empty."""
+    values_arr = np.asarray(values, dtype=float).reshape(-1)
+    finite = values_arr[np.isfinite(values_arr)]
+    if finite.size == 0:
+        return None
+
+    lo = float(np.min(finite))
+    hi = float(np.max(finite))
+    span = hi - lo
+    pad = max(pad_frac * span, pad_floor) if span > 1e-12 else pad_floor
+    return lo - pad, hi + pad
+
+
+def _merge_limits(
+    limits: list[tuple[float, float] | None],
+    *,
+    default: tuple[float, float],
+) -> tuple[float, float]:
+    """Merge optional limit pairs into one global visible range."""
+    valid_limits = [limit for limit in limits if limit is not None]
+    if not valid_limits:
+        return default
+
+    lo = min(limit[0] for limit in valid_limits)
+    hi = max(limit[1] for limit in valid_limits)
+    if hi <= lo:
+        lo, hi = default
+    return lo, hi
 
 
 # ---------------------------------------------------------------------------
@@ -347,16 +534,16 @@ def plot_prior_traces(
     baseline_slope: np.ndarray,
     baseline_intercept_scale: np.ndarray,
     baseline_slope_scale: np.ndarray,
-    apex_anchor_loc: Optional[np.ndarray] = None,
-    apex_anchor_scale: Optional[np.ndarray] = None,
-    approx_center_trace: Optional[np.ndarray] = None,
+    apex_loc: Optional[np.ndarray] = None,
+    apex_scale: Optional[np.ndarray] = None,
+    approx_apex_trace: Optional[np.ndarray] = None,
     approx_height_trace: Optional[np.ndarray] = None,
     approx_sigma_trace: Optional[np.ndarray] = None,
     approx_valid_trace: Optional[np.ndarray] = None,
     approx_fallback_trace: Optional[np.ndarray] = None,
     *,
     show_baseline: bool = True,
-    show_apex_anchor_prior: bool = True,
+    show_apex_prior: bool = True,
     show_gaussian_prior_peak: bool = True,
     show_peak_bounds: bool = True,
     figsize: Optional[tuple[float, float]] = None,
@@ -382,14 +569,14 @@ def plot_prior_traces(
         Baseline intercept prior scale, shape [n_trace].
     baseline_slope_scale : np.ndarray
         Baseline slope prior scale, shape [n_trace].
-    apex_anchor_loc : np.ndarray or None
-        Peak anchor prior locations, shape [n_peak]. If provided, drawn as
+    apex_loc : np.ndarray or None
+        Peak apex prior locations, shape [n_peak]. If provided, drawn as
         vertical lines in each corresponding peak window.
-    apex_anchor_scale : np.ndarray or None
-        Peak anchor prior scales, shape [n_peak]. If provided, drawn as
-        vertical shaded bands spanning ``apex_anchor_loc ± apex_anchor_scale``.
-    approx_center_trace : np.ndarray or None
-        Dense Gaussian-approximation centers, shape [n_trace, n_peak].
+    apex_scale : np.ndarray or None
+        Peak apex prior scales, shape [n_peak]. If provided, drawn as
+        vertical shaded bands spanning ``apex_loc ± apex_scale``.
+    approx_apex_trace : np.ndarray or None
+        Dense Gaussian-approximation apex locations, shape [n_trace, n_peak].
     approx_height_trace : np.ndarray or None
         Dense Gaussian-approximation heights, shape [n_trace, n_peak].
     approx_sigma_trace : np.ndarray or None
@@ -402,9 +589,9 @@ def plot_prior_traces(
         shape [n_trace, n_peak].
     show_baseline : bool
         If True, overlay baseline prior with uncertainty band.
-    show_apex_anchor_prior : bool
-        If True and ``apex_anchor_loc`` / ``apex_anchor_scale`` are provided,
-        overlay the anchor prior as a vertical line with a shaded band.
+    show_apex_prior : bool
+        If True and ``apex_loc`` / ``apex_scale`` are provided,
+        overlay the apex prior as a vertical line with a shaded band.
     show_gaussian_prior_peak : bool
         If True and all approximation arrays are provided, overlay the
         baseline-plus-Gaussian prior peak approximation.
@@ -447,18 +634,12 @@ def plot_prior_traces(
     b_slope = np.asarray(baseline_slope, dtype=float)
     b_intercept_scale = np.asarray(baseline_intercept_scale, dtype=float)
     b_slope_scale = np.asarray(baseline_slope_scale, dtype=float)
-    apex_loc = (
-        None if apex_anchor_loc is None else np.asarray(apex_anchor_loc, dtype=float)
-    )
-    apex_scale = (
+    apex_loc_arr = None if apex_loc is None else np.asarray(apex_loc, dtype=float)
+    apex_scale_arr = None if apex_scale is None else np.asarray(apex_scale, dtype=float)
+    approx_apex_arr = (
         None
-        if apex_anchor_scale is None
-        else np.asarray(apex_anchor_scale, dtype=float)
-    )
-    approx_center_arr = (
-        None
-        if approx_center_trace is None
-        else np.asarray(approx_center_trace, dtype=float)
+        if approx_apex_trace is None
+        else np.asarray(approx_apex_trace, dtype=float)
     )
     approx_height_arr = (
         None
@@ -481,20 +662,20 @@ def plot_prior_traces(
         else np.asarray(approx_fallback_trace, dtype=bool)
     )
 
-    if (apex_loc is None) != (apex_scale is None):
+    if (apex_loc_arr is None) != (apex_scale_arr is None):
         raise ValueError(
-            "apex_anchor_loc and apex_anchor_scale must either both be provided or both be omitted."
+            "apex_loc and apex_scale must either both be provided or both be omitted."
         )
-    if apex_loc is not None and apex_loc.shape[0] != n_peak:
+    if apex_loc_arr is not None and apex_loc_arr.shape[0] != n_peak:
         raise ValueError(
-            f"apex_anchor_loc must have length {n_peak}, got shape {apex_loc.shape}."
+            f"apex_loc must have length {n_peak}, got shape {apex_loc_arr.shape}."
         )
-    if apex_scale is not None and apex_scale.shape[0] != n_peak:
+    if apex_scale_arr is not None and apex_scale_arr.shape[0] != n_peak:
         raise ValueError(
-            f"apex_anchor_scale must have length {n_peak}, got shape {apex_scale.shape}."
+            f"apex_scale must have length {n_peak}, got shape {apex_scale_arr.shape}."
         )
     gaussian_inputs = [
-        approx_center_arr,
+        approx_apex_arr,
         approx_height_arr,
         approx_sigma_arr,
         approx_valid_arr,
@@ -503,13 +684,13 @@ def plot_prior_traces(
     has_gaussian_inputs = all(arr is not None for arr in gaussian_inputs)
     if any(arr is not None for arr in gaussian_inputs) and not has_gaussian_inputs:
         raise ValueError(
-            "approx_center_trace, approx_height_trace, approx_sigma_trace, "
+            "approx_apex_trace, approx_height_trace, approx_sigma_trace, "
             "approx_valid_trace, and approx_fallback_trace must all be provided together."
         )
     if has_gaussian_inputs:
         expected_shape = (n_trace, n_peak)
         for name, arr in (
-            ("approx_center_trace", approx_center_arr),
+            ("approx_apex_trace", approx_apex_arr),
             ("approx_height_trace", approx_height_arr),
             ("approx_sigma_trace", approx_sigma_arr),
             ("approx_valid_trace", approx_valid_arr),
@@ -530,7 +711,7 @@ def plot_prior_traces(
             y_trace = signal_arr[t, :]
 
             # Extract peak window
-            mask = (x_trace >= peak.low) & (x_trace <= peak.high)
+            mask = (x_trace >= peak.rt_min) & (x_trace <= peak.rt_max)
             x_window = x_trace[mask]
             y_window = y_trace[mask]
 
@@ -546,7 +727,7 @@ def plot_prior_traces(
                     fontsize=10,
                     color="red",
                 )
-                ax.set_title(f"{peak.name} (trace {t})", fontsize=9)
+                ax.set_title(f"{peak.molecule_id} (trace {t})", fontsize=9)
                 continue
 
             # Plot raw signal as gray scatter
@@ -572,7 +753,7 @@ def plot_prior_traces(
                 )
 
             if show_gaussian_prior_peak and has_gaussian_inputs:
-                assert approx_center_arr is not None
+                assert approx_apex_arr is not None
                 assert approx_height_arr is not None
                 assert approx_sigma_arr is not None
                 assert approx_valid_arr is not None
@@ -580,7 +761,7 @@ def plot_prior_traces(
                 if bool(approx_valid_arr[t, p]):
                     peak_curve = _gaussian_peak_curve_from_sigma(
                         x_window,
-                        approx_center_arr[t, p],
+                        approx_apex_arr[t, p],
                         approx_height_arr[t, p],
                         approx_sigma_arr[t, p],
                     )
@@ -607,15 +788,15 @@ def plot_prior_traces(
                         )
 
             if (
-                show_apex_anchor_prior
-                and apex_loc is not None
-                and apex_scale is not None
+                show_apex_prior
+                and apex_loc_arr is not None
+                and apex_scale_arr is not None
             ):
                 add_vertical_prior_band(
                     ax,
-                    apex_loc[p],
-                    apex_scale[p],
-                    label="anchor prior" if (t == 0 and p == 0) else "",
+                    apex_loc_arr[p],
+                    apex_scale_arr[p],
+                    label="apex prior" if (t == 0 and p == 0) else "",
                     color="tab:orange",
                     alpha=0.18,
                     linewidth=1.5,
@@ -627,7 +808,7 @@ def plot_prior_traces(
                 add_peak_window_bounds(ax, peak, color="red", alpha=0.4, linewidth=1.0)
 
             # Labels and formatting
-            ax.set_title(f"{peak.name} (trace {t})", fontsize=9)
+            ax.set_title(f"{peak.molecule_id} (trace {t})", fontsize=9)
             if p == 0:
                 ax.set_ylabel("Signal", fontsize=8)
             if t == n_trace - 1:
@@ -668,8 +849,19 @@ def plot_sigma_alpha_scatter(
     alpha_scale: Optional[np.ndarray] = None,
     figsize: Optional[tuple[float, float]] = None,
     cmap: str = "viridis",
+    colorize_by: Literal[None, "sample_id", "subset"] = None,
+    sample_ids: Optional[list[str]] = None,
+    subset_ids: Optional[list[str]] = None,
 ) -> tuple[plt.Figure, np.ndarray]:
-    """Plot per-trace FWHM-derived ``sigma`` vs ``alpha`` with 2-D prior density."""
+    """Plot per-trace FWHM-derived ``sigma`` vs ``alpha`` with 2-D prior density.
+
+    When *colorize_by* is ``"sample_id"``, scatter points are colored by
+    *sample_ids* (length n_trace) using the turbo colormap.  When
+    ``"subset"``, points are colored by *subset_ids* (length n_trace).
+    When ``None``, points use transparent fill with black outline.
+
+    A shared legend is drawn beneath the figure when *colorize_by* is set.
+    """
     sigma_arr = np.asarray(sigma_trace, dtype=float)
     alpha_arr = np.asarray(alpha_trace, dtype=float)
     valid_arr = np.asarray(valid_trace, dtype=bool)
@@ -685,6 +877,30 @@ def plot_sigma_alpha_scatter(
             f"peaks length must match n_peak={n_peak}, got {len(peaks)} peaks."
         )
 
+    if colorize_by == "sample_id":
+        if sample_ids is None or len(sample_ids) != n_trace:
+            raise ValueError(
+                f"sample_ids must have length n_trace={n_trace} when colorize_by='sample_id'."
+            )
+        labels_for_color = sample_ids
+    elif colorize_by == "subset":
+        if subset_ids is None or len(subset_ids) != n_trace:
+            raise ValueError(
+                f"subset_ids must have length n_trace={n_trace} when colorize_by='subset'."
+            )
+        labels_for_color = subset_ids
+    else:
+        labels_for_color = None
+
+    # Map unique label -> turbo color when coloring
+    label_to_color: Optional[dict[str, tuple[float, float, float, float]]] = None
+    if labels_for_color is not None:
+        unique_labels = list(dict.fromkeys(str(lab) for lab in labels_for_color))
+        n_unique = len(unique_labels)
+        turbo = plt.get_cmap("turbo")
+        t_vals = np.linspace(0.0, 1.0, n_unique) if n_unique > 1 else np.array([0.5])
+        label_to_color = {lab: turbo(t_vals[i]) for i, lab in enumerate(unique_labels)}
+
     apex_height_arr = None
     if apex_height_trace is not None:
         apex_height_arr = np.asarray(apex_height_trace, dtype=float)
@@ -693,27 +909,60 @@ def plot_sigma_alpha_scatter(
                 "apex_height_trace must share shape with sigma_trace if provided."
             )
 
-    def _check_peak_vector(
-        values: Optional[np.ndarray], name: str
-    ) -> Optional[np.ndarray]:
-        if values is None:
-            return None
-        arr = np.asarray(values, dtype=float).reshape(-1)
-        if arr.shape[0] != n_peak:
-            raise ValueError(
-                f"{name} must have length {n_peak}, got shape {arr.shape}."
-            )
-        return arr
-
-    sigma_loc_arr = _check_peak_vector(sigma_loc, "sigma_loc")
-    sigma_scale_arr = _check_peak_vector(sigma_scale, "sigma_scale")
-    alpha_loc_arr = _check_peak_vector(alpha_loc, "alpha_loc")
-    alpha_scale_arr = _check_peak_vector(alpha_scale, "alpha_scale")
+    sigma_loc_arr = _check_peak_vector(sigma_loc, "sigma_loc", n_peak)
+    sigma_scale_arr = _check_peak_vector(sigma_scale, "sigma_scale", n_peak)
+    alpha_loc_arr = _check_peak_vector(alpha_loc, "alpha_loc", n_peak)
+    alpha_scale_arr = _check_peak_vector(alpha_scale, "alpha_scale", n_peak)
 
     if (sigma_loc_arr is None) != (sigma_scale_arr is None):
         raise ValueError("sigma_loc and sigma_scale must both be provided or omitted.")
     if (alpha_loc_arr is None) != (alpha_scale_arr is None):
         raise ValueError("alpha_loc and alpha_scale must both be provided or omitted.")
+
+    panel_valid_masks: list[np.ndarray] = []
+    panel_alpha: list[np.ndarray] = []
+    panel_sigma: list[np.ndarray] = []
+    x_lim_per_panel: list[tuple[float, float]] = []
+    y_lim_per_panel: list[tuple[float, float]] = []
+
+    for peak_idx in range(n_peak):
+        valid_peak = (
+            valid_arr[:, peak_idx]
+            & np.isfinite(sigma_arr[:, peak_idx])
+            & np.isfinite(alpha_arr[:, peak_idx])
+        )
+        alpha_peak = alpha_arr[valid_peak, peak_idx]
+        sigma_peak = sigma_arr[valid_peak, peak_idx]
+        panel_valid_masks.append(valid_peak)
+        panel_alpha.append(alpha_peak)
+        panel_sigma.append(sigma_peak)
+
+        x_cands: list[tuple[float, float] | None] = [
+            _limits_from_values(alpha_peak, pad_frac=0.20, pad_floor=1e-3)
+        ]
+        y_cands: list[tuple[float, float] | None] = [
+            _limits_from_values(sigma_peak, pad_frac=0.20, pad_floor=1e-4)
+        ]
+
+        if (
+            alpha_loc_arr is not None
+            and alpha_scale_arr is not None
+            and sigma_loc_arr is not None
+            and sigma_scale_arr is not None
+            and np.isfinite(alpha_loc_arr[peak_idx])
+            and np.isfinite(alpha_scale_arr[peak_idx])
+            and np.isfinite(sigma_loc_arr[peak_idx])
+            and np.isfinite(sigma_scale_arr[peak_idx])
+        ):
+            prior_x_min = float(alpha_loc_arr[peak_idx] - 4 * alpha_scale_arr[peak_idx])
+            prior_x_max = float(alpha_loc_arr[peak_idx] + 4 * alpha_scale_arr[peak_idx])
+            prior_y_min = float(sigma_loc_arr[peak_idx] - 4 * sigma_scale_arr[peak_idx])
+            prior_y_max = float(sigma_loc_arr[peak_idx] + 4 * sigma_scale_arr[peak_idx])
+            x_cands.append((prior_x_min, prior_x_max))
+            y_cands.append((prior_y_min, prior_y_max))
+
+        x_lim_per_panel.append(_merge_limits(x_cands, default=(-1.0, 1.0)))
+        y_lim_per_panel.append(_merge_limits(y_cands, default=(0.0, 1.0)))
 
     if figsize is None:
         figsize = (4.3 * n_peak, 4.2)
@@ -722,21 +971,20 @@ def plot_sigma_alpha_scatter(
         1,
         n_peak,
         figsize=figsize,
-        sharex=True,
-        sharey=True,
+        sharex=False,
+        sharey=False,
         squeeze=False,
     )
+    fig.patch.set_facecolor("none")
     axes = axes.reshape(1, n_peak)
+    for ax in axes.flat:
+        ax.patch.set_facecolor("none")
 
     for peak_idx, peak in enumerate(peaks):
         ax = axes[0, peak_idx]
-        valid_peak = (
-            valid_arr[:, peak_idx]
-            & np.isfinite(sigma_arr[:, peak_idx])
-            & np.isfinite(alpha_arr[:, peak_idx])
-        )
-        alpha_peak = alpha_arr[valid_peak, peak_idx]
-        sigma_peak = sigma_arr[valid_peak, peak_idx]
+        valid_peak = panel_valid_masks[peak_idx]
+        alpha_peak = panel_alpha[peak_idx]
+        sigma_peak = panel_sigma[peak_idx]
 
         if (
             alpha_loc_arr is not None
@@ -757,22 +1005,34 @@ def plot_sigma_alpha_scatter(
                 x_data=alpha_peak,
                 y_data=sigma_peak,
                 cmap=cmap,
+                set_limits=False,
             )
 
         if np.any(valid_peak):
             alpha_scatter = 0.2
+            trace_indices = np.where(valid_peak)[0]
+            if label_to_color is not None and labels_for_color is not None:
+                edge_colors = [
+                    label_to_color[str(labels_for_color[t])] for t in trace_indices
+                ]
+                face_colors = [
+                    (*edge_colors[i][:3], 0.35) for i in range(len(edge_colors))
+                ]
+            else:
+                edge_colors = (0, 0, 0, 1)
+                face_colors = (1, 1, 1, alpha_scatter)
+
             if apex_height_arr is not None:
                 heights_peak = apex_height_arr[valid_peak, peak_idx]
                 sizes_peak = _marker_sizes_from_values(heights_peak)
-                # Draw transparent fill (scatter) with opaque edge line
                 ax.scatter(
                     alpha_peak,
                     sigma_peak,
                     s=sizes_peak,
-                    facecolors=(1, 1, 1, alpha_scatter),  # RGBA tuple for fill
-                    edgecolors=(0, 0, 0, 1),  # RGBA tuple for edge (black, opaque)
+                    facecolors=face_colors,
+                    edgecolors=edge_colors,
                     linewidths=0.9,
-                    alpha=None,  # Disable alpha param so RGBA is used
+                    alpha=None,
                     zorder=4,
                 )
             else:
@@ -780,8 +1040,8 @@ def plot_sigma_alpha_scatter(
                     alpha_peak,
                     sigma_peak,
                     s=60,
-                    facecolors=(1, 1, 1, alpha_scatter),
-                    edgecolors=(0, 0, 0, 1),
+                    facecolors=face_colors,
+                    edgecolors=edge_colors,
                     linewidths=0.9,
                     alpha=None,
                     zorder=4,
@@ -798,19 +1058,29 @@ def plot_sigma_alpha_scatter(
                 color="0.4",
             )
 
-        ax.set_title(peak.name, fontsize=10)
+        ax.set_title(peak.molecule_id, fontsize=10)
         ax.set_xlabel(r"$\alpha$ (–)", fontsize=9)
         if peak_idx == 0:
             ax.set_ylabel(r"$\sigma$ (min)", fontsize=9)
         ax.grid(True, alpha=0.3, linestyle="--")
         ax.tick_params(labelsize=8)
+        ax.set_xlim(*x_lim_per_panel[peak_idx])
+        ax.set_ylim(*y_lim_per_panel[peak_idx])
 
-    # Center x-axis on alpha=0 (sharex=True so one call applies to all)
-    x_lo, x_hi = axes[0, 0].get_xlim()
-    span = max(abs(x_lo), abs(x_hi), 1e-6)
-    axes[0, 0].set_xlim(-span, span)
+    if label_to_color is not None:
+        legend_handles = [
+            Patch(facecolor=c[:3], edgecolor="black", linewidth=0.9, label=lab)
+            for lab, c in label_to_color.items()
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            ncol=min(len(legend_handles), 8),
+            frameon=True,
+            fontsize=8,
+        )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.08, 1, 1] if label_to_color is not None else None)
     return fig, axes
 
 
@@ -851,14 +1121,18 @@ def _compute_skew_normal_component(
     sigma_broad = sigma[:, None]  # [n_total, 1]
     alpha_broad = alpha[:, None]  # [n_total, 1]
 
-    z = (x_broad - xi_broad) / sigma_broad
+    # Compute log PDF (sigma normalization already included)
+    sigma_safe = jnp.maximum(sigma_broad, 1e-6)
+    z = (x_broad - xi_broad) / sigma_safe
     log_pdf = (
-        -0.5 * z**2
+        jnp.log(2.0)
+        - jnp.log(sigma_safe)
+        - 0.5 * z**2
         - 0.5 * jnp.log(2.0 * jnp.pi)
-        + jnp.log(2.0)
         + jnp.log(jax.scipy.special.ndtr(alpha_broad * z))
     )
-    pdf = jnp.exp(log_pdf) / sigma_broad  # [n_total, n_window]
+    # Exponentiate directly (sigma normalization already in log_pdf)
+    pdf = jnp.exp(log_pdf)  # [n_total, n_window]
     component = area[:, None] * pdf  # [n_total, n_window]
     return np.asarray(component)
 
@@ -930,149 +1204,144 @@ def add_hdi_band(
 
 
 # ---------------------------------------------------------------------------
-# Posterior Predictive Plots
+# Posterior Fit Plots
 # ---------------------------------------------------------------------------
 
 
-def plot_posterior_predictive(
+def plot_fit(
     time: np.ndarray,
     signal: np.ndarray,
     peaks: list[PeakAnnotation],
-    posterior: object,
+    curves: "PosteriorCurves | None",
     *,
-    x_posterior: Optional[np.ndarray] = None,
-    y_posterior: Optional[np.ndarray] = None,
+    fitted_rows: Optional[np.ndarray] = None,
+    baselines: Optional[list[BaselineAnnotation]] = None,
+    chromatogram_ids: Optional[list[str]] = None,
+    hdi_prob: float = 0.95,
     figsize: Optional[tuple[float, float]] = None,
 ) -> tuple[plt.Figure, np.ndarray]:
-    """Plot posterior predictive: fitted signal + components vs raw data.
+    """Plot raw data and posterior fit curves.
 
-    Subplots organized as [trace, peak_window]. Each shows:
-    - Raw data (gray scatter, α=0.5)
-    - Individual fitted components for doublet modes (gray lines + 95% HDI)
-    - Baseline (gray dashed + 95% HDI)
-    - Total signal (blue line + blue 95% HDI)
-    - Peak window bounds (red dashed lines)
+    Columns: one per peak window, plus a combined column when ``n_peak > 1``.
+    Each peak-window subplot shows:
+
+    - **Gray scatter** — raw signal within the window.
+    - **Solid gray + band** — baseline median + HDI (fitted rows only).
+    - **Dotted gray + band** — left component median + HDI (fitted rows only).
+    - **Dashed gray + band** — right component median + HDI (fitted rows only).
+    - **Blue + band** — total fitted signal median + HDI (fitted rows only).
+    - **Red dashed** — peak window bounds.
 
     Parameters
     ----------
-    time : np.ndarray
-        Time matrix, shape [n_trace, n_time].
-    signal : np.ndarray
-        Signal matrix, shape [n_trace, n_time] (raw data).
+    time : np.ndarray  [n_display, n_time]
+        Raw time matrix for traces to display.
+    signal : np.ndarray  [n_display, n_time]
+        Raw signal matrix.
     peaks : list[PeakAnnotation]
-        Peak window definitions.
-    posterior : arviz.InferenceData
-        Posterior from ArviZ (result of `fitter.posterior`).
-    x_posterior : np.ndarray or None
-        Masked time axis if windowed likelihood was used. Can be either
-        `[n_time_posterior]` for a shared axis or `[n_trace, n_time_posterior]`
-        for per-trace aligned axes. If None, assumes full likelihood was used.
-    y_posterior : np.ndarray or None
-        Masked signal matrix if windowed likelihood was used, shape [n_trace, n_time_posterior].
-        Only used for display if posterior time differs from input time.
+        Peak window definitions from the fitted subset.
+    curves : PosteriorCurves or None
+        Precomputed posterior curves from
+        :meth:`~BetterFitter.posterior_curves`.  ``None`` → scatter-only.
+    fitted_rows : np.ndarray or None
+        Indices (into the *time/signal* row dimension) of traces that have
+        posterior curves.  ``curves.total_median[i]`` corresponds to
+        ``fitted_rows[i]``.  When ``None`` all rows with ``curves`` are
+        assumed to be fitted.
+    baselines : list or None
+        Baseline annotations used to extend the combined-column display range.
+    chromatogram_ids : list[str] or None
+        Per-trace labels for subplot titles.
+    hdi_prob : float
+        Credible-interval probability; used only for legend labels.
     figsize : tuple or None
-        Figure size. If None, auto-scales based on grid.
+        Figure size; auto-scaled when ``None``.
 
     Returns
     -------
     fig : plt.Figure
-        The figure object.
-    axes : np.ndarray
-        2-D array of axes, shape [n_trace, n_peak].
+    axes : np.ndarray  [n_display, n_col]
     """
+    # Lazy import to avoid circular dependency at module level
+
     time_arr = np.asarray(time, dtype=float)
     signal_arr = np.asarray(signal, dtype=float)
-    x_posterior_arr = (
-        None if x_posterior is None else np.asarray(x_posterior, dtype=float)
-    )
-
-    n_trace, n_time_full = time_arr.shape
+    n_display, _ = time_arr.shape
     n_peak = len(peaks)
+    has_combined = n_peak > 1
+    n_col = n_peak + (1 if has_combined else 0)
 
-    if x_posterior_arr is not None:
-        if x_posterior_arr.ndim not in (1, 2):
-            raise ValueError(
-                f"x_posterior must be 1-D or 2-D, got shape {x_posterior_arr.shape}."
-            )
-        if x_posterior_arr.ndim == 2 and x_posterior_arr.shape[0] != n_trace:
-            raise ValueError(
-                f"x_posterior trace axis must match time shape {time_arr.shape}, "
-                f"got {x_posterior_arr.shape}."
-            )
+    if chromatogram_ids is not None and len(chromatogram_ids) != n_display:
+        raise ValueError(
+            f"chromatogram_ids must have length n_display={n_display}, "
+            f"got {len(chromatogram_ids)}."
+        )
 
-    # Default figsize
+    # Resolve fitted_rows
+    if curves is not None and fitted_rows is None:
+        fitted_rows = np.arange(min(n_display, len(curves.trace_indices)))
+    elif fitted_rows is None:
+        fitted_rows = np.array([], dtype=int)
+
+    # Build map: display_row → index into curves arrays
+    row_to_curve: dict[int, int] = {}
+    if curves is not None:
+        for ci, row in enumerate(fitted_rows):
+            row_to_curve[int(row)] = ci
+
+    # Combined column range
+    rt_lo = float(min(p.rt_min for p in peaks))
+    rt_hi = float(max(p.rt_max for p in peaks))
+    if baselines:
+        rt_lo = min(rt_lo, float(min(b.rt_min for b in baselines)))
+        rt_hi = max(rt_hi, float(max(b.rt_max for b in baselines)))
+
+    hdi_label = f"{int(hdi_prob * 100)}% HDI"
+
+    # ── Figure ──────────────────────────────────────────────────────────────
     if figsize is None:
-        figsize = (4 * n_peak, 3 * n_trace)
-
+        figsize = (4 * n_col, 3 * n_display)
     fig, axes = plt.subplots(
-        n_trace,
-        n_peak,
+        n_display,
+        n_col,
         figsize=figsize,
         sharex=False,
         sharey=False,
         squeeze=False,
     )
+    fig.patch.set_facecolor("none")
+    for ax in axes.flat:
+        ax.patch.set_facecolor("none")
 
-    # Extract posterior samples (reshape to combine chains + draws)
-    mu_y_raw = posterior.posterior[
-        "mu_y"
-    ].values  # [n_chain, n_draw, n_trace, n_time_posterior]
-    baseline_raw = posterior.posterior[
-        "baseline_curve"
-    ].values  # [n_chain, n_draw, n_trace, n_time_posterior]
+    def trace_label(t: int) -> str:
+        return str(chromatogram_ids[t]) if chromatogram_ids else f"trace {t}"
 
-    # Flatten chains and draws: [n_chain, n_draw, ...] → [n_total_samples, ...]
-    n_chain = mu_y_raw.shape[0]
-    n_draw = mu_y_raw.shape[1]
-    # Use actual posterior time dimension (may be different from input if windowed likelihood was used)
-    n_time_posterior = mu_y_raw.shape[3]
-    n_total = n_chain * n_draw
-    mu_y_samples = mu_y_raw.reshape(
-        n_total, n_trace, n_time_posterior
-    )  # [n_total, n_trace, n_time_posterior]
-    baseline_samples = baseline_raw.reshape(
-        n_total, n_trace, n_time_posterior
-    )  # [n_total, n_trace, n_time_posterior]
+    # ── Per-display-trace loop ───────────────────────────────────────────────
+    for t in range(n_display):
+        x_trace = time_arr[t]
+        y_trace = signal_arr[t]
+        ci = row_to_curve.get(t)  # None → no posterior for this row
+        add_legend = t == 0
 
-    # Extract posterior samples for component reconstruction.
-    # Use the model's deterministic component parameters directly instead of
-    # re-deriving them from intermediate latents in the visualizer.
-    component_params: dict[str, np.ndarray] = {}
-    has_doublet_peaks = any(peak_is_doublet_mode(peak.mode) for peak in peaks)
-    if has_doublet_peaks:
-        try:
-            for name in (
-                "xi_l",
-                "xi_r",
-                "sigma_l",
-                "sigma_r",
-                "alpha_l",
-                "alpha_r",
-                "area_l",
-                "area_r",
-            ):
-                component_params[name] = posterior.posterior[name].values.reshape(
-                    n_total, n_trace, n_peak
-                )
-        except KeyError:
-            component_params = {}
-
-    # Plot each (trace, peak) subplot
-    for t in range(n_trace):
+        # ── Per-peak-window columns ──────────────────────────────────────────
         for p, peak in enumerate(peaks):
             ax = axes[t, p]
 
-            # Get data for this trace
-            x_trace = time_arr[t, :]
-            y_trace = signal_arr[t, :]
-
-            # Extract peak window from raw data
-            mask_full = (x_trace >= peak.low) & (x_trace <= peak.high)
-            x_window = x_trace[mask_full]
-            y_window = y_trace[mask_full]
-
-            # Skip if no valid data in raw signal
-            if len(x_window) == 0:
+            # Raw scatter masked to this window
+            raw_mask = (x_trace >= peak.rt_min) & (x_trace <= peak.rt_max)
+            x_raw, y_raw = x_trace[raw_mask], y_trace[raw_mask]
+            fin = np.isfinite(x_raw) & np.isfinite(y_raw)
+            if fin.any():
+                ax.scatter(
+                    x_raw[fin],
+                    y_raw[fin],
+                    s=25,
+                    alpha=0.5,
+                    color="gray",
+                    zorder=1,
+                    label="Raw signal" if add_legend and p == 0 else "",
+                )
+            else:
                 ax.text(
                     0.5,
                     0.5,
@@ -1083,177 +1352,202 @@ def plot_posterior_predictive(
                     fontsize=10,
                     color="red",
                 )
-                ax.set_title(f"{peak.name} (trace {t})", fontsize=9)
-                continue
 
-            # For posterior samples: if windowed likelihood was used (n_time_posterior != n_time_full),
-            # we need to use the provided masked time axis. Otherwise use index masking.
-            if n_time_posterior == n_time_full:
-                # Full likelihood: posterior time matches input time, use index mask directly
-                mu_y_window = mu_y_samples[:, t, mask_full]  # [n_draw, n_window]
-                baseline_window = baseline_samples[
-                    :, t, mask_full
-                ]  # [n_draw, n_window]
-                x_posterior_axis = x_window  # Use the input time axis
-            else:
-                # Windowed likelihood: use the provided masked time axis
-                if x_posterior_arr is not None:
-                    # We have the exact masked time axis. Find which points fall in the peak window.
-                    x_posterior_trace = (
-                        x_posterior_arr
-                        if x_posterior_arr.ndim == 1
-                        else x_posterior_arr[t]
-                    )
-                    mask_posterior = (x_posterior_trace >= peak.low) & (
-                        x_posterior_trace <= peak.high
-                    )
-                    x_posterior_axis = x_posterior_trace[mask_posterior]
-                    mu_y_window = mu_y_samples[
-                        :, t, mask_posterior
-                    ]  # [n_draw, n_window]
-                    baseline_window = baseline_samples[
-                        :, t, mask_posterior
-                    ]  # [n_draw, n_window]
-                else:
-                    # Masked time axis not provided, but we know posterior is different size.
-                    # Plot all available posterior samples with synthetic evenly-spaced time.
-                    # This is a fallback for robustness.
-                    x_posterior_axis = np.linspace(
-                        peak.low, peak.high, n_time_posterior
-                    )
-                    mu_y_window = mu_y_samples[:, t, :]  # [n_draw, n_time_posterior]
-                    baseline_window = baseline_samples[
-                        :, t, :
-                    ]  # [n_draw, n_time_posterior]
-
-            # Plot raw signal as gray scatter
-            finite_mask = np.isfinite(x_window) & np.isfinite(y_window)
-            ax.scatter(
-                x_window[finite_mask],
-                y_window[finite_mask],
-                s=30,
-                alpha=0.5,
-                color="gray",
-                label="Raw signal",
-                zorder=1,
-            )
-
-            # Plot baseline (gray dashed + HDI band)
-            add_hdi_band(
-                ax,
-                x_posterior_axis,
-                baseline_window,
-                color="gray",
-                alpha=0.2,
-                linewidth=1,
-                linestyle="--",
-                label="Baseline (95% HDI)",
-            )
-
-            # Plot individual components for any doublet mode using the generic
-            # deterministic per-component arrays exported by the model.
-            if bool(component_params) and peak_is_doublet_mode(peak.mode):
-                try:
-                    sigma_l_flat = component_params["sigma_l"][:, t, p]
-                    sigma_r_flat = component_params["sigma_r"][:, t, p]
-                    alpha_l_flat = component_params["alpha_l"][:, t, p]
-                    alpha_r_flat = component_params["alpha_r"][:, t, p]
-                    xi_l_flat = component_params["xi_l"][:, t, p]
-                    xi_r_flat = component_params["xi_r"][:, t, p]
-                    area_l_flat = component_params["area_l"][:, t, p]
-                    area_r_flat = component_params["area_r"][:, t, p]
-
-                    x_plot = jnp.asarray(np.asarray(x_posterior_axis, dtype=float))
-
-                    component_l = _compute_skew_normal_component(
-                        x_plot,
-                        jnp.asarray(xi_l_flat),
-                        jnp.asarray(sigma_l_flat),
-                        jnp.asarray(alpha_l_flat),
-                        jnp.asarray(area_l_flat),
-                    )
-                    component_r = _compute_skew_normal_component(
-                        x_plot,
-                        jnp.asarray(xi_r_flat),
-                        jnp.asarray(sigma_r_flat),
-                        jnp.asarray(alpha_r_flat),
-                        jnp.asarray(area_r_flat),
-                    )
-
-                    if peak_is_artefact_mode(peak.mode):
-                        if peak.shoulder == "left":
-                            label_l = "Artefact component (95% HDI)"
-                            label_r = "Main component (95% HDI)"
-                        else:
-                            label_l = "Main component (95% HDI)"
-                            label_r = "Artefact component (95% HDI)"
-                    else:
-                        label_l = "Left component (95% HDI)"
-                        label_r = "Right component (95% HDI)"
-
-                    add_hdi_band(
+            # Posterior curves for this trace (if available)
+            if ci is not None and curves is not None:
+                win = (curves.x >= peak.rt_min) & (curves.x <= peak.rt_max)
+                x_c = curves.x[win]
+                if x_c.size > 0:
+                    first = add_legend and p == 0
+                    # Baseline — solid gray
+                    _plot_hdi_line(
                         ax,
-                        x_posterior_axis,
-                        component_l,
+                        x_c,
+                        curves.baseline_median[ci, win],
+                        curves.baseline_lower[ci, win],
+                        curves.baseline_upper[ci, win],
                         color="gray",
-                        alpha=0.25,
-                        linewidth=1.2,
+                        alpha=0.2,
+                        linewidth=1.0,
                         linestyle="-",
-                        label=label_l,
+                        label=f"Baseline ({hdi_label})" if first else "",
                     )
-
-                    add_hdi_band(
+                    # Left component — dotted gray
+                    _plot_hdi_line(
                         ax,
-                        x_posterior_axis,
-                        component_r,
+                        x_c,
+                        curves.comp_l_median[ci, p, win],
+                        curves.comp_l_lower[ci, p, win],
+                        curves.comp_l_upper[ci, p, win],
                         color="gray",
                         alpha=0.15,
-                        linewidth=1.0,
-                        linestyle="--",
-                        label=label_r,
+                        linewidth=0.9,
+                        linestyle=":",
+                        label=f"Left comp. ({hdi_label})" if first else "",
                     )
-                except (KeyError, IndexError, ValueError, AttributeError):
-                    # If component reconstruction fails, skip silently and continue
-                    # with the total posterior predictive signal.
-                    pass
+                    # Right component — dashed gray
+                    _plot_hdi_line(
+                        ax,
+                        x_c,
+                        curves.comp_r_median[ci, p, win],
+                        curves.comp_r_lower[ci, p, win],
+                        curves.comp_r_upper[ci, p, win],
+                        color="gray",
+                        alpha=0.15,
+                        linewidth=0.9,
+                        linestyle="--",
+                        label=f"Right comp. ({hdi_label})" if first else "",
+                    )
+                    # Total — blue
+                    _plot_hdi_line(
+                        ax,
+                        x_c,
+                        curves.total_median[ci, win],
+                        curves.total_lower[ci, win],
+                        curves.total_upper[ci, win],
+                        color="C0",
+                        alpha=0.3,
+                        linewidth=1.5,
+                        linestyle="-",
+                        label=f"Fitted signal ({hdi_label})" if first else "",
+                    )
 
-            # Plot total fitted signal (blue line + HDI band)
-            add_hdi_band(
-                ax,
-                x_posterior_axis,
-                mu_y_window,
-                color="C0",
-                alpha=0.3,
-                linewidth=1.5,
-                linestyle="-",
-                label="Fitted signal (95% HDI)",
-            )
-
-            # Add peak window bounds
-            add_peak_window_bounds(ax, peak, color="red", alpha=0.3, linewidth=1.0)
-
-            # Labels and formatting
-            ax.set_title(f"{peak.name} (trace {t})", fontsize=9)
+            add_peak_window_bounds(ax, peak, color="red", alpha=0.3, linewidth=0.8)
+            ax.set_title(f"{peak.molecule_id} ({trace_label(t)})", fontsize=9)
             if p == 0:
                 ax.set_ylabel("Signal", fontsize=8)
-            if t == n_trace - 1:
-                ax.set_xlabel("Time", fontsize=8)
-
+            if t == n_display - 1:
+                ax.set_xlabel("Time (min)", fontsize=8)
             ax.grid(True, alpha=0.3, linestyle="--")
             ax.tick_params(labelsize=7)
 
-    # Add legend to first axes
-    if n_trace > 0 and n_peak > 0:
-        axes[0, 0].legend(fontsize=8, loc="best")
+        # ── Combined column ──────────────────────────────────────────────────
+        if has_combined:
+            ax_c = axes[t, n_peak]
 
-    fig.suptitle(
-        f"Posterior Predictive: {n_trace} traces × {n_peak} peak windows",
-        fontsize=12,
-        fontweight="bold",
-    )
+            raw_comb = (x_trace >= rt_lo) & (x_trace <= rt_hi)
+            x_raw_c, y_raw_c = x_trace[raw_comb], y_trace[raw_comb]
+            fin_c = np.isfinite(x_raw_c) & np.isfinite(y_raw_c)
+            if fin_c.any():
+                ax_c.scatter(
+                    x_raw_c[fin_c],
+                    y_raw_c[fin_c],
+                    s=25,
+                    alpha=0.5,
+                    color="gray",
+                    zorder=1,
+                )
+
+            if ci is not None and curves is not None:
+                comb = (curves.x >= rt_lo) & (curves.x <= rt_hi)
+                x_cc = curves.x[comb]
+                if x_cc.size > 0:
+                    _plot_hdi_line(
+                        ax_c,
+                        x_cc,
+                        curves.baseline_median[ci, comb],
+                        curves.baseline_lower[ci, comb],
+                        curves.baseline_upper[ci, comb],
+                        color="gray",
+                        alpha=0.2,
+                        linewidth=1.0,
+                        linestyle="-",
+                    )
+                    _plot_hdi_line(
+                        ax_c,
+                        x_cc,
+                        curves.total_median[ci, comb],
+                        curves.total_lower[ci, comb],
+                        curves.total_upper[ci, comb],
+                        color="C0",
+                        alpha=0.3,
+                        linewidth=1.5,
+                        linestyle="-",
+                    )
+
+            ax_c.set_title(f"Combined — {trace_label(t)}", fontsize=9)
+            if t == n_display - 1:
+                ax_c.set_xlabel("Time (min)", fontsize=8)
+            ax_c.grid(True, alpha=0.3, linestyle="--")
+            ax_c.tick_params(labelsize=7)
+
+    if n_display > 0 and n_peak > 0 and axes[0, 0].has_data():
+        axes[0, 0].legend(fontsize=7, loc="best")
+
     fig.tight_layout()
-
     return fig, axes
+
+
+def _plot_hdi_line(
+    ax: plt.Axes,
+    x: np.ndarray,
+    median: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    *,
+    color: str = "C0",
+    alpha: float = 0.3,
+    linewidth: float = 1.5,
+    linestyle: str = "-",
+    label: str = "",
+) -> None:
+    """Plot a median line + HDI fill-between band."""
+    fin = np.isfinite(x) & np.isfinite(median)
+    if not fin.any():
+        return
+    ax.plot(
+        x[fin],
+        median[fin],
+        color=color,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        label=label,
+    )
+    ax.fill_between(x[fin], lower[fin], upper[fin], color=color, alpha=alpha)
+
+
+def plot_posterior_predictive(
+    time: np.ndarray,
+    signal: np.ndarray,
+    peaks: list[PeakAnnotation],
+    posterior: object,
+    *,
+    x_posterior: Optional[np.ndarray] = None,
+    y_posterior: Optional[np.ndarray] = None,
+    chromatogram_ids: Optional[list[str]] = None,
+    figsize: Optional[tuple[float, float]] = None,
+    baselines: Optional[list] = None,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Deprecated — use :meth:`~BetterFitter.plot_fit` instead.
+
+    .. deprecated::
+        ``plot_posterior_predictive`` is superseded by the
+        :meth:`BetterFitter.plot_fit` method which avoids the posterior
+        axis alignment bug.  This function remains for backward compatibility
+        but will be removed in a future release.
+    """
+    import warnings
+
+    warnings.warn(
+        "plot_posterior_predictive() is deprecated. "
+        "Use fitter.plot_fit() instead, which correctly handles the windowed "
+        "posterior time axis and supports multi-subset trace selection.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    # Minimal fallback: scatter-only plot (no posterior overlay)
+    time_arr = np.asarray(time, dtype=float)
+    signal_arr = np.asarray(signal, dtype=float)
+    n_trace = time_arr.shape[0]
+    return plot_fit(
+        time_arr,
+        signal_arr,
+        peaks,
+        None,  # no curves — scatter only
+        baselines=baselines,
+        chromatogram_ids=chromatogram_ids,
+        figsize=figsize,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1275,8 +1569,8 @@ def plot_trace(
     posterior : arviz.InferenceData
         Posterior from ArviZ (result of az.from_numpyro()).
     var_names : list[str] or None
-        Parameter names to plot. If None, plots all sampled parameters.
-        Can filter to subset for readability (e.g., ['apex_center_per_trace', 'sigma_base']).
+        Parameter names to plot. If None, uses the fitter's default shared
+        diagnostics (e.g. ``['trace_shift', 'apex', 'sigma_base']``).
     figsize : tuple or None
         Figure size. If None, auto-scales based on number of variables.
 
@@ -1291,7 +1585,11 @@ def plot_trace(
 
     available_vars = list(posterior.posterior.data_vars)
     if var_names is None:
-        var_names = available_vars
+        from .better_model import TRACE_PARAMETER_NAMES
+
+        var_names = [name for name in TRACE_PARAMETER_NAMES if name in available_vars]
+        if not var_names:
+            var_names = available_vars
     else:
         requested = list(var_names)
         var_names = [name for name in requested if name in available_vars]
@@ -1324,12 +1622,6 @@ def plot_trace(
     )
 
     fig = plt.gcf()  # Get current figure
-    fig.suptitle(
-        "MCMC Trace Plots - Convergence Diagnostics",
-        fontsize=14,
-        fontweight="bold",
-        y=1.00,
-    )
     fig.tight_layout()
 
     return fig
@@ -1352,18 +1644,20 @@ if __name__ == "__main__":
     ]
 
     # Define peaks and baselines
+    from chromhandler.annotations import BaselineAnnotation
+
     baselines = [
-        PeakAnnotation(name="bl1", low=0, high=1, mode="single"),
-        PeakAnnotation(name="bl2", low=4, high=6, mode="single"),
+        BaselineAnnotation(rt_min=0, rt_max=1),
+        BaselineAnnotation(rt_min=4, rt_max=6),
     ]
     peaks = [
-        PeakAnnotation(name="peak1", low=2.6, high=2.83, mode="single"),
+        PeakAnnotation(molecule_id="peak1", rt_min=2.6, rt_max=2.83, mode="single"),
         PeakAnnotation(
-            name="peak2",
-            low=2.9,
-            high=3.18,
+            molecule_id="peak2",
+            rt_min=2.9,
+            rt_max=3.18,
             mode="artefact_doublet",
-            shoulder="right",
+            artefact_side="right",
         ),
     ]
 

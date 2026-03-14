@@ -1,309 +1,229 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from chromhandler.model import Chromatogram, Data, Measurement, Peak
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.model import Estimate, Peak
+from chromhandler.readers.abstractreader import ChromatogramData
 
 
-class ASMReader(AbstractReader):
-    def model_post_init(self, __context: Any) -> None:
-        if not self.file_paths:
-            logger.debug(
-                "Collecting file paths without reaction time and unit parsing."
-            )
-            self._get_file_paths()
+def _point_estimate(value: float) -> Estimate:
+    """Wrap a scalar as a point estimate (mean only)."""
+    return Estimate(mean=value)
 
-    def read(self) -> list[Measurement]:
-        """Reads the chromatographic data from the specified files.
+
+class ASMReader:
+    """Reader for Allotrope Simple Model (ASM) JSON files.
+
+    Implements the :class:`AbstractReader` protocol: parses a single ASM file
+    and returns raw signal/time data plus any peaks extracted from the file.
+    Supports both LC and GC aggregate document formats.
+
+    Example::
+
+        reader = ASMReader()
+        data = reader.read_file(Path("CV10_0min.json"), chromatogram_id="CV10_0min")
+        # data.signal, data.time, data.peaks, data.wavelength
+    """
+
+    def read_file(self, path: Path, *, chromatogram_id: str) -> ChromatogramData:
+        """Parse a single ASM JSON file.
+
+        Args:
+            path: Path to the ASM JSON file.
+            chromatogram_id: Identifier of the chromatogram (for peak attribution).
 
         Returns:
-            list[Measurement]: A list of Measurement objects representing the chromatographic data.
+            ChromatogramData with signal, time (both in minutes), peaks, and
+            wavelength if available.
+
+        Raises:
+            ValueError: If the document type is not recognised.
         """
+        content: dict[str, Any] = json.loads(path.read_text())
 
-        measurements = []
-        for i, file in enumerate(self.file_paths):
-            content = self._read_asm_file(file)
-            measurement = self._map_measurement(content, self.values[i], file)
-            measurements.append(measurement)
-
-        if not self.silent:
-            self.print_success(len(measurements))
-
-        return measurements
-
-    def _get_file_paths(self) -> None:
-        """Collects the file paths from the directory."""
-
-        files = []
-        directory = Path(self.dirpath)
-
-        # check if directory exists
-        assert directory.exists(), f"Directory '{self.dirpath}' does not exist."
-        assert directory.is_dir(), f"'{self.dirpath}' is not a directory."
-        assert any(
-            directory.rglob("*.json")
-        ), f"No .json files found in '{self.dirpath}'."
-
-        for file_path in directory.iterdir():
-            if file_path.name.startswith(".") or not file_path.name.endswith(".json"):
-                continue
-
-            files.append(str(file_path.absolute()))
-
-        assert (
-            len(files) == len(self.values)
-        ), f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
-
-        self.file_paths = sorted(files)
-
-    def _read_asm_file(self, file_path: str) -> Any:
-        with open(file_path, "r") as file:
-            content = json.load(file)
-
-        return content
-
-    def _map_measurement(
-        self,
-        content: dict[str, Any],
-        reaction_time: float,
-        path: str,
-    ) -> Measurement:
         if "liquid chromatography aggregate document" in content:
-            return self._map_lc_measurement(content, reaction_time, path)
-        elif "gas chromatography aggregate document" in content:
-            return self._map_gc_measurement(content, reaction_time, path)
-        else:
-            raise ValueError("Chromatogram type not recognized.")
+            return self._map_lc(content, path, chromatogram_id)
+        if "gas chromatography aggregate document" in content:
+            return self._map_gc(content, path, chromatogram_id)
 
-    def _map_lc_measurement(
+        raise ValueError(
+            f"Unrecognised ASM document type in '{path}'. "
+            "Expected 'liquid chromatography aggregate document' or "
+            "'gas chromatography aggregate document'."
+        )
+
+    # ------------------------------------------------------------------
+    # LC mapping
+    # ------------------------------------------------------------------
+
+    def _map_lc(
         self,
         content: dict[str, Any],
-        reaction_time: float,
-        path: str,
-    ) -> Measurement:
+        path: Path,
+        chromatogram_id: str,
+    ) -> ChromatogramData:
         doc = content["liquid chromatography aggregate document"][
             "liquid chromatography document"
         ]
 
         if len(doc) > 1:
             logger.warning(
-                f"More than one chromatogram found in file '{path}'. Using the first chromatogram only."
+                f"More than one chromatogram found in '{path}'. Using the first one."
             )
 
         try:
-            sample_document = doc[0]["sample document"]
             meas_document = doc[0]["measurement document"]
         except KeyError:
-            sample_document = doc[0]["measurement aggregate document"][
-                "measurement document"
-            ]["sample document"]
             meas_document = doc[0]["measurement aggregate document"][
                 "measurement document"
             ]
 
-        # sample info
-        name = sample_document.get("written name")
-        sample_id = sample_document.get("sample identifier")
-        if not sample_id and name:
-            sample_id = name
-
-        # Fallback to filename if no sample ID available
-        if not sample_id:
-            sample_id = self._get_measurement_id_from_file(path)
-
         if isinstance(meas_document, list):
             meas_document = meas_document[0]
 
-        # signal and time
-        signal = meas_document["chromatogram data cube"]["data"]["measures"][0]
-        time = meas_document["chromatogram data cube"]["data"]["dimensions"][0]
-        time_unit = meas_document["chromatogram data cube"]["cube-structure"][
-            "dimensions"
-        ][0]["unit"]
+        signal, time = self._extract_signal_time(meas_document, path)
+        peaks = self._extract_lc_peaks(doc[0], meas_document, path, chromatogram_id)
 
-        if time_unit == "s":
-            # to min
-            time = [t / 60 for t in time]
-        elif time_unit == "min":
-            pass
-        else:
-            raise ValueError(f"Unit '{time_unit}' not recognized")
+        return ChromatogramData(signal=signal, time=time, peaks=peaks)
 
-        try:
-            peak_list = meas_document["peak list"]["peak"]
-        except KeyError:
-            analyte_document = doc[0]["analyte aggregate document"]["analyteDocument"]
+    # ------------------------------------------------------------------
+    # GC mapping
+    # ------------------------------------------------------------------
 
-            if len(analyte_document) > 1:
-                logger.warning(
-                    f"More than one analyte document found in '{path}'. Using the first analyte document only."
-                )
-
-            peak_list = analyte_document[0]["peak list"]["peak"]
-
-        peaks = [self.map_peaks(peak) for peak in peak_list]
-
-        chrom = Chromatogram(
-            peaks=peaks,
-            signals=signal,
-            times=time,
-        )
-
-        data = Data(
-            value=reaction_time,
-            unit=self.unit.name,
-            data_type=self.mode,
-        )
-
-        return Measurement(
-            id=sample_id,
-            sample_name=name,
-            temperature=self.temperature,
-            temperature_unit=self.temperature_unit,
-            ph=self.ph,
-            chromatograms=[chrom],
-            data=data,
-        )
-
-    def _map_gc_measurement(
+    def _map_gc(
         self,
         content: dict[str, Any],
-        reaction_time: float,
-        path: str,
-    ) -> Measurement:
+        path: Path,
+        chromatogram_id: str,
+    ) -> ChromatogramData:
         doc = content["gas chromatography aggregate document"][
             "gas chromatography document"
         ]
 
         if len(doc) > 1:
             logger.warning(
-                f"More than one chromatogram found in file '{path}'. Using the first chromatogram only."
+                f"More than one chromatogram found in '{path}'. Using the first one."
             )
 
         meas_document = doc[0]["measurement aggregate document"]["measurement document"]
-
         if isinstance(meas_document, list):
             meas_document = meas_document[0]
 
-        sample_document = meas_document["sample document"]
+        signal, time = self._extract_signal_time(meas_document, path)
+        peaks = self._extract_gc_peaks(meas_document, path, chromatogram_id)
 
-        # sample info
-        name = sample_document.get("written name")
-        sample_id = sample_document.get("sample identifier")
-        if not sample_id and name:
-            sample_id = name
+        return ChromatogramData(signal=signal, time=time, peaks=peaks)
 
-        # Fallback to filename if no sample ID available
-        if not sample_id:
-            sample_id = self._get_measurement_id_from_file(path)
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
 
-        # signal and time
-        signal = meas_document["chromatogram data cube"]["data"]["measures"][0]
-        time = meas_document["chromatogram data cube"]["data"]["dimensions"][0]
-        time_unit = meas_document["chromatogram data cube"]["cube-structure"][
-            "dimensions"
-        ][0]["unit"]
+    def _extract_lc_peaks(
+        self,
+        doc_element: dict[str, Any],
+        meas_document: dict[str, Any],
+        path: Path,
+        chromatogram_id: str,
+    ) -> list[Peak]:
+        """Extract peaks from LC document. Returns [] if peak list is absent."""
+        raw: list[dict[str, Any]] = []
+        if "peak list" in meas_document:
+            raw = meas_document["peak list"].get("peak", [])
+        elif "analyte aggregate document" in doc_element:
+            analyte_docs = doc_element["analyte aggregate document"].get(
+                "analyteDocument", []
+            )
+            if analyte_docs:
+                raw = analyte_docs[0].get("peak list", {}).get("peak", [])
+            if len(analyte_docs) > 1:
+                logger.warning(
+                    f"More than one analyte document in '{path}'. Using the first."
+                )
+        return self._map_peaks_safe(raw, path, chromatogram_id)
 
-        if time_unit == "s":
-            # to min
-            time = [t / 60 for t in time]
-
-        elif time_unit == "min":
-            pass
-        else:
-            raise ValueError(f"Unit '{time_unit}' not recognized")
-
-        peak_list = meas_document["processed data document"]["peak list"]["peak"]
-        peaks = [self.map_peaks(peak) for peak in peak_list]
-
-        chrom = Chromatogram(
-            peaks=peaks,
-            signals=signal,
-            times=time,
-        )
-
-        data = Data(
-            value=reaction_time,
-            unit=self.unit.name,
-            data_type=self.mode,
-        )
-
-        return Measurement(
-            id=sample_id,
-            sample_name=name,
-            temperature=self.temperature,
-            temperature_unit=self.temperature_unit.name,
-            ph=self.ph,
-            chromatograms=[chrom],
-            data=data,
-        )
-
-    def map_peaks(self, peak_dict: dict[str, Any]) -> Peak:
-        area = peak_dict["peak area"]
-        peak_area = area["value"]
-        if len(list(area.keys())) == 2:
-            if area["unit"] == "mAU.s":
-                peak_area = area["value"] * 60
-            elif area["unit"] == "mAU.min":
-                peak_area = area["value"]
-            elif area["unit"] == "unitless":
-                peak_area = area["value"]
-            else:
-                raise ValueError(f"Unit '{area['unit']}' not recognized")
-
-        if "peak width at half height" in peak_dict:
-            width = peak_dict["peak width at half height"]
-            if width["unit"] == "s":
-                width["value"] /= 60
-            elif width["unit"] == "min":
-                pass
-            else:
-                raise ValueError(f"Unit '{width['unit']}' not recognized")
-            width_value = width["value"]
-        else:
-            width_value = None
-
-        retention_time = peak_dict["retention time"]
-        if retention_time["unit"] == "s":
-            retention_time["value"] /= 60
-        elif retention_time["unit"] == "min":
-            pass
-        else:
-            raise ValueError(f"Unit '{retention_time['unit']}' not recognized")
-
-        peak_start = peak_dict["peak start"]
-        if peak_start["unit"] == "s":
-            peak_start["value"] /= 60
-        elif peak_start["unit"] == "min":
-            pass
-        else:
-            raise ValueError(f"Unit '{peak_start['unit']}' not recognized")
-
-        peak_end = peak_dict["peak end"]
-        if peak_end["unit"] == "s":
-            peak_end["value"] /= 60
-        elif peak_end["unit"] == "min":
-            pass
-        else:
-            raise ValueError(f"Unit '{peak_end['unit']}' not recognized")
-
+    def _extract_gc_peaks(
+        self,
+        meas_document: dict[str, Any],
+        path: Path,
+        chromatogram_id: str,
+    ) -> list[Peak]:
+        """Extract peaks from GC document. Returns [] if peak list is absent."""
+        raw: list[dict[str, Any]] = []
         try:
-            asym_factor = peak_dict["chromatographic peak asymmetry factor"]["value"]
+            raw = meas_document["processed data document"]["peak list"]["peak"]
         except KeyError:
-            asym_factor = None
-        except TypeError:
-            asym_factor = None
+            pass
+        return self._map_peaks_safe(raw, path, chromatogram_id)
+
+    def _map_peaks_safe(
+        self,
+        raw_peaks: list[dict[str, Any]],
+        path: Path,
+        chromatogram_id: str,
+    ) -> list[Peak]:
+        """Map raw peak dicts to Peak, skipping malformed entries."""
+        peaks: list[Peak] = []
+        for p in raw_peaks:
+            try:
+                peaks.append(self._map_peak(p, chromatogram_id))
+            except (KeyError, TypeError):
+                logger.debug(f"Skipping malformed peak in '{path}'")
+                continue
+        return peaks
+
+    def _extract_signal_time(
+        self, meas_document: dict[str, Any], path: Path
+    ) -> tuple[list[float], list[float]]:
+        """Extract and normalise signal and time arrays to minutes."""
+        cube = meas_document["chromatogram data cube"]
+        signal: list[float] = cube["data"]["measures"][0]
+        time: list[float] = cube["data"]["dimensions"][0]
+
+        time_unit: str = cube["cube-structure"]["dimensions"][0]["unit"]
+        if time_unit == "s":
+            time = [t / 60.0 for t in time]
+        elif time_unit != "min":
+            raise ValueError(f"Unrecognised time unit '{time_unit}' in '{path}'.")
+
+        return signal, time
+
+    def _map_peak(self, peak_dict: dict[str, Any], chromatogram_id: str) -> Peak:
+        """Convert a raw ASM peak dict to a :class:`Peak` model instance."""
+        area_entry = peak_dict["peak area"]
+        area_value: float = area_entry["value"]
+        area_unit: str = area_entry.get("unit", "")
+        if area_unit == "mAU.s":
+            area_value = area_value * 60.0
+
+        def _to_min(entry: dict[str, Any]) -> float:
+            value: float = entry["value"]
+            if entry.get("unit") == "s":
+                value /= 60.0
+            return value
+
+        width_est: Estimate | None = None
+        if "peak width at half height" in peak_dict:
+            width_est = _point_estimate(_to_min(peak_dict["peak width at half height"]))
+
+        skew_est: Estimate | None = None
+        try:
+            skew_val = peak_dict["chromatographic peak asymmetry factor"]["value"]
+            skew_est = _point_estimate(skew_val)
+        except (KeyError, TypeError):
+            pass
 
         return Peak(
-            retention_time=peak_dict["retention time"]["value"],
-            area=peak_area,
+            chromatogram_id=chromatogram_id,
+            location=_point_estimate(_to_min(peak_dict["retention time"])),
+            area=_point_estimate(area_value),
+            skew=skew_est,
+            width=width_est,
             amplitude=peak_dict["peak height"]["value"],
-            width=width_value,
-            skew=asym_factor,
             percent_area=peak_dict["relative peak area"]["value"],
-            peak_start=peak_dict["peak start"]["value"],
-            peak_end=peak_dict["peak end"]["value"],
+            peak_start=_to_min(peak_dict["peak start"]),
+            peak_end=_to_min(peak_dict["peak end"]),
         )

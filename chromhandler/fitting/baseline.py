@@ -7,7 +7,7 @@ from typing import Final
 
 import jax.numpy as jnp
 
-from .data import BaselineAnnotation, PeakAnnotation
+from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 
 _DEFAULT_PERCENTILE: Final = 5.0
 _DEFAULT_EDGE_FRACTION: Final = 0.20
@@ -130,12 +130,12 @@ def _select_anchors(
 
     # Explicit baseline sections: use all finite points.
     for bl in baselines:
-        in_region = (time >= float(bl.low)) & (time <= float(bl.high)) & finite
+        in_region = (time >= float(bl.rt_min)) & (time <= float(bl.rt_max)) & finite
         selected = selected | in_region
 
     # Peak windows: low-percentile edge points with full-window fallback.
     for pk in peaks:
-        in_window = (time >= float(pk.low)) & (time <= float(pk.high)) & finite
+        in_window = (time >= float(pk.rt_min)) & (time <= float(pk.rt_max)) & finite
         left_edge, right_edge = _window_edge_masks(
             in_window,
             edge_fraction=edge_fraction,
@@ -178,11 +178,11 @@ def _select_anchors(
     all_annotated = jnp.zeros_like(finite, dtype=bool)
     for pk in peaks:
         all_annotated = all_annotated | (
-            (time >= float(pk.low)) & (time <= float(pk.high)) & finite
+            (time >= float(pk.rt_min)) & (time <= float(pk.rt_max)) & finite
         )
     for bl in baselines:
         all_annotated = all_annotated | (
-            (time >= float(bl.low)) & (time <= float(bl.high)) & finite
+            (time >= float(bl.rt_min)) & (time <= float(bl.rt_max)) & finite
         )
 
     anchor_count = jnp.sum(selected, axis=1)

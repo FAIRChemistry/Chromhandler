@@ -3,14 +3,41 @@
 Replaces the FWHM-based prior pipeline of ``nu_bayes.py`` with the geometry-only
 approach from ``priors.py``.  This file contains only what is needed to:
 
-1. Accept time/signal data + peak/baseline annotations.
+1. Accept time/signal data + peak/baseline annotations via a native subset API.
 2. Estimate a linear baseline via ``baseline.py``.
 3. Compute window-geometry priors via ``priors.py``.
 4. Run MCMC inference via ``better_model.py`` using NUTS sampler.
 5. Print a human-readable prior summary and posterior statistics via ArviZ.
+
+Subset API overview
+-------------------
+Case 1 — single group (all traces share the same peak windows)::
+
+    fitter = BetterFitter.from_handler(handler)
+    fitter.add_baseline_annotation(BaselineAnnotation(rt_min=0.5, rt_max=1.0))
+    fitter.add_peak_annotation(PeakAnnotation(molecule_id="s0", rt_min=2.8, rt_max=3.2, mode="single"))
+    fitter.fit()
+    fitter.posteriors  # {"__default__": InferenceData}
+
+Case 2 — multiple groups with different peak windows or trace selections::
+
+    fitter = BetterFitter.from_handler(handler)
+    s1 = fitter.add_subset("col_A", sample_ids=["run1", "run2"])
+    s1.add_peak_annotation(PeakAnnotation(molecule_id="NAD", rt_min=2.8, rt_max=3.2, mode="single"))
+
+    s2 = fitter.add_subset("col_B", sample_ids=["run3", "run4"])
+    s2.add_peak_annotation(PeakAnnotation(molecule_id="NAD", rt_min=2.9, rt_max=3.3, mode="single"))
+
+    fitter.fit()                        # all subsets
+    fitter.fit(subsets=["col_A"])       # selective
+    fitter.posteriors                   # {"col_A": InferenceData, "col_B": InferenceData}
 """
 
 from __future__ import annotations
+
+import dataclasses
+import functools
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -18,30 +45,68 @@ import numpy as np
 from numpyro.infer import MCMC, NUTS
 from rich import print
 
+from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+
 from . import better_model
 from .baseline import BaselinePriors, estimate_baseline
 from .data import (
     PEAK_MODE_TO_CODE,
-    BaselineAnnotation,
-    PeakAnnotation,
     baseline_to_mask,
     peak_is_artefact_mode,
     peak_is_free_mode,
+    stack_and_pad_signal,
 )
 from .priors import (
     FwhmShapeDiagnostics,
     GeometricPeakPriors,
     build_geometric_priors,
     geometric_priors_to_arrays,
+    refine_apex_priors_with_trace_shift,
     summarise_priors,
 )
 from .priors import (
     compute_fwhm_shape_diagnostics as build_fwhm_shape_diagnostics,
 )
+from .subsets import AreaRecord, Subset
+
+# _DEFAULT_SUBSET_NAME is the implicit subset created by add_peak_annotation()
+# when no explicit subsets have been registered.
+_DEFAULT_SUBSET_NAME = "__default__"
+
+
+@dataclasses.dataclass(frozen=True)
+class PosteriorCurves:
+    """Precomputed posterior HDI curves for a fitted subset.
+
+    All arrays are plain numpy.  Shapes:
+
+    - ``x``: ``[n_x]`` — evaluation axis (minutes)
+    - ``total_*``, ``baseline_*``: ``[n_trace, n_x]``
+    - ``comp_l_*``, ``comp_r_*``: ``[n_trace, n_peak, n_x]``
+    - ``trace_indices``: ``[n_trace]`` — global indices into the parent fitter's
+      full trace array (result of :meth:`~BetterFitter.select_trace_indices`)
+    - ``chromatogram_ids``: per-trace labels (or ``None`` if unavailable)
+    """
+
+    x: np.ndarray
+    total_median: np.ndarray
+    total_lower: np.ndarray
+    total_upper: np.ndarray
+    baseline_median: np.ndarray
+    baseline_lower: np.ndarray
+    baseline_upper: np.ndarray
+    comp_l_median: np.ndarray
+    comp_l_lower: np.ndarray
+    comp_l_upper: np.ndarray
+    comp_r_median: np.ndarray
+    comp_r_lower: np.ndarray
+    comp_r_upper: np.ndarray
+    trace_indices: np.ndarray
+    chromatogram_ids: list[str] | None
 
 
 class BetterFitter:
-    """Minimal fitter: baseline estimation + window-geometry priors.
+    """Chromatographic fitter with native multi-subset support.
 
     Parameters
     ----------
@@ -52,12 +117,13 @@ class BetterFitter:
     signal:
         Signal matrix, shape ``[n_trace, n_time]``.
     peaks:
-        Annotated peak windows. ``mode`` controls single vs artefact-doublet
-        or free-doublet behaviour.
+        Optional annotated peak windows applied to **all** traces (shorthand
+        that auto-creates a ``"__default__"`` subset).  Mutually exclusive with
+        :meth:`add_subset`.  Prefer using :meth:`add_peak_annotation` instead.
     baselines:
-        Explicit baseline regions used to anchor the linear baseline fit.
-        The baseline estimation also uses the edges of each peak window, so
-        an empty list is acceptable.
+        Global baseline regions used by all subsets that do not define their
+        own baselines.  An empty list is acceptable; the baseline estimation
+        also uses the edges of each peak window.
     """
 
     def __init__(
@@ -65,24 +131,74 @@ class BetterFitter:
         time: np.ndarray,
         signal: np.ndarray,
         *,
-        peaks: list[PeakAnnotation],
-        baselines: list[BaselineAnnotation],
+        peaks: list[PeakAnnotation] | None = None,
+        baselines: list[BaselineAnnotation] | None = None,
+        trace_sample_ids: list[str] | None = None,
+        trace_chromatogram_ids: list[str] | None = None,
     ) -> None:
         self.time = np.asarray(time, dtype=float)
         self.signal = np.asarray(signal, dtype=float)
-        self.peaks = list(peaks)
-        self.baselines = list(baselines)
+        # Global fallback peaks/baselines (used when _subsets is empty, i.e. on views)
+        self.peaks: list[PeakAnnotation] = []
+        self.baselines: list[BaselineAnnotation] = list(baselines) if baselines else []
         self._validate()
+
+        # Optional per-trace metadata (set by from_handler()).
+        if trace_sample_ids is not None and len(trace_sample_ids) != self.n_traces:
+            raise ValueError(
+                f"trace_sample_ids must have length n_traces={self.n_traces}, "
+                f"got {len(trace_sample_ids)}."
+            )
+        if (
+            trace_chromatogram_ids is not None
+            and len(trace_chromatogram_ids) != self.n_traces
+        ):
+            raise ValueError(
+                f"trace_chromatogram_ids must have length n_traces={self.n_traces}, "
+                f"got {len(trace_chromatogram_ids)}."
+            )
+        self.trace_sample_ids: np.ndarray | None = (
+            np.asarray(trace_sample_ids, dtype=object)
+            if trace_sample_ids is not None
+            else None
+        )
+        self.trace_chromatogram_ids: np.ndarray | None = (
+            np.asarray(trace_chromatogram_ids, dtype=object)
+            if trace_chromatogram_ids is not None
+            else None
+        )
+
+        # trace_subsets[i] holds the name of the Subset that trace i belongs to.
+        # Set when add_subset() is called; None means no subsets registered yet.
+        self.trace_subsets: np.ndarray | None = None  # [n_trace] str, lazy-init
+
+        # --- Subset storage (new unified design) ---
+        self._subsets: dict[str, Subset] = {}
+        # Per-subset posteriors (populated after fit())
+        self._posteriors: dict[str, object] = {}   # subset_name → InferenceData
+        self._samples_dict: dict[str, dict] = {}   # subset_name → {param: array}
+        self._subset_trace_ids: dict[str, np.ndarray] = {}  # subset_name → chromatogram_ids
+        # Per-subset baseline-prior cache
+        self._baseline_priors_cache: dict[str, BaselinePriors] = {}
+        # Per-subset shape-features cache
+        self._shape_features_cache: dict[str, FwhmShapeDiagnostics] = {}
+        # Per-subset masked time axis (set by fit() from view.x_masked)
+        self._x_masked: dict[str, np.ndarray] = {}
 
         # Alignment attributes (set by .align())
         self.shift_samples: np.ndarray | None = None  # [n_trace] shifts in samples
         self.shift_time: np.ndarray | None = None  # [n_trace] shifts in time units
         self.shift_result: object | None = None  # ShiftAlignmentResult
 
-        # Inference-related attributes (initialized on fit())
+        # Inference attributes (set by _run_mcmc() on views only)
         self.mcmc: MCMC | None = None
         self.samples: dict | None = None
-        self.posterior: object | None = None  # arviz.InferenceData
+        # Note: self.posterior is NOT initialized here; only views get it via _run_mcmc()
+
+        # If peaks were provided at construction time, auto-register them as __default__
+        if peaks:
+            for ann in peaks:
+                self.add_peak_annotation(ann)
 
     @staticmethod
     def _stabilize_area_prior_matrix(area_pt: np.ndarray) -> np.ndarray:
@@ -106,8 +222,6 @@ class BetterFitter:
                 f"time and signal must have the same shape; "
                 f"got {self.time.shape} vs {self.signal.shape}."
             )
-        if not self.peaks:
-            raise ValueError("At least one PeakAnnotation is required.")
 
     # ------------------------------------------------------------------
     # Derived quantities
@@ -129,41 +243,199 @@ class BetterFitter:
         """
         return np.nanmedian(self.time, axis=0)
 
-    def baseline_priors(self) -> BaselinePriors:
-        """Per-trace OLS linear baseline priors (cached after first call)."""
-        if not hasattr(self, "_baseline_priors"):
-            self._baseline_priors = estimate_baseline(
-                self.time,
-                self.signal,
-                peaks=self.peaks,
-                baselines=self.baselines,
+    # ------------------------------------------------------------------
+    # Subset resolution helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_subset(self, subset: str | None) -> Subset:
+        """Resolve *subset* name to a :class:`Subset` object.
+
+        If *subset* is ``None`` and exactly one subset is registered, returns
+        it automatically.  Raises for any ambiguity.
+        """
+        if subset is None:
+            if len(self._subsets) == 1:
+                return next(iter(self._subsets.values()))
+            if not self._subsets:
+                raise RuntimeError(
+                    "No subsets registered. Call add_peak_annotation() or add_subset() first."
+                )
+            raise ValueError(
+                f"Multiple subsets registered: {list(self._subsets)}. "
+                "Specify subset='<name>'."
             )
-        return self._baseline_priors
+        if subset not in self._subsets:
+            raise KeyError(
+                f"No subset named '{subset}'. "
+                f"Registered subsets: {list(self._subsets)}."
+            )
+        return self._subsets[subset]
 
-    def baseline_signal(self) -> np.ndarray:
-        """Reconstructed linear baseline matrix, shape ``[n_trace, n_time]``."""
-        bp = self.baseline_priors()
-        intercept = np.asarray(bp.intercept, dtype=float)[:, None]  # [n_trace, 1]
-        slope = np.asarray(bp.slope, dtype=float)[:, None]  # [n_trace, 1]
-        return intercept + slope * self.time  # [n_trace, n_time]
+    def _compute_subset_mask(self, subset: Subset) -> np.ndarray:
+        """Return a boolean mask ``[n_trace]`` selecting traces for *subset*."""
+        if subset._match_all:
+            return np.ones(self.n_traces, dtype=bool)
+        if self.trace_sample_ids is None or self.trace_chromatogram_ids is None:
+            raise RuntimeError(
+                "_compute_subset_mask() requires trace ID arrays. "
+                "Build the fitter with BetterFitter.from_handler()."
+            )
+        mask = np.zeros(self.n_traces, dtype=bool)
+        for sid in subset.sample_ids:
+            mask |= self.trace_sample_ids == sid
+        for cid in subset.chromatogram_ids:
+            mask |= self.trace_chromatogram_ids == cid
+        return mask
 
     # ------------------------------------------------------------------
-    # Prior computation
+    # Prior computation (subset-aware)
     # ------------------------------------------------------------------
 
-    def compute_priors(self) -> list[GeometricPeakPriors]:
-        """Compute window-geometry priors for all annotated peaks."""
-        x = self.common_time()
-        baseline = self.baseline_signal()
-        return build_geometric_priors(self.peaks, x, self.signal, baseline)
+    def _compute_position_priors(
+        self,
+        subset: str | None = None,
+    ) -> tuple[list[GeometricPeakPriors], float]:
+        """Compute apex priors plus the shared trace-shift scale."""
+        if not self._subsets:
+            peaks = self.peaks
+            x = self.common_time()
+            signal = self.signal
+            baseline = self.baseline_signal()
+        else:
+            s = self._resolve_subset(subset)
+            mask = self._compute_subset_mask(s)
+            peaks = s.peaks
+            x = np.nanmedian(self.time[mask], axis=0)
+            signal = self.signal[mask]
+            baseline = self.baseline_signal(subset=s.name)
 
-    def compute_fwhm_shape_diagnostics(self) -> FwhmShapeDiagnostics:
-        """Compute per-trace FWHM-derived main-peak shape diagnostics."""
-        x = self.common_time()
-        baseline = self.baseline_signal()
-        return build_fwhm_shape_diagnostics(self.peaks, x, self.signal, baseline)
+        priors = build_geometric_priors(peaks, x, signal, baseline)
+        diagnostics = build_fwhm_shape_diagnostics(peaks, x, signal, baseline)
+        x_finite = np.asarray(x, dtype=float)
+        x_finite = x_finite[np.isfinite(x_finite)]
+        if x_finite.size >= 2:
+            apex_scale_floor = max(
+                float(np.nanmedian(np.abs(np.diff(np.sort(x_finite))))),
+                1e-6,
+            )
+        else:
+            apex_scale_floor = 1e-6
+        return refine_apex_priors_with_trace_shift(
+            priors,
+            diagnostics,
+            apex_scale_floor=apex_scale_floor,
+            trace_shift_scale_floor=1e-6,
+        )
 
-    def noise_prior(self) -> np.ndarray:
+    def baseline_priors(self, subset: str | None = None) -> BaselinePriors:
+        """Per-trace OLS linear baseline priors for *subset*.
+
+        Cached per subset after first call.  For views (no subsets registered)
+        uses the fitter's own data directly.
+        """
+        if not self._subsets:
+            # View mode: compute from self directly (legacy path)
+            if "_bp_direct" not in self.__dict__:
+                self._bp_direct: BaselinePriors = estimate_baseline(
+                    self.time,
+                    self.signal,
+                    peaks=self.peaks,
+                    baselines=self.baselines,
+                )
+            return self._bp_direct
+
+        s = self._resolve_subset(subset)
+        if s.name not in self._baseline_priors_cache:
+            mask = self._compute_subset_mask(s)
+            effective_baselines = s.baselines if s.baselines else self.baselines
+            self._baseline_priors_cache[s.name] = estimate_baseline(
+                self.time[mask],
+                self.signal[mask],
+                peaks=s.peaks,
+                baselines=effective_baselines,
+            )
+        return self._baseline_priors_cache[s.name]
+
+    def baseline_signal(self, subset: str | None = None) -> np.ndarray:
+        """Reconstructed linear baseline matrix for *subset*.
+
+        Returns shape ``[n_trace_subset, n_time]`` for explicit subsets,
+        or ``[n_trace, n_time]`` for the view / default case.
+        """
+        if not self._subsets:
+            bp = self.baseline_priors()
+            intercept = np.asarray(bp.intercept, dtype=float)[:, None]
+            slope = np.asarray(bp.slope, dtype=float)[:, None]
+            return intercept + slope * self.time
+
+        s = self._resolve_subset(subset)
+        mask = self._compute_subset_mask(s)
+        bp = self.baseline_priors(subset=s.name)
+        intercept = np.asarray(bp.intercept, dtype=float)[:, None]
+        slope = np.asarray(bp.slope, dtype=float)[:, None]
+        return intercept + slope * self.time[mask]
+
+    def compute_priors(
+        self, subset: str | None = None
+    ) -> list[GeometricPeakPriors]:
+        """Compute window-geometry priors for *subset* (or the single registered subset)."""
+        priors, _ = self._compute_position_priors(subset=subset)
+        return priors
+
+    def compute_fwhm_shape_diagnostics(
+        self, subset: str | None = None
+    ) -> FwhmShapeDiagnostics:
+        """Per-trace FWHM-derived main-peak shape diagnostics for *subset*."""
+        if not self._subsets:
+            x = self.common_time()
+            baseline = self.baseline_signal()
+            return build_fwhm_shape_diagnostics(self.peaks, x, self.signal, baseline)
+
+        s = self._resolve_subset(subset)
+        mask = self._compute_subset_mask(s)
+        baseline = self.baseline_signal(subset=s.name)
+        x = np.nanmedian(self.time[mask], axis=0)
+        return build_fwhm_shape_diagnostics(s.peaks, x, self.signal[mask], baseline)
+
+    def get_shape_features(
+        self, subset: str | None = None
+    ) -> FwhmShapeDiagnostics:
+        """Per-trace FWHM-derived shape diagnostics with NaN for invalid entries.
+
+        Continuous fields (``sigma_trace``, ``alpha_trace``,
+        ``fwhm_apex_trace``, ``fwhm_trace``, ``apex_height_trace``) are set
+        to ``float('nan')`` wherever ``fwhm_valid_trace`` is ``False``.
+
+        The result is cached per subset after first access; call
+        :meth:`compute_fwhm_shape_diagnostics` directly for an uncached copy.
+        """
+        cache_key = (
+            self._resolve_subset(subset).name
+            if self._subsets
+            else "_direct_"
+        )
+        if cache_key not in self._shape_features_cache:
+            diag = self.compute_fwhm_shape_diagnostics(
+                subset=(subset if self._subsets else None)
+            )
+            invalid = ~diag.fwhm_valid_trace
+            self._shape_features_cache[cache_key] = dataclasses.replace(
+                diag,
+                sigma_trace=np.where(invalid, np.nan, diag.sigma_trace),
+                alpha_trace=np.where(invalid, np.nan, diag.alpha_trace),
+                fwhm_apex_trace=np.where(invalid, np.nan, diag.fwhm_apex_trace),
+                fwhm_trace=np.where(invalid, np.nan, diag.fwhm_trace),
+                apex_height_trace=np.where(invalid, np.nan, diag.apex_height_trace),
+            )
+        return self._shape_features_cache[cache_key]
+
+    # Backward-compat alias (views only; will raise on parent with subsets)
+    @functools.cached_property
+    def shape_features(self) -> FwhmShapeDiagnostics:
+        """Deprecated: use :meth:`get_shape_features` instead."""
+        return self.get_shape_features()
+
+    def noise_prior(self, subset: str | None = None) -> np.ndarray:
         """Estimate per-trace observation noise from baseline-corrected signal.
 
         Uses median absolute deviation in baseline regions, or falls back to
@@ -172,83 +444,381 @@ class BetterFitter:
         Returns
         -------
         np.ndarray
-            Shape ``[n_trace]``, noise level for each trace (positive).
+            Shape ``[n_trace_subset]``, noise level for each trace (positive).
         """
-        baseline = self.baseline_signal()
-        signal_corrected = self.signal - baseline
+        if not self._subsets:
+            # View mode: use self directly
+            time_s = self.time
+            signal_s = self.signal
+            effective_baselines = self.baselines
+        else:
+            s = self._resolve_subset(subset)
+            mask = self._compute_subset_mask(s)
+            time_s = self.time[mask]
+            signal_s = self.signal[mask]
+            effective_baselines = s.baselines if s.baselines else self.baselines
 
-        if self.baselines:
-            # Estimate noise from signal in baseline regions only
+        bp = (
+            self.baseline_priors()
+            if not self._subsets
+            else self.baseline_priors(subset=self._resolve_subset(subset).name)
+        )
+        intercept = np.asarray(bp.intercept, dtype=float)[:, None]
+        slope = np.asarray(bp.slope, dtype=float)[:, None]
+        baseline = intercept + slope * time_s
+        signal_corrected = signal_s - baseline
 
-            x_jax = jnp.asarray(self.time, dtype=float)
-            baseline_mask = baseline_to_mask(self.baselines, x_jax)
+        n_traces_s = signal_s.shape[0]
+        if effective_baselines:
+            x_jax = jnp.asarray(time_s, dtype=float)
+            baseline_mask = baseline_to_mask(effective_baselines, x_jax)
             baseline_mask_np = np.asarray(baseline_mask, dtype=bool)
-
-            # Per-trace noise from baseline regions
             sigma_y = np.array(
                 [
                     float(np.median(np.abs(signal_corrected[t][baseline_mask_np[t]])))
-                    * 1.4826  # MAD → std conversion
-                    for t in range(self.n_traces)
+                    * 1.4826
+                    for t in range(n_traces_s)
                 ]
             )
         else:
-            # Fall back to std of signal in peak windows
             sigma_y = np.std(signal_corrected, axis=1)
 
-        # Guard: ensure positive
         return np.maximum(sigma_y, 1.0)
 
     def create_observation_mask(self) -> np.ndarray:
         """Create boolean mask for timepoints to include in likelihood.
 
-        The likelihood should only evaluate over:
-        - All baseline regions (for noise estimation)
-        - All peak windows (for peak fitting)
-
-        This prevents sigma_y from being inflated by "dead zones" between
-        baselines and peaks. The model works with a common time axis.
+        Covers baseline regions and peak windows from this fitter's own
+        ``peaks``/``baselines`` (view mode) or aggregated across all
+        registered subsets (parent mode).
 
         Returns
         -------
         np.ndarray
-            Shape [n_time], dtype bool. True where observations should be included.
+            Shape ``[n_time]``, dtype bool.
         """
-        x = self.common_time()  # [n_time]
+        x = self.common_time()
         mask = np.zeros(x.shape[0], dtype=bool)
 
-        # Include all baseline regions
-        for baseline_annot in self.baselines:
-            lo, hi = float(baseline_annot.low), float(baseline_annot.high)
-            baseline_mask = (x >= lo) & (x <= hi)
-            mask |= baseline_mask
+        # Collect all baselines: global + subset-specific
+        all_baselines = list(self.baselines)
+        for s in self._subsets.values():
+            all_baselines.extend(s.baselines)
+        for bl in all_baselines:
+            lo, hi = float(bl.rt_min), float(bl.rt_max)
+            mask |= (x >= lo) & (x <= hi)
 
-        # Include all peak windows
-        for peak_annot in self.peaks:
-            lo, hi = float(peak_annot.low), float(peak_annot.high)
-            peak_mask = (x >= lo) & (x <= hi)
-            mask |= peak_mask
+        # Collect all peak windows: global self.peaks + subset peaks
+        all_peaks = list(self.peaks)
+        for s in self._subsets.values():
+            all_peaks.extend(s.peaks)
+        for pk in all_peaks:
+            lo, hi = float(pk.rt_min), float(pk.rt_max)
+            mask |= (x >= lo) & (x <= hi)
 
         return mask
 
     def slice_to_observed_windows(self) -> tuple[np.ndarray, np.ndarray]:
         """Slice time and signal to include only baseline regions and peak windows.
 
-        Returns rectangular arrays using the aligned per-trace time axis. The
-        column mask is shared, but each trace keeps its own shifted x-values.
+        Returns rectangular arrays using the aligned per-trace time axis.
 
         Returns
         -------
         tuple of np.ndarray
-            (time_masked, signal_masked) where:
-            - time_masked: [n_trace, n_masked_time]
-            - signal_masked: [n_trace, n_masked_time]
+            ``(time_masked, signal_masked)`` where each has shape
+            ``[n_trace, n_masked_time]``.
         """
         mask = self.create_observation_mask()
-        x_masked = self.time[:, mask]  # [n_trace, n_masked_time]
-        signal_masked = self.signal[:, mask]  # [n_trace, n_masked_time]
+        return self.time[:, mask], self.signal[:, mask]
 
-        return x_masked, signal_masked
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_handler(
+        cls,
+        handler: object,
+        sample_ids: list[str] | None = None,
+    ) -> BetterFitter:
+        """Construct a :class:`BetterFitter` from a :class:`~chromhandler.handler.Handler`.
+
+        Chromatograms are gathered from all samples (or *sample_ids* subset),
+        then NaN-padded to a common length so the resulting arrays are
+        rectangular.
+
+        The returned fitter has **no peak or baseline annotations** registered.
+        Use :meth:`add_baseline_annotation` and :meth:`add_peak_annotation` (or
+        :meth:`add_subset`) to attach annotations before calling :meth:`fit`.
+
+        Args:
+            handler: A :class:`~chromhandler.handler.Handler` instance.
+            sample_ids: Optional list of sample IDs to include.  When ``None``
+                all samples are used.
+
+        Returns:
+            A fully initialised :class:`BetterFitter` with no annotations.
+
+        Example::
+
+            fitter = BetterFitter.from_handler(handler)
+            fitter.add_baseline_annotation(BaselineAnnotation(rt_min=0.5, rt_max=1.0))
+            fitter.add_peak_annotation(PeakAnnotation(molecule_id="s0", rt_min=2.8, rt_max=3.2, mode="single"))
+            fitter.align()
+            fitter.fit()
+        """
+        samples = [
+            s
+            for s in handler.samples  # type: ignore[attr-defined]
+            if sample_ids is None or s.id in sample_ids
+        ]
+        if not samples:
+            raise ValueError("No matching samples found in handler.")
+
+        time_lists: list[list[float]] = [
+            c.time for s in samples for c in s.chromatograms
+        ]
+        signal_lists: list[list[float]] = [
+            c.signal for s in samples for c in s.chromatograms
+        ]
+        trace_sample_ids: list[str] = [s.id for s in samples for c in s.chromatograms]
+        trace_chrom_ids: list[str] = [c.id for s in samples for c in s.chromatograms]
+
+        time_arr, signal_arr = stack_and_pad_signal(time_lists, signal_lists)
+
+        return cls(
+            np.asarray(time_arr, dtype=float),
+            np.asarray(signal_arr, dtype=float),
+            peaks=None,
+            baselines=None,
+            trace_sample_ids=trace_sample_ids,
+            trace_chromatogram_ids=trace_chrom_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # Annotation management
+    # ------------------------------------------------------------------
+
+    def add_peak_annotation(
+        self,
+        ann: PeakAnnotation,
+        subset_id: str | None = None,
+    ) -> None:
+        """Register a peak-window annotation.
+
+        Args:
+            ann: The :class:`~chromhandler.annotations.PeakAnnotation` to add.
+            subset_id: Name of the target subset.  When ``None`` and no explicit
+                subsets have been registered, a ``"__default__"`` subset covering
+                all traces is auto-created.  When ``None`` and explicit subsets
+                exist, a :exc:`ValueError` is raised asking the caller to specify
+                *subset_id*.  When the named subset does not exist, a
+                :exc:`KeyError` is raised.
+
+        Examples::
+
+            # Case 1 — single group (auto-creates __default__ subset):
+            fitter.add_peak_annotation(
+                PeakAnnotation(molecule_id="s0", rt_min=2.8, rt_max=3.2, mode="single")
+            )
+
+            # Case 2 — add to an existing named subset:
+            fitter.add_peak_annotation(ann, subset_id="col_A")
+        """
+        if subset_id is None:
+            # Check for forbidden mixing of default + explicit subsets
+            if self._subsets and _DEFAULT_SUBSET_NAME not in self._subsets:
+                raise ValueError(
+                    "Explicit subsets are already registered. "
+                    "Specify subset_id='<name>' or use subset.add_peak_annotation()."
+                )
+            if _DEFAULT_SUBSET_NAME not in self._subsets:
+                # Auto-create the default subset (matches all traces)
+                self._subsets[_DEFAULT_SUBSET_NAME] = Subset(
+                    name=_DEFAULT_SUBSET_NAME,
+                    _match_all=True,
+                )
+            self._subsets[_DEFAULT_SUBSET_NAME].add_peak_annotation(ann)
+        else:
+            if subset_id not in self._subsets:
+                raise KeyError(
+                    f"No subset named '{subset_id}'. "
+                    f"Call add_subset('{subset_id}', ...) first."
+                )
+            self._subsets[subset_id].add_peak_annotation(ann)
+
+    def add_baseline_annotation(
+        self,
+        ann: BaselineAnnotation,
+        subset_id: str | None = None,
+    ) -> None:
+        """Register a baseline-region annotation.
+
+        Args:
+            ann: The :class:`~chromhandler.annotations.BaselineAnnotation` to add.
+            subset_id: When ``None``, the annotation is added to the fitter's
+                global ``baselines`` list (fallback for all subsets that define
+                no subset-specific baselines).  When a name is given the
+                annotation is added to that subset's baseline list, overriding
+                the global fallback for that subset only.
+
+        Examples::
+
+            # Global baseline (applies to all subsets):
+            fitter.add_baseline_annotation(BaselineAnnotation(rt_min=0.5, rt_max=1.0))
+
+            # Subset-specific baseline:
+            fitter.add_baseline_annotation(BaselineAnnotation(rt_min=0.5, rt_max=1.0), subset_id="col_A")
+        """
+        if subset_id is None:
+            self.baselines.append(ann)
+            # Invalidate all baseline-prior caches since global baselines changed
+            self._baseline_priors_cache.clear()
+            if "_bp_direct" in self.__dict__:
+                del self._bp_direct
+        else:
+            if subset_id not in self._subsets:
+                raise KeyError(
+                    f"No subset named '{subset_id}'. "
+                    f"Call add_subset('{subset_id}', ...) first."
+                )
+            self._subsets[subset_id].add_baseline_annotation(ann)
+            # Invalidate cache for this subset
+            self._baseline_priors_cache.pop(subset_id, None)
+
+    # ------------------------------------------------------------------
+    # Subset management
+    # ------------------------------------------------------------------
+
+    def add_subset(
+        self,
+        name: str,
+        *,
+        sample_ids: list[str] | None = None,
+        chromatogram_ids: list[str] | None = None,
+    ) -> Subset:
+        """Register a named fitting subset and return its builder object.
+
+        After calling :meth:`add_subset`, attach peak/baseline annotations to
+        the returned :class:`~chromhandler.fitting.subsets.Subset` object (or
+        via :meth:`add_peak_annotation` with ``subset_id=name``).
+
+        Args:
+            name: Unique subset label.
+            sample_ids: Include all chromatograms whose *sample_id* appears here.
+            chromatogram_ids: Include specific chromatograms by ID.
+
+        Returns:
+            The newly created :class:`~chromhandler.fitting.subsets.Subset` builder.
+
+        Raises:
+            RuntimeError: If trace ID arrays are not available (build with
+                :meth:`from_handler`).
+            ValueError: If the ``"__default__"`` auto-subset already exists
+                (mixing case 1 and case 2), or if *name* is already registered,
+                or if neither *sample_ids* nor *chromatogram_ids* is provided.
+
+        Example::
+
+            s = fitter.add_subset("col_A", sample_ids=["run1", "run2"])
+            s.add_peak_annotation(PeakAnnotation(molecule_id="NAD", rt_min=2.8, rt_max=3.2, mode="single"))
+        """
+        if self.trace_sample_ids is None or self.trace_chromatogram_ids is None:
+            raise RuntimeError(
+                "add_subset() requires trace_sample_ids and trace_chromatogram_ids. "
+                "Build the fitter with BetterFitter.from_handler()."
+            )
+        if _DEFAULT_SUBSET_NAME in self._subsets:
+            raise ValueError(
+                f"A '{_DEFAULT_SUBSET_NAME}' subset already exists (created by "
+                "add_peak_annotation() without subset_id). "
+                "Cannot mix the default subset with explicit subsets."
+            )
+        if name in self._subsets:
+            raise ValueError(f"A subset named '{name}' is already registered.")
+        if not sample_ids and not chromatogram_ids:
+            raise ValueError(
+                f"add_subset('{name}'): at least one of sample_ids or "
+                "chromatogram_ids must be provided."
+            )
+
+        subset = Subset(
+            name=name,
+            sample_ids=list(sample_ids) if sample_ids else [],
+            chromatogram_ids=list(chromatogram_ids) if chromatogram_ids else [],
+        )
+
+        # Validate that at least one trace matches
+        mask = self._compute_subset_mask(subset)
+        if not np.any(mask):
+            raise ValueError(
+                f"Subset '{name}' matched no traces. "
+                "Check sample_ids and chromatogram_ids."
+            )
+
+        # Lazy-init trace_subsets array
+        if self.trace_subsets is None:
+            self.trace_subsets = np.full(self.n_traces, "", dtype=object)
+        self.trace_subsets[mask] = name
+        self._subsets[name] = subset
+        return subset
+
+    def get_subset(self, name: str) -> Subset:
+        """Return the :class:`~chromhandler.fitting.subsets.Subset` builder for *name*.
+
+        Args:
+            name: Subset name as registered via :meth:`add_subset` or
+                ``"__default__"`` for the auto-created default subset.
+
+        Raises:
+            KeyError: If no subset with *name* is registered.
+        """
+        if name not in self._subsets:
+            raise KeyError(
+                f"No subset named '{name}'. "
+                f"Registered subsets: {list(self._subsets)}."
+            )
+        return self._subsets[name]
+
+    def _make_subset_view(self, name: str) -> BetterFitter:
+        """Build a transient BetterFitter restricted to *name*'s traces and peaks.
+
+        The returned view has no subsets registered (``_subsets`` is empty) so
+        all methods fall through to the direct / view-mode path.  The view is
+        intended for use by :meth:`_run_mcmc` only and should not be stored.
+        """
+        subset = self._subsets[name]
+        mask = self._compute_subset_mask(subset)
+        effective_baselines = subset.baselines if subset.baselines else self.baselines
+
+        view = BetterFitter(
+            self.time[mask],
+            self.signal[mask],
+            peaks=None,  # do NOT auto-create subset — set self.peaks directly below
+            baselines=effective_baselines,
+            trace_sample_ids=(
+                list(self.trace_sample_ids[mask])  # type: ignore[index]
+                if self.trace_sample_ids is not None
+                else None
+            ),
+            trace_chromatogram_ids=(
+                list(self.trace_chromatogram_ids[mask])  # type: ignore[index]
+                if self.trace_chromatogram_ids is not None
+                else None
+            ),
+        )
+        # Directly assign peaks — bypass add_peak_annotation to avoid subset creation
+        view.peaks = list(subset.peaks)
+        view.trace_subsets = np.full(int(mask.sum()), name, dtype=object)
+
+        # Propagate alignment shifts
+        if self.shift_samples is not None:
+            view.shift_samples = self.shift_samples[mask]
+        if self.shift_time is not None:
+            view.shift_time = self.shift_time[mask]
+
+        return view
 
     # ------------------------------------------------------------------
     # Chromatogram alignment
@@ -270,9 +840,10 @@ class BetterFitter:
         """Align traces in-place by optimising per-trace retention-time shifts.
 
         Builds an alignment mask from all annotated peak windows and baseline
-        regions, then runs multi-start Adam optimisation on the MSE alignment
-        loss.  After alignment ``self.time`` is updated in-place; all cached
-        quantities (baseline priors) are invalidated automatically.
+        regions (aggregated across all registered subsets), then runs
+        multi-start Adam optimisation on the MSE alignment loss.  After
+        alignment ``self.time`` is updated in-place; all cached quantities
+        (baseline priors, shape features) are invalidated automatically.
 
         Parameters
         ----------
@@ -287,9 +858,7 @@ class BetterFitter:
         enforce_zero_mean : bool
             Re-centre shifts after every step (default True).
         n_starts : int
-            Number of independent Adam restarts (default 16).  Start 0 uses
-            the coarse-correlation estimate; starts 1+ are perturbed copies.
-            Use 1 for a faster single-start run.
+            Number of independent Adam restarts (default 16).
         sigma_perturb : float
             Std-dev (samples) of perturbation noise for starts 1+ (default 3.0).
         seed : int
@@ -299,7 +868,6 @@ class BetterFitter:
         """
         from .shift import align_chromatograms
 
-        # Build 2-D alignment mask [n_trace, n_time] from peak windows + baselines
         obs_mask_1d = self.create_observation_mask()  # [n_time]
         alignment_mask = np.tile(obs_mask_1d, (self.n_traces, 1))  # [n_trace, n_time]
 
@@ -319,16 +887,19 @@ class BetterFitter:
         self.shift_result = result
         self.shift_samples = np.asarray(result.shifts_samples, dtype=float)
 
-        # Convert sample shifts → time units via per-trace median dt  [n_trace]
         dt_per_trace = np.nanmedian(np.abs(np.diff(self.time, axis=1)), axis=1)
         self.shift_time = self.shift_samples * dt_per_trace
 
-        # Apply in-place — all downstream methods automatically see aligned time
         self.time = self.time + self.shift_time[:, None]
 
-        # Invalidate cached baseline priors
-        if hasattr(self, "_baseline_priors"):
-            del self._baseline_priors
+        # Invalidate all cached baseline priors and shape features
+        self._baseline_priors_cache.clear()
+        self._shape_features_cache.clear()
+        if "_bp_direct" in self.__dict__:
+            del self._bp_direct
+        # Invalidate cached_property shape_features if it was computed
+        if "shape_features" in self.__dict__:
+            del self.__dict__["shape_features"]
 
         if verbose:
             self._print_alignment_result(result)
@@ -346,7 +917,7 @@ class BetterFitter:
             )
 
     def peak_structure(self) -> dict[str, np.ndarray]:
-        """Extract mode-specific peak structure arrays from annotations."""
+        """Extract mode-specific peak structure arrays from ``self.peaks``."""
         n_peak = len(self.peaks)
         peak_mode_code = np.zeros(n_peak, dtype=np.int32)
         artefact_side = np.zeros(n_peak, dtype=np.int32)
@@ -360,7 +931,7 @@ class BetterFitter:
                 nonfree_indices.append(i)
             if peak_is_artefact_mode(peak.mode):
                 artefact_indices.append(i)
-                artefact_side[i] = -1 if peak.shoulder == "left" else 1
+                artefact_side[i] = -1 if peak.artefact_side == "left" else 1
             elif peak_is_free_mode(peak.mode):
                 free_indices.append(i)
 
@@ -375,19 +946,17 @@ class BetterFitter:
     def compute_model_inputs(self) -> dict[str, np.ndarray]:
         """Assemble all model inputs from data, priors, and baseline.
 
-        Combines priors, peak structure, baseline estimates, and noise priors
-        into a single dict suitable for ``better_model.model()``.
+        Intended to be called on views (no subsets) by :meth:`_run_mcmc`.
 
         Returns
         -------
         dict[str, np.ndarray]
-            Keys: all parameters expected by ``model()``, values as numpy arrays.
+            Keys: all parameters expected by ``better_model.model()``.
         """
-        # Priors
-        priors = self.compute_priors()
+        priors, trace_shift_scale = self._compute_position_priors()
         prior_arrays = geometric_priors_to_arrays(priors)
+        prior_arrays["trace_shift_scale"] = np.asarray(trace_shift_scale, dtype=np.float32)
 
-        # Transpose per-trace area priors: [n_peak, n_trace] → [n_trace, n_peak]
         prior_arrays["dominant_area_loc_per_trace"] = self._stabilize_area_prior_matrix(
             prior_arrays["dominant_area_loc_per_trace"].T
         )
@@ -395,10 +964,8 @@ class BetterFitter:
             prior_arrays["area_total_loc_per_trace"].T
         )
 
-        # Peak structure
         peak_structure = self.peak_structure()
 
-        # Baseline
         baseline_bp = self.baseline_priors()
         baseline_arrays = {
             "baseline_intercept_loc": np.asarray(baseline_bp.intercept, dtype=float),
@@ -409,12 +976,10 @@ class BetterFitter:
             "baseline_slope_scale": np.asarray(baseline_bp.slope_scale, dtype=float),
         }
 
-        # Noise
         noise_arrays = {
             "sigma_y_prior_loc": self.noise_prior(),
         }
 
-        # Assemble
         return {
             **prior_arrays,
             **peak_structure,
@@ -422,21 +987,20 @@ class BetterFitter:
             **noise_arrays,
         }
 
-    def print_priors(self) -> None:
-        """Compute and print all prior summaries to stdout."""
+    def print_priors(self, subset: str | None = None) -> None:
+        """Compute and print all prior summaries for *subset* to stdout."""
         print("[Baseline Priors]")
-        self._print_baseline_priors()
+        self._print_baseline_priors(subset=subset)
         print()
         print("[Noise Prior]")
-        self._print_noise_prior()
+        self._print_noise_prior(subset=subset)
         print()
         print("[Peak Geometry Priors]")
-        priors = self.compute_priors()
+        priors = self.compute_priors(subset=subset)
         print(summarise_priors(priors))
 
-    def _print_baseline_priors(self) -> None:
-        """Print per-trace baseline priors."""
-        bp = self.baseline_priors()
+    def _print_baseline_priors(self, subset: str | None = None) -> None:
+        bp = self.baseline_priors(subset=subset)
         intercept = np.asarray(bp.intercept, dtype=float)
         slope = np.asarray(bp.slope, dtype=float)
         intercept_scale = np.asarray(bp.intercept_scale, dtype=float)
@@ -446,34 +1010,66 @@ class BetterFitter:
             f"{'Trace':>5}  {'Intercept':>12}  {'Int Scale':>10}  {'Slope':>12}  {'Slope Scale':>12}"
         )
         print("-" * 60)
-        for t in range(self.n_traces):
+        for t in range(len(intercept)):
             print(
                 f"{t:>5}  {intercept[t]:>12.4e}  {intercept_scale[t]:>10.3e}  "
                 f"{slope[t]:>12.5e}  {slope_scale[t]:>12.5e}"
             )
 
-    def _print_noise_prior(self) -> None:
-        """Print per-trace noise prior."""
-        sigma_y = self.noise_prior()
+    def _print_noise_prior(self, subset: str | None = None) -> None:
+        sigma_y = self.noise_prior(subset=subset)
         print(f"{'Trace':>5}  {'Noise σ_y':>12}")
         print("-" * 20)
-        for t in range(self.n_traces):
+        for t in range(len(sigma_y)):
             print(f"{t:>5}  {sigma_y[t]:>12.3f}")
 
     def plot_sigma_alpha_prior_diagnostics(
         self,
         *,
+        subset: str | None = None,
         figsize: tuple[float, float] | None = None,
         cmap: str = "viridis",
+        colorize_by: Literal[None, "sample_id", "subset"] = None,
     ) -> tuple[object, np.ndarray]:
-        """Plot per-trace FWHM-derived sigma-vs-alpha scatter for each peak."""
+        """Plot per-trace FWHM-derived sigma-vs-alpha scatter for each peak.
+
+        Args:
+            subset: Subset name to plot.  Resolved automatically when only one
+                subset is registered.
+            figsize: Figure size (width, height).
+            cmap: Colormap for prior density background.
+            colorize_by: How to color scatter points.
+        """
         from .better_visualize import plot_sigma_alpha_scatter
 
-        diagnostics = self.compute_fwhm_shape_diagnostics()
-        priors = self.compute_priors()
+        diagnostics = self.compute_fwhm_shape_diagnostics(subset=subset)
+        priors = self.compute_priors(subset=subset)
+
+        # Get effective peaks for the resolved subset
+        if self._subsets:
+            s = self._resolve_subset(subset)
+            effective_peaks = s.peaks
+            mask = self._compute_subset_mask(s)
+            sample_ids_arr = (
+                self.trace_sample_ids[mask] if self.trace_sample_ids is not None else None
+            )
+            subset_arr = (
+                self.trace_subsets[mask] if self.trace_subsets is not None else None
+            )
+        else:
+            effective_peaks = self.peaks
+            sample_ids_arr = self.trace_sample_ids
+            subset_arr = self.trace_subsets
+
+        sample_ids: list[str] | None = None
+        subset_ids: list[str] | None = None
+        if colorize_by == "sample_id" and sample_ids_arr is not None:
+            sample_ids = list(sample_ids_arr)
+        elif colorize_by == "subset" and subset_arr is not None:
+            subset_ids = [str(s) for s in subset_arr]
 
         fig, axes = plot_sigma_alpha_scatter(
-            self.peaks,
+            effective_peaks,
             diagnostics.sigma_trace,
             diagnostics.alpha_trace,
             diagnostics.fwhm_valid_trace,
@@ -484,49 +1080,543 @@ class BetterFitter:
             alpha_scale=np.asarray([p.alpha_scale for p in priors], dtype=float),
             figsize=figsize,
             cmap=cmap,
+            colorize_by=colorize_by,
+            sample_ids=sample_ids,
+            subset_ids=subset_ids,
+        )
+        return fig, axes
+
+    def plot_trace_rows(
+        self,
+        *,
+        subset: str | None = None,
+        figsize: tuple[float, float] | None = None,
+        t_min: float | None = None,
+        t_max: float | None = None,
+        trace_color: str = "black",
+        trace_linewidth: float = 1.0,
+        peak_alpha: float = 0.14,
+        show_peak_legend: bool = True,
+    ) -> tuple[object, np.ndarray]:
+        """Plot all chromatograms as stacked full-trace rows.
+
+        Args:
+            subset: Subset to plot.  Defaults to the single registered subset.
+        """
+        from .better_visualize import plot_trace_rows
+
+        if self._subsets:
+            s = self._resolve_subset(subset)
+            mask = self._compute_subset_mask(s)
+            time_plot = self.time[mask]
+            signal_plot = self.signal[mask]
+            peaks_plot = s.peaks
+        else:
+            time_plot = self.time
+            signal_plot = self.signal
+            peaks_plot = self.peaks
+
+        fig, axes = plot_trace_rows(
+            time_plot,
+            signal_plot,
+            peaks_plot,
+            figsize=figsize,
+            t_min=t_min,
+            t_max=t_max,
+            trace_color=trace_color,
+            trace_linewidth=trace_linewidth,
+            peak_alpha=peak_alpha,
+            show_peak_legend=show_peak_legend,
         )
         return fig, axes
 
     def plot_prior_traces(
         self,
         *,
+        subset: str | None = None,
         figsize: tuple[float, float] | None = None,
         cmap: str = "viridis",
         show_baseline: bool = True,
-        show_apex_anchor_prior: bool = True,
+        show_apex_prior: bool = True,
         show_gaussian_prior_peak: bool = True,
         show_peak_bounds: bool = True,
     ) -> tuple[object, np.ndarray]:
-        """Plot raw traces with baseline, apex-anchor prior, and Gaussian peak prior."""
+        """Plot raw traces with baseline, apex prior, and Gaussian peak prior.
+
+        Args:
+            subset: Subset to plot.  Defaults to the single registered subset.
+        """
         from .better_visualize import plot_prior_traces
 
-        bp = self.baseline_priors()
-        peak_priors = self.compute_priors()
-        diagnostics = self.compute_fwhm_shape_diagnostics()
+        if self._subsets:
+            s = self._resolve_subset(subset)
+            mask = self._compute_subset_mask(s)
+            time_plot = self.time[mask]
+            signal_plot = self.signal[mask]
+            peaks_plot = s.peaks
+        else:
+            time_plot = self.time
+            signal_plot = self.signal
+            peaks_plot = self.peaks
+
+        bp = self.baseline_priors(subset=subset if self._subsets else None)
+        peak_priors = self.compute_priors(subset=subset if self._subsets else None)
+        diagnostics = self.compute_fwhm_shape_diagnostics(
+            subset=subset if self._subsets else None
+        )
 
         fig, axes = plot_prior_traces(
-            self.time,
-            self.signal,
-            self.peaks,
+            time_plot,
+            signal_plot,
+            peaks_plot,
             np.asarray(bp.intercept, dtype=float),
             np.asarray(bp.slope, dtype=float),
             np.asarray(bp.intercept_scale, dtype=float),
             np.asarray(bp.slope_scale, dtype=float),
-            np.asarray([p.mu_loc for p in peak_priors], dtype=float),
-            np.asarray([p.mu_scale for p in peak_priors], dtype=float),
-            approx_center_trace=diagnostics.approx_center_trace,
+            np.asarray([p.apex_loc for p in peak_priors], dtype=float),
+            np.asarray([p.apex_scale for p in peak_priors], dtype=float),
+            approx_apex_trace=diagnostics.approx_apex_trace,
             approx_height_trace=diagnostics.approx_height_trace,
             approx_sigma_trace=diagnostics.approx_sigma_trace,
             approx_valid_trace=diagnostics.approx_valid_trace,
             approx_fallback_trace=diagnostics.approx_fallback_trace,
             show_baseline=show_baseline,
-            show_apex_anchor_prior=show_apex_anchor_prior,
+            show_apex_prior=show_apex_prior,
             show_gaussian_prior_peak=show_gaussian_prior_peak,
             show_peak_bounds=show_peak_bounds,
             figsize=figsize,
             cmap=cmap,
         )
         return fig, axes
+
+    # ------------------------------------------------------------------
+    # Trace selection and posterior evaluation helpers
+    # ------------------------------------------------------------------
+
+    def select_trace_indices(
+        self,
+        *,
+        sample_ids: list[str] | None = None,
+        chromatogram_ids: list[str] | None = None,
+        subset_id: str | None = None,
+    ) -> np.ndarray:
+        """Return integer indices of traces matching all supplied filters.
+
+        Filters are applied as an intersection (AND).  When no filter is given
+        every trace index is returned.
+
+        Args:
+            sample_ids: Keep only traces whose ``trace_sample_ids`` value is
+                in this list.  Requires the fitter to have been built with
+                :meth:`from_handler`.
+            chromatogram_ids: Keep only traces whose
+                ``trace_chromatogram_ids`` value is in this list.
+            subset_id: Keep only traces belonging to the named subset.
+
+        Returns:
+            ``np.ndarray`` of shape ``[n_selected]``, dtype ``int``.
+        """
+        indices = np.arange(self.n_traces)
+
+        if subset_id is not None:
+            s = self._resolve_subset(subset_id)
+            mask = self._compute_subset_mask(s)
+            indices = np.intersect1d(indices, np.where(mask)[0])
+
+        if sample_ids is not None:
+            if self.trace_sample_ids is None:
+                raise RuntimeError(
+                    "sample_ids filter requires trace_sample_ids. "
+                    "Build the fitter with BetterFitter.from_handler()."
+                )
+            keep = np.where(np.isin(self.trace_sample_ids, sample_ids))[0]
+            indices = np.intersect1d(indices, keep)
+
+        if chromatogram_ids is not None:
+            if self.trace_chromatogram_ids is None:
+                raise RuntimeError(
+                    "chromatogram_ids filter requires trace_chromatogram_ids. "
+                    "Build the fitter with BetterFitter.from_handler()."
+                )
+            keep = np.where(np.isin(self.trace_chromatogram_ids, chromatogram_ids))[0]
+            indices = np.intersect1d(indices, keep)
+
+        return indices
+
+    def window_mask(self, rt_min: float, rt_max: float) -> np.ndarray:
+        """Boolean mask on :meth:`common_time` for ``[rt_min, rt_max]``.
+
+        Args:
+            rt_min: Window left edge (minutes).
+            rt_max: Window right edge (minutes).
+
+        Returns:
+            1-D ``bool`` array of shape ``[n_time]``.
+        """
+        t = self.common_time()
+        return (t >= float(rt_min)) & (t <= float(rt_max))
+
+    def posterior_curves(
+        self,
+        x: np.ndarray,
+        *,
+        subset: str | None = None,
+        hdi_prob: float = 0.95,
+        trace_indices: np.ndarray | None = None,
+        n_samples_max: int = 2000,
+    ) -> "PosteriorCurves":
+        """Evaluate posterior HDI curves on an arbitrary time grid.
+
+        Re-evaluates the skew-normal components at every point in *x* using
+        the stored posterior samples; no interpolation.
+
+        Args:
+            x: Evaluation axis, shape ``[n_x]`` (minutes).
+            subset: Subset name.  Resolved automatically when only one subset
+                is fitted.
+            hdi_prob: Credible-interval probability (default 0.95).
+            trace_indices: Global trace indices (into the full fitter array) to
+                include.  ``None`` = all traces in the subset.
+            n_samples_max: Maximum number of posterior draws to use (capped for
+                memory).  Default 2000.
+
+        Returns:
+            :class:`PosteriorCurves` with pre-computed median / lower / upper
+            for total signal, baseline, and per-component curves.
+
+        Raises:
+            RuntimeError: If :meth:`fit` has not been called.
+            KeyError: If the requested subset has no fitted posterior.
+        """
+        from scipy.special import ndtr as _ndtr
+
+        if not self._posteriors:
+            raise RuntimeError(
+                "posterior_curves() requires a fitted posterior. Call fit() first."
+            )
+
+        # Resolve subset name
+        if subset is not None:
+            subset_name = subset
+        elif len(self._posteriors) == 1:
+            subset_name = next(iter(self._posteriors))
+        else:
+            raise ValueError(
+                f"Multiple fitted subsets: {list(self._posteriors)}. "
+                "Specify subset=<name>."
+            )
+        if subset_name not in self._posteriors:
+            raise KeyError(
+                f"No fitted posterior for subset '{subset_name}'. "
+                f"Fitted subsets: {list(self._posteriors)}."
+            )
+
+        post = self._posteriors[subset_name]
+        subset_obj = self._subsets[subset_name]
+        subset_mask = self._compute_subset_mask(subset_obj)
+        all_subset_idx = np.where(subset_mask)[0]  # global indices
+        n_subset = len(all_subset_idx)
+
+        # Map requested trace_indices to local (within-subset posterior) positions
+        if trace_indices is None:
+            local_idx = np.arange(n_subset)
+            global_idx = all_subset_idx
+        else:
+            local_list, global_list = [], []
+            for gi in np.asarray(trace_indices, dtype=int):
+                pos = np.where(all_subset_idx == gi)[0]
+                if len(pos) > 0:
+                    local_list.append(int(pos[0]))
+                    global_list.append(int(gi))
+            local_idx = np.array(local_list, dtype=int)
+            global_idx = np.array(global_list, dtype=int)
+
+        n_selected = len(local_idx)
+        if n_selected == 0:
+            raise ValueError(
+                "posterior_curves(): no traces matched the given trace_indices "
+                f"within subset '{subset_name}'."
+            )
+
+        # Extract 4-D posterior arrays [n_chain, n_draw, n_trace, n_peak]
+        pvar = post.posterior
+        xi_l_raw = np.asarray(pvar["xi_l"].values)
+        xi_r_raw = np.asarray(pvar["xi_r"].values)
+        sigma_l_raw = np.asarray(pvar["sigma_l"].values)
+        sigma_r_raw = np.asarray(pvar["sigma_r"].values)
+        alpha_l_raw = np.asarray(pvar["alpha_l"].values)
+        alpha_r_raw = np.asarray(pvar["alpha_r"].values)
+        area_l_raw = np.asarray(pvar["area_l"].values)
+        area_r_raw = np.asarray(pvar["area_r"].values)
+        bl_int_raw = np.asarray(pvar["baseline_intercept"].values)  # [n_chain,n_draw,n_trace]
+        bl_slp_raw = np.asarray(pvar["baseline_slope"].values)
+
+        n_chain, n_draw = xi_l_raw.shape[:2]
+        n_total = n_chain * n_draw
+
+        def _flatten(arr: np.ndarray) -> np.ndarray:
+            return arr.reshape(n_total, *arr.shape[2:])
+
+        def _select(arr: np.ndarray) -> np.ndarray:
+            """Flatten chains then select traces."""
+            return _flatten(arr)[:, local_idx]
+
+        xi_l = _select(xi_l_raw)       # [n_total, n_sel, n_peak]
+        xi_r = _select(xi_r_raw)
+        sigma_l = _select(sigma_l_raw)
+        sigma_r = _select(sigma_r_raw)
+        alpha_l = _select(alpha_l_raw)
+        alpha_r = _select(alpha_r_raw)
+        area_l = _select(area_l_raw)
+        area_r = _select(area_r_raw)
+        bl_int = _flatten(bl_int_raw)[:, local_idx]  # [n_total, n_sel]
+        bl_slp = _flatten(bl_slp_raw)[:, local_idx]
+
+        # Subsample draws
+        if n_total > n_samples_max:
+            rng = np.random.default_rng(0)
+            idx = rng.choice(n_total, size=n_samples_max, replace=False)
+            xi_l, xi_r = xi_l[idx], xi_r[idx]
+            sigma_l, sigma_r = sigma_l[idx], sigma_r[idx]
+            alpha_l, alpha_r = alpha_l[idx], alpha_r[idx]
+            area_l, area_r = area_l[idx], area_r[idx]
+            bl_int, bl_slp = bl_int[idx], bl_slp[idx]
+            n_samp = n_samples_max
+        else:
+            n_samp = n_total
+
+        x_eval = np.asarray(x, dtype=float)  # [n_x]
+        n_x = len(x_eval)
+        n_peak = xi_l.shape[2]
+
+        # Merge sample × trace dims for vectorized PDF evaluation
+        n_flat = n_samp * n_selected
+
+        def _merge(arr: np.ndarray) -> np.ndarray:
+            return arr.reshape(n_flat, n_peak)
+
+        xi_l_f = _merge(xi_l)
+        xi_r_f = _merge(xi_r)
+        sigma_l_f = _merge(sigma_l)
+        sigma_r_f = _merge(sigma_r)
+        alpha_l_f = _merge(alpha_l)
+        alpha_r_f = _merge(alpha_r)
+        area_l_f = _merge(area_l)
+        area_r_f = _merge(area_r)
+
+        # Broadcast x: [n_flat, n_x]
+        x_flat = np.broadcast_to(x_eval[None, :], (n_flat, n_x)).copy()
+
+        def _skew_normal_pdf(
+            x_2d: np.ndarray,       # [n, n_x]
+            xi: np.ndarray,         # [n, n_comp]
+            sigma: np.ndarray,      # [n, n_comp]
+            alpha: np.ndarray,      # [n, n_comp]
+        ) -> np.ndarray:            # [n, n_comp, n_x]
+            sig = np.maximum(sigma[:, :, None], 1e-6)
+            z = (x_2d[:, None, :] - xi[:, :, None]) / sig
+            log_pdf = (
+                np.log(2.0)
+                - np.log(sig)
+                - 0.5 * z ** 2
+                - 0.5 * np.log(2.0 * np.pi)
+                + np.log(np.clip(_ndtr(alpha[:, :, None] * z), 1e-300, None))
+            )
+            return np.exp(log_pdf)
+
+        pdf_l = _skew_normal_pdf(x_flat, xi_l_f, sigma_l_f, alpha_l_f)   # [n_flat, n_peak, n_x]
+        pdf_r = _skew_normal_pdf(x_flat, xi_r_f, sigma_r_f, alpha_r_f)
+
+        comp_l_f = area_l_f[:, :, None] * pdf_l   # [n_flat, n_peak, n_x]
+        comp_r_f = area_r_f[:, :, None] * pdf_r
+
+        # Reshape back to [n_samp, n_sel, n_peak, n_x]
+        comp_l = comp_l_f.reshape(n_samp, n_selected, n_peak, n_x)
+        comp_r = comp_r_f.reshape(n_samp, n_selected, n_peak, n_x)
+
+        # Baseline: [n_samp, n_sel, n_x]
+        baseline_samps = bl_int[:, :, None] + bl_slp[:, :, None] * x_eval[None, None, :]
+
+        # Total: [n_samp, n_sel, n_x]
+        total_samps = comp_l.sum(axis=2) + comp_r.sum(axis=2) + baseline_samps
+
+        # HDI percentiles
+        lo_pct = 100.0 * (1.0 - hdi_prob) / 2.0
+        hi_pct = 100.0 - lo_pct
+
+        def _pct(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            return (
+                np.percentile(arr, 50, axis=0),
+                np.percentile(arr, lo_pct, axis=0),
+                np.percentile(arr, hi_pct, axis=0),
+            )
+
+        t_med, t_lo, t_hi = _pct(total_samps)          # each [n_sel, n_x]
+        bl_med, bl_lo, bl_hi = _pct(baseline_samps)
+        cl_med, cl_lo, cl_hi = _pct(comp_l)             # each [n_sel, n_peak, n_x]
+        cr_med, cr_lo, cr_hi = _pct(comp_r)
+
+        chrom_ids: list[str] | None = (
+            list(self.trace_chromatogram_ids[global_idx])
+            if self.trace_chromatogram_ids is not None
+            else None
+        )
+
+        return PosteriorCurves(
+            x=x_eval,
+            total_median=t_med,
+            total_lower=t_lo,
+            total_upper=t_hi,
+            baseline_median=bl_med,
+            baseline_lower=bl_lo,
+            baseline_upper=bl_hi,
+            comp_l_median=cl_med,
+            comp_l_lower=cl_lo,
+            comp_l_upper=cl_hi,
+            comp_r_median=cr_med,
+            comp_r_lower=cr_lo,
+            comp_r_upper=cr_hi,
+            trace_indices=global_idx,
+            chromatogram_ids=chrom_ids,
+        )
+
+    def plot_fit(
+        self,
+        *,
+        subset: str | None = None,
+        sample_ids: list[str] | None = None,
+        chromatogram_ids: list[str] | None = None,
+        hdi_prob: float = 0.95,
+        n_samples_max: int = 2000,
+        figsize: tuple[float, float] | None = None,
+    ) -> tuple[object, np.ndarray]:
+        """Plot raw data and posterior fit for *subset*.
+
+        Raw scatter is shown for every **display trace** (determined by
+        *sample_ids* / *chromatogram_ids*, or all traces in the subset when
+        neither is specified).  Posterior curves are overlaid only on traces
+        that belong to the fitted subset.
+
+        Args:
+            subset: Subset to display/plot posterior for.  Resolved
+                automatically when only one subset is registered.
+            sample_ids: Restrict display to traces with these sample IDs.
+            chromatogram_ids: Restrict display to traces with these
+                chromatogram IDs.
+            hdi_prob: Credible-interval probability passed to
+                :meth:`posterior_curves` (default 0.95).
+            n_samples_max: Max posterior draws used for HDI evaluation.
+            figsize: Figure size; auto-scaled when ``None``.
+
+        Returns:
+            ``(fig, axes)`` — the matplotlib Figure and ``[n_display, n_col]``
+            axes array.
+
+        Raises:
+            RuntimeError: If no subsets are registered.
+        """
+        from .better_visualize import plot_fit as _bv_plot_fit
+
+        if not self._subsets:
+            raise RuntimeError(
+                "plot_fit() requires at least one subset with peak annotations. "
+                "Call add_peak_annotation() or add_subset() first."
+            )
+
+        # Resolve subset name
+        if subset is not None:
+            subset_name = subset
+        elif len(self._subsets) == 1:
+            subset_name = next(iter(self._subsets))
+        else:
+            raise ValueError(
+                f"Multiple subsets: {list(self._subsets)}. Specify subset=<name>."
+            )
+
+        subset_obj = self._subsets[subset_name]
+        subset_mask = self._compute_subset_mask(subset_obj)
+        all_subset_idx = np.where(subset_mask)[0]  # global indices
+
+        # Determine display traces
+        if sample_ids is not None or chromatogram_ids is not None:
+            display_idx = self.select_trace_indices(
+                sample_ids=sample_ids,
+                chromatogram_ids=chromatogram_ids,
+            )
+        else:
+            display_idx = all_subset_idx
+
+        # Traces that are BOTH displayed and fitted
+        fitted_display_idx = np.intersect1d(display_idx, all_subset_idx)
+
+        # Build evaluation range from peak windows + baseline annotations
+        peaks = subset_obj.peaks
+        eff_baselines = subset_obj.baselines if subset_obj.baselines else self.baselines
+        rt_bounds: list[float] = []
+        for p in peaks:
+            rt_bounds += [float(p.rt_min), float(p.rt_max)]
+        for bl in eff_baselines:
+            rt_bounds += [float(bl.rt_min), float(bl.rt_max)]
+        if rt_bounds:
+            rt_lo, rt_hi = min(rt_bounds), max(rt_bounds)
+        else:
+            common_t = self.common_time()
+            rt_lo, rt_hi = float(common_t[0]), float(common_t[-1])
+
+        x_eval = np.linspace(rt_lo, rt_hi, 300)
+
+        # Compute posterior curves if the subset has been fitted
+        curves: PosteriorCurves | None = None
+        if subset_name in self._posteriors and len(fitted_display_idx) > 0:
+            curves = self.posterior_curves(
+                x_eval,
+                subset=subset_name,
+                hdi_prob=hdi_prob,
+                trace_indices=fitted_display_idx,
+                n_samples_max=n_samples_max,
+            )
+
+        # Rows in display_idx that have posterior curves
+        if curves is not None:
+            fitted_rows = np.where(np.isin(display_idx, fitted_display_idx))[0]
+        else:
+            fitted_rows = np.array([], dtype=int)
+
+        time_display = self.time[display_idx]
+        signal_display = self.signal[display_idx]
+        chrom_ids_display: list[str] | None = (
+            list(self.trace_chromatogram_ids[display_idx])
+            if self.trace_chromatogram_ids is not None
+            else None
+        )
+
+        return _bv_plot_fit(
+            time_display,
+            signal_display,
+            peaks,
+            curves,
+            fitted_rows=fitted_rows,
+            baselines=eff_baselines if eff_baselines else None,
+            chromatogram_ids=chrom_ids_display,
+            hdi_prob=hdi_prob,
+            figsize=figsize,
+        )
+
+    # ------------------------------------------------------------------
+    # Posteriors property
+    # ------------------------------------------------------------------
+
+    @property
+    def posteriors(self) -> dict[str, object]:
+        """Fitted posteriors keyed by subset name.
+
+        Returns an empty dict before :meth:`fit` is called, and a dict mapping
+        subset names to ArviZ ``InferenceData`` objects after fitting.
+
+        Use ``fitter.posteriors["__default__"]`` for single-group fits, or
+        ``fitter.posteriors["subset_name"]`` for multi-subset fits.
+        """
+        return dict(self._posteriors)
 
     # ------------------------------------------------------------------
     # MCMC Inference
@@ -540,8 +1630,12 @@ class BetterFitter:
         seed: int = 0,
         progress_bar: bool = True,
         save_summary: str | None = None,
+        subsets: list[str] | None = None,
     ) -> None:
         """Run MCMC inference on the Bayesian peak model using NUTS sampler.
+
+        Each registered subset is fitted as an independent MCMC run.  Results
+        are stored in :attr:`posteriors` keyed by subset name.
 
         Parameters
         ----------
@@ -552,31 +1646,104 @@ class BetterFitter:
         num_chains : int
             Number of independent MCMC chains (default 1).
         seed : int
-            Random seed for reproducibility (default 0).
+            Random seed for reproducibility (default 0).  Incremented by one
+            for each successive subset to ensure independent randomness.
         progress_bar : bool
             Whether to show progress bar during sampling (default True).
         save_summary : str or None
-            If provided, save ArviZ summary to this file path. If None, only print to stdout.
+            If provided, save ArviZ summary to this file path (or path prefix
+            when fitting multiple subsets — the subset name is appended before
+            the file extension).
+        subsets : list[str] or None
+            When not ``None``, fit only the named subsets.  All registered
+            subsets are fitted when ``None`` (default).
         """
-        # Assemble model inputs (data + priors)
+        if not self._subsets:
+            raise RuntimeError(
+                "fit() requires at least one peak annotation. "
+                "Call add_peak_annotation() or add_subset() + subset.add_peak_annotation() first."
+            )
+
+        # Determine which subsets to fit
+        if subsets is not None:
+            unknown = [n for n in subsets if n not in self._subsets]
+            if unknown:
+                raise ValueError(
+                    f"Unknown subset(s): {unknown}. "
+                    f"Registered subsets: {list(self._subsets)}."
+                )
+            active = {n: self._subsets[n] for n in subsets}
+        else:
+            active = dict(self._subsets)
+
+        # Validate: each active subset must have peaks
+        for name, subset in active.items():
+            if not subset.peaks:
+                raise RuntimeError(
+                    f"Subset '{name}' has no peak annotations. "
+                    "Call subset.add_peak_annotation() before fit()."
+                )
+
+        for i, (name, _subset) in enumerate(active.items()):
+            if len(active) > 1:
+                print(f"\n{'=' * 80}")
+                print(f"Fitting subset '{name}' ({i + 1}/{len(active)})")
+                print(f"{'=' * 80}")
+
+            view = self._make_subset_view(name)
+
+            subset_summary: str | None = None
+            if save_summary is not None:
+                import os
+
+                base, ext = os.path.splitext(save_summary)
+                subset_summary = f"{base}_{name}{ext}" if len(active) > 1 else save_summary
+
+            view._run_mcmc(
+                num_samples=num_samples,
+                num_warmup=num_warmup,
+                num_chains=num_chains,
+                seed=seed + i,
+                progress_bar=progress_bar,
+                save_summary=subset_summary,
+            )
+
+            # Transfer results from the transient view to parent storage
+            self._posteriors[name] = view.posterior  # type: ignore[attr-defined]
+            self._samples_dict[name] = view.samples  # type: ignore[arg-type]
+            self._subset_trace_ids[name] = (
+                view.trace_chromatogram_ids
+                if view.trace_chromatogram_ids is not None
+                else np.array([], dtype=object)
+            )
+            if view.x_masked is not None:
+                self._x_masked[name] = np.asarray(view.x_masked)
+            # view is intentionally discarded here
+
+    def _run_mcmc(
+        self,
+        num_samples: int = 1000,
+        num_warmup: int = 500,
+        num_chains: int = 1,
+        seed: int = 0,
+        progress_bar: bool = True,
+        save_summary: str | None = None,
+    ) -> None:
+        """Execute a single MCMC run on this fitter's traces and peaks.
+
+        Intended to be called on views produced by :meth:`_make_subset_view`.
+        Sets ``self.mcmc``, ``self.samples``, and ``self.posterior`` on *self*.
+        """
         model_inputs = self.compute_model_inputs()
 
-        # Use windowed likelihood: restrict to baseline regions + peak windows only
-        # This prevents sigma_y inflation from unrelated noisy baseline data
         x_masked, y_masked = self.slice_to_observed_windows()
 
-        # Store masked time axis for use in posterior plots
         self.x_masked = x_masked
         self.y_masked = y_masked
 
-        # Use the aligned per-trace masked time tensor directly in the model
-        x_for_model = x_masked
-
-        # Add masked data as JAX arrays
-        model_inputs["x"] = jnp.asarray(x_for_model, dtype=jnp.float32)
+        model_inputs["x"] = jnp.asarray(x_masked, dtype=jnp.float32)
         model_inputs["y"] = jnp.asarray(y_masked, dtype=jnp.float32)
 
-        # Convert all priors to JAX arrays for consistency
         for key in model_inputs:
             if isinstance(model_inputs[key], np.ndarray):
                 value = model_inputs[key]
@@ -587,7 +1754,6 @@ class BetterFitter:
                 else:
                     model_inputs[key] = jnp.asarray(value, dtype=jnp.float32)
 
-        # Filter to only keys that the model expects
         model_param_names = {
             "x",
             "y",
@@ -596,8 +1762,9 @@ class BetterFitter:
             "artefact_peak_index",
             "free_peak_index",
             "nonfree_peak_index",
-            "apex_anchor_loc",
-            "apex_anchor_scale",
+            "apex_loc",
+            "apex_scale",
+            "trace_shift_scale",
             "sigma_loc",
             "sigma_scale",
             "alpha_loc",
@@ -615,7 +1782,6 @@ class BetterFitter:
             k: v for k, v in model_inputs.items() if k in model_param_names
         }
 
-        # Create MCMC sampler with NUTS kernel.
         self.mcmc = MCMC(
             NUTS(better_model.model),
             num_warmup=int(num_warmup),
@@ -625,21 +1791,14 @@ class BetterFitter:
             chain_method="parallel" if num_chains > 1 else "sequential",
         )
 
-        # Run inference
-        print("\n" + "=" * 80)
-        print("Running MCMC Inference (NUTS Sampler)")
-        print("=" * 80)
         self.mcmc.run(jax.random.PRNGKey(int(seed)), **model_inputs_filtered)
 
-        # Extract samples
         self.samples = self.mcmc.get_samples()
 
-        # Convert to ArviZ format
         import arviz as az
 
         self.posterior = az.from_numpyro(self.mcmc)
 
-        # Print ArviZ summary (filter to only vars that exist in posterior)
         available_vars = list(self.posterior.posterior.data_vars)
         summary_vars = [
             v for v in better_model.SUMMARY_PARAMETER_NAMES if v in available_vars
@@ -650,11 +1809,315 @@ class BetterFitter:
         print("=" * 80)
         print(summary_df.to_string())
 
-        # Optionally save summary to file
         if save_summary is not None:
             with open(save_summary, "w", encoding="utf-8") as f:
                 f.write(summary_df.to_string())
             print(f"\n✓ Summary saved to: {save_summary}")
+
+    # ------------------------------------------------------------------
+    # Posterior area extraction (view-level helpers)
+    # ------------------------------------------------------------------
+
+    @property
+    def posterior_area_matrix(self) -> np.ndarray:
+        """Median posterior area matrix ``[n_trace, n_peak, 2]``.
+
+        Available on views (after :meth:`_run_mcmc`) and for single-subset
+        parent fitters (after :meth:`fit`).
+
+        Axis ``-1`` holds ``[left_component, right_component]``.
+        """
+        samples = self._get_view_samples()
+        area_l = np.asarray(samples["area_l"])
+        area_r = np.asarray(samples["area_r"])
+        return np.stack(
+            [np.median(area_l, axis=0), np.median(area_r, axis=0)],
+            axis=-1,
+        )
+
+    def molecule_areas(
+        self,
+        *,
+        quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
+    ) -> np.ndarray:
+        """Posterior median molecule-relevant area ``[n_trace, n_peak]``.
+
+        Available on views and single-subset parent fitters.
+        """
+        samples = self._get_view_samples()
+        peaks = self._get_view_peaks()
+        area_l = np.asarray(samples["area_l"])
+        area_r = np.asarray(samples["area_r"])
+        mol_area = np.empty_like(area_l)
+        for p_idx, peak in enumerate(peaks):
+            if peak.mode == "single":
+                mol_area[..., p_idx] = area_l[..., p_idx]
+            elif peak.mode == "free_doublet":
+                mol_area[..., p_idx] = area_l[..., p_idx] + area_r[..., p_idx]
+            else:
+                if peak.artefact_side == "left":
+                    mol_area[..., p_idx] = area_r[..., p_idx]
+                else:
+                    mol_area[..., p_idx] = area_l[..., p_idx]
+        _, q_med, _ = quantiles
+        return np.quantile(mol_area, q_med, axis=0)
+
+    def _get_view_samples(self) -> dict:
+        """Return samples dict — works on views and single-subset parent fitters."""
+        if self.samples is not None:
+            return self.samples
+        if len(self._samples_dict) == 1:
+            return next(iter(self._samples_dict.values()))
+        raise RuntimeError(
+            "posterior_area_matrix / molecule_areas() require a fitted posterior. "
+            "Call fit() first, or use to_peaks() / area_records() for multi-subset fitters."
+        )
+
+    def _get_view_peaks(self) -> list[PeakAnnotation]:
+        """Return peaks — works on views and single-subset parent fitters."""
+        if self.peaks:
+            return self.peaks
+        if len(self._subsets) == 1:
+            return next(iter(self._subsets.values())).peaks
+        raise RuntimeError("Cannot determine peaks for multi-subset fitter.")
+
+    # ------------------------------------------------------------------
+    # Static extraction helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _peaks_from_samples(
+        peaks: list[PeakAnnotation],
+        samples: dict,
+        trace_chromatogram_ids: np.ndarray,
+        quantiles: tuple[float, float, float],
+        n_samples: int | None,
+    ) -> list:
+        """Convert posterior *samples* into Peak objects for the given *peaks*.
+
+        Returns a list of :class:`~chromhandler.model.Peak` objects with
+        ``Estimate`` area and location.
+        """
+        from chromhandler.model import Estimate, Peak  # local import — avoids circular
+
+        area_l = np.asarray(samples["area_l"])  # [n_sample, n_trace, n_peak]
+        area_r = np.asarray(samples["area_r"])
+        apex_l = np.asarray(samples["apex_l"])
+        apex_r = np.asarray(samples["apex_r"])
+
+        mol_area = np.empty_like(area_l)
+        mol_apex = np.empty_like(apex_l)
+
+        for p_idx, peak in enumerate(peaks):
+            if peak.mode == "single":
+                mol_area[..., p_idx] = area_l[..., p_idx]
+                mol_apex[..., p_idx] = apex_l[..., p_idx]
+            elif peak.mode == "free_doublet":
+                mol_area[..., p_idx] = area_l[..., p_idx] + area_r[..., p_idx]
+                total = area_l[..., p_idx] + area_r[..., p_idx]
+                mol_apex[..., p_idx] = (
+                    apex_l[..., p_idx] * area_l[..., p_idx]
+                    + apex_r[..., p_idx] * area_r[..., p_idx]
+                ) / np.where(total > 0, total, 1.0)
+            else:  # artefact_doublet
+                if peak.artefact_side == "left":
+                    mol_area[..., p_idx] = area_r[..., p_idx]
+                    mol_apex[..., p_idx] = apex_r[..., p_idx]
+                else:
+                    mol_area[..., p_idx] = area_l[..., p_idx]
+                    mol_apex[..., p_idx] = apex_l[..., p_idx]
+
+        q_low, _, q_high = quantiles
+        peaks_out: list = []
+
+        for t, chrom_id in enumerate(trace_chromatogram_ids):
+            for p_idx, ann in enumerate(peaks):
+                a_samp = mol_area[:, t, p_idx]
+                x_samp = mol_apex[:, t, p_idx]
+
+                if n_samples is not None:
+                    n_draw = min(n_samples, len(a_samp))
+                    idx = np.random.choice(len(a_samp), size=n_draw, replace=False)
+                    a_stored = a_samp[idx].tolist()
+                    x_stored = x_samp[idx].tolist()
+                else:
+                    a_stored = []
+                    x_stored = []
+
+                area_est = Estimate(
+                    mean=float(np.mean(a_samp)),
+                    median=float(np.median(a_samp)),
+                    std=float(np.std(a_samp)),
+                    q05=float(np.quantile(a_samp, q_low)),
+                    q95=float(np.quantile(a_samp, q_high)),
+                    samples=a_stored,
+                )
+                loc_est = Estimate(
+                    mean=float(np.mean(x_samp)),
+                    median=float(np.median(x_samp)),
+                    std=float(np.std(x_samp)),
+                    q05=float(np.quantile(x_samp, q_low)),
+                    q95=float(np.quantile(x_samp, q_high)),
+                    samples=x_stored,
+                )
+                peaks_out.append(
+                    Peak(
+                        chromatogram_id=str(chrom_id),
+                        location=loc_est,
+                        area=area_est,
+                        molecule_id=ann.molecule_id,
+                    )
+                )
+
+        return peaks_out
+
+    @staticmethod
+    def _records_from_samples(
+        peaks: list[PeakAnnotation],
+        samples: dict,
+        trace_chromatogram_ids: np.ndarray,
+        subset_name: str,
+        quantiles: tuple[float, float, float],
+    ) -> list[AreaRecord]:
+        """Flatten posterior *samples* into :class:`~chromhandler.fitting.subsets.AreaRecord` list."""
+        area_l = np.asarray(samples["area_l"])
+        area_r = np.asarray(samples["area_r"])
+
+        mol_area = np.empty_like(area_l)
+        for p_idx, peak in enumerate(peaks):
+            if peak.mode == "single":
+                mol_area[..., p_idx] = area_l[..., p_idx]
+            elif peak.mode == "free_doublet":
+                mol_area[..., p_idx] = area_l[..., p_idx] + area_r[..., p_idx]
+            else:
+                if peak.artefact_side == "left":
+                    mol_area[..., p_idx] = area_r[..., p_idx]
+                else:
+                    mol_area[..., p_idx] = area_l[..., p_idx]
+
+        q_data = np.moveaxis(
+            np.quantile(mol_area, quantiles, axis=0), 0, -1
+        )  # [n_trace, n_peak, 3]
+
+        records: list[AreaRecord] = []
+        for t, chrom_id in enumerate(trace_chromatogram_ids):
+            for p, peak in enumerate(peaks):
+                records.append(
+                    AreaRecord(
+                        chromatogram_id=str(chrom_id),
+                        molecule_id=peak.molecule_id,
+                        subset_name=subset_name,
+                        area_q05=float(q_data[t, p, 0]),
+                        area_median=float(q_data[t, p, 1]),
+                        area_q95=float(q_data[t, p, 2]),
+                    )
+                )
+        return records
+
+    # ------------------------------------------------------------------
+    # Public posterior extraction
+    # ------------------------------------------------------------------
+
+    def to_peaks(
+        self,
+        *,
+        quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
+        n_samples: int | None = None,
+    ) -> list:
+        """Convert posterior samples into Peak objects with Estimate area/location.
+
+        One Peak is produced per (trace, annotation-peak) pair, aggregated
+        across all fitted subsets.
+
+        Args:
+            quantiles: Three quantile levels ``(q_low, q_median, q_high)``.
+            n_samples: If not ``None``, embed this many posterior samples in
+                ``Estimate.samples`` for downstream visualisation.
+
+        Returns:
+            List of :class:`~chromhandler.model.Peak` objects sorted by
+            ``chromatogram_id`` then ``molecule_id``.
+
+        Raises:
+            RuntimeError: If :meth:`fit` has not been called or if subsets were
+                registered but not yet fitted.
+        """
+        if not self._samples_dict:
+            if self._subsets:
+                raise RuntimeError(
+                    "to_peaks() requires fitted subset posteriors. Call fit() first."
+                )
+            raise RuntimeError(
+                "to_peaks() requires a fitted posterior. Call fit() first."
+            )
+
+        all_peaks: list = []
+        seen_keys: set[tuple[str, str | None]] = set()
+
+        for name, subset in self._subsets.items():
+            if name not in self._samples_dict:
+                # This subset was registered but not yet fitted (selective fit)
+                continue
+            child_peaks = self._peaks_from_samples(
+                subset.peaks,
+                self._samples_dict[name],
+                self._subset_trace_ids[name],
+                quantiles,
+                n_samples,
+            )
+            for peak in child_peaks:
+                key = (str(peak.chromatogram_id), peak.molecule_id)
+                if key in seen_keys:
+                    raise ValueError(
+                        "to_peaks() found duplicate fitted peaks across subsets for "
+                        f"chromatogram_id='{key[0]}' and molecule_id='{key[1]}'."
+                    )
+                seen_keys.add(key)
+                all_peaks.append(peak)
+
+        return sorted(
+            all_peaks,
+            key=lambda peak: (str(peak.chromatogram_id), str(peak.molecule_id)),
+        )
+
+    def area_records(
+        self,
+        *,
+        quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
+    ) -> list[AreaRecord]:
+        """Flatten posterior areas into :class:`~chromhandler.fitting.subsets.AreaRecord` list.
+
+        Records from all fitted subsets are aggregated and sorted.
+
+        Args:
+            quantiles: Three quantile levels ``(q_low, q_median, q_high)``.
+
+        Returns:
+            List of :class:`~chromhandler.fitting.subsets.AreaRecord` sorted by
+            ``chromatogram_id`` then ``molecule_id``.
+
+        Raises:
+            RuntimeError: If :meth:`fit` has not been called.
+        """
+        if not self._samples_dict:
+            raise RuntimeError(
+                "area_records() requires a fitted posterior. Call fit() first."
+            )
+
+        records: list[AreaRecord] = []
+        for name, subset in self._subsets.items():
+            if name not in self._samples_dict:
+                continue
+            records.extend(
+                self._records_from_samples(
+                    subset.peaks,
+                    self._samples_dict[name],
+                    self._subset_trace_ids[name],
+                    name,
+                    quantiles,
+                )
+            )
+        return sorted(records, key=lambda r: (r.chromatogram_id, r.molecule_id))
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +2125,6 @@ class BetterFitter:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import jax.numpy as jnp
     import matplotlib.pyplot as plt
 
     from .better_visualize import (
@@ -675,102 +2137,129 @@ if __name__ == "__main__":
     print("=" * 80)
     print()
 
-    arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
+    def save_figure(fig: object, filename: str, *, dpi: int = 150) -> None:
+        fig.savefig(filename, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✓ Saved: {filename}")
+
+    def save_sigma_alpha_plot(fitter_obj: BetterFitter, label: str) -> None:
+        fig, _ = fitter_obj.plot_sigma_alpha_prior_diagnostics()
+        save_figure(fig, f"better_fitter_sigma_alpha_{label}.png")
+
+    def fit_and_plot_dataset(
+        fitter_obj: BetterFitter,
+        label: str,
+        *,
+        num_samples: int = 1000,
+        num_warmup: int = 1000,
+        num_chains: int = 8,
+        seed: int = 42,
+    ) -> None:
+        print()
+        print("=" * 80)
+        print(f"Running MCMC Inference: {label} ({fitter_obj.n_traces} traces)")
+        print("=" * 80)
+        fitter_obj.fit(
+            num_samples=num_samples,
+            num_warmup=num_warmup,
+            num_chains=num_chains,
+            seed=seed,
+        )
+
+        if not fitter_obj.posteriors:
+            print(f"Skipping posterior plots for {label}: posteriors unavailable.")
+            return
+
+        # Use the first/only posterior for trace plots
+        posterior = next(iter(fitter_obj.posteriors.values()))
+        fig = plot_trace(posterior, var_names=list(better_model.TRACE_PARAMETER_NAMES))
+        save_figure(fig, f"better_fitter_trace_{label}.png", dpi=100)
+
+        # Resolve subset for posterior predictive plot
+        subset_name = next(iter(fitter_obj._subsets))
+        subset = fitter_obj._subsets[subset_name]
+        mask = fitter_obj._compute_subset_mask(subset)
+        fig, _ = plot_posterior_predictive(
+            fitter_obj.time[mask],
+            fitter_obj.signal[mask],
+            subset.peaks,
+            posterior,
+            x_posterior=None,
+            y_posterior=None,
+            chromatogram_ids=(
+                list(fitter_obj._subset_trace_ids[subset_name])
+                if subset_name in fitter_obj._subset_trace_ids
+                else None
+            ),
+        )
+        save_figure(fig, f"better_fitter_posterior_{label}.png", dpi=100)
+
+    arr = np.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
         -1, 3000
-    )[-4:, :1000]
-    time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        -4:, :1000
+    )[:, :1000]
+    time = np.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
+        :, :1000
     ]
 
+    g0 = list(range(58)) + [
+        63,
+        64,
+        70,
+        71,
+        77,
+        78,
+        84,
+        85,
+        91,
+        92,
+        98,
+        99,
+        105,
+        106,
+        112,
+        113,
+        119,
+        120,
+        126,
+        127,
+        133,
+        134,
+        140,
+        141,
+        147,
+        148,
+    ]
+
+    arr_g0 = arr[g0]
+    time_g0 = time[g0]
+
     baselines = [
-        BaselineAnnotation(low=2.5, high=2.52),
-        BaselineAnnotation(low=3.5, high=3.6),
+        BaselineAnnotation(rt_min=2.5, rt_max=2.55),
+        BaselineAnnotation(rt_min=3.5, rt_max=3.52),
     ]
     peaks = [
-        PeakAnnotation(name="ino", low=2.52, high=2.9, mode="free_doublet"),
-        # PeakAnnotation(
-        #     name="peak2",
-        #     low=2.85,
-        #     high=3.15,
-        #     mode="artefact_doublet",
-        #     shoulder="right",
-        # ),
+        PeakAnnotation(molecule_id="ino", rt_min=2.55, rt_max=2.9, mode="single"),
         PeakAnnotation(
-            name="peak3",
-            low=3.15,
-            high=3.5,
-            mode="free_doublet",
-            shoulder=None,
+            molecule_id="peak2",
+            rt_min=2.85,
+            rt_max=3.15,
+            mode="artefact_doublet",
+            artefact_side="right",
+        ),
+        PeakAnnotation(
+            molecule_id="peak3",
+            rt_min=3.15,
+            rt_max=3.5,
+            mode="artefact_doublet",
+            artefact_side="left",
         ),
     ]
 
-    fitter = BetterFitter(time, arr, peaks=peaks, baselines=baselines)
+    fitter = BetterFitter(time_g0, arr_g0, peaks=peaks, baselines=baselines)
 
-    # print("=" * 80)
-    # print("Aligning Chromatograms")
-    # print("=" * 80)
-    # fitter.align(n_starts=16, verbose=True)
-
+    fig, axes = fitter.plot_trace_rows(t_min=2.3, t_max=3.7)
+    save_figure(fig, "traces.png", dpi=100)
     fitter.print_priors()
 
-    fig, axes = fitter.plot_sigma_alpha_prior_diagnostics()
-    plt.savefig(
-        "better_fitter_sigma_alpha_prior_diagnostics.png", dpi=150, bbox_inches="tight"
-    )
-    print("✓ Saved: better_fitter_sigma_alpha_prior_diagnostics.png")
-
-    # Visualize priors
-    print()
-    print("=" * 80)
-    print("Generating Prior Visualization")
-    print("=" * 80)
-    fig, axes = fitter.plot_prior_traces(
-        show_baseline=True,
-        show_apex_anchor_prior=True,
-        show_gaussian_prior_peak=True,
-        show_peak_bounds=True,
-    )
-    plt.savefig("better_fitter_priors.png", dpi=150, bbox_inches="tight")
-    print("✓ Saved: better_fitter_priors.png")
-
-    print()
-    print("=" * 80)
-    print("Running MCMC Inference (small sample for testing)")
-    print("=" * 80)
-    fitter.fit(num_samples=1000, num_warmup=1000, seed=42, num_chains=8)
-
-    # Plot trace for convergence diagnostics
-    print()
-    print("=" * 80)
-    print("Generating MCMC Trace Plots")
-    print("=" * 80)
-    if fitter.posterior is not None:
-        trace_var_names = [
-            name for name in better_model.SUMMARY_PARAMETER_NAMES if name != "sigma_y"
-        ]
-        fig = plot_trace(
-            fitter.posterior,
-            var_names=trace_var_names,
-        )
-        plt.savefig("better_fitter_trace.png", dpi=100, bbox_inches="tight")
-        print("✓ Saved: better_fitter_trace.png")
-
-    # Plot posterior predictive (fitted signal + components)
-    print()
-    print("=" * 80)
-    print("Generating Posterior Predictive Plots")
-    print("=" * 80)
-    if fitter.posterior is not None:
-        # If windowed likelihood was used, also pass the masked time/signal
-        x_posterior = getattr(fitter, "x_masked", None)
-        y_posterior = getattr(fitter, "y_masked", None)
-        fig, axes = plot_posterior_predictive(
-            fitter.time,
-            fitter.signal,
-            fitter.peaks,
-            fitter.posterior,
-            x_posterior=x_posterior,
-            y_posterior=y_posterior,
-        )
-        plt.savefig("better_fitter_posterior.png", dpi=100, bbox_inches="tight")
-        print("✓ Saved: better_fitter_posterior.png")
+    save_sigma_alpha_plot(fitter, "g0")
+    fit_and_plot_dataset(fitter, "g0", seed=42)

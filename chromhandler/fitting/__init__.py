@@ -1,4 +1,16 @@
-"""
+"""Chromatographic peak fitting module.
+
+Sub-modules
+-----------
+- ``better_fitter``: Main :class:`BetterFitter` class (MCMC, subsets, area extraction).
+- ``subsets``: :class:`SubsetSpec` and :class:`AreaRecord` data types.
+- ``priors``: Window-geometry prior construction and FWHM diagnostics.
+- ``baseline``: Linear baseline estimation.
+- ``better_model``: NumPyro probabilistic model.
+- ``better_visualize``: Posterior and diagnostic plots.
+
+Legacy
+------
 EMG Peak Fitting Module for Chromatography Data.
 
 This module provides efficient JAX-based fitting of Exponentially Modified Gaussian (EMG)
@@ -47,3 +59,8 @@ Performance
 - Batched (100 spectra): ~1-2s with JIT compilation
 - Multi-component: ~0.5-2s per region depending on K
 """
+
+from .better_fitter import BetterFitter, PosteriorCurves
+from .subsets import AreaRecord, Subset, SubsetSpec
+
+__all__ = ["BetterFitter", "PosteriorCurves", "Subset", "SubsetSpec", "AreaRecord"]
