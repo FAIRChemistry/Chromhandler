@@ -3,9 +3,9 @@ from __future__ import annotations
 import warnings as _warnings
 from typing import Any
 
-from .enzymeml import to_enzymeml
+from .annotations import BaselineAnnotation, PeakAnnotation
 from .handler import Handler
-from .molecule import Molecule
+from .molecule import CalibrationMethod, LinearCalibration, Molecule
 from .protein import Protein
 
 
@@ -53,6 +53,15 @@ def __getattr__(name: str) -> Handler:
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
-__all__ = ["Handler", "ChromAnalyzer", "Molecule", "Protein", "to_enzymeml"]
+__all__ = [
+    "Handler",
+    "ChromAnalyzer",
+    "Molecule",
+    "Protein",
+    "PeakAnnotation",
+    "BaselineAnnotation",
+    "LinearCalibration",
+    "CalibrationMethod",
+]
 
 __version__ = "0.10.4"
