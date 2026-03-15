@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import Colormap, ListedColormap, to_rgba
 from matplotlib.patches import Patch
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
@@ -315,7 +316,9 @@ def add_sigma_alpha_prior_density(
     sigma_scale: float,
     x_data: Optional[np.ndarray] = None,
     y_data: Optional[np.ndarray] = None,
-    cmap: str = "viridis",
+    cmap: "str | Colormap" = "viridis",
+    n_levels: int = 4,
+    linecolor: str = "white",
     n_grid: int = 220,
     set_limits: bool = True,
 ) -> None:
@@ -357,16 +360,22 @@ def add_sigma_alpha_prior_density(
         2.0 * np.pi * alpha_scale_f * sigma_scale_f
     )
 
-    # For a 2-D Gaussian, chi-square(df=2) quantiles have a closed form:
-    # r^2_p = -2 log(1-p). These density levels define quartile-like shells.
-    mass_levels = np.array([0.25, 0.50, 0.75, 0.95], dtype=float)
+    # Chi-square(df=2) quantiles give equal probability mass per band.
+    # r^2_p = -2 log(1-p) maps mass fraction to squared Mahalanobis radius.
+    mass_levels = np.linspace(1.0 / (n_levels + 1), 1.0 - 1.0 / (n_levels + 1), n_levels)
+    mass_levels[-1] = min(float(mass_levels[-1]), 0.95)
     r2 = -2.0 * np.log(1.0 - mass_levels)
     density_peak = 1.0 / (2.0 * np.pi * alpha_scale_f * sigma_scale_f)
     density_levels = density_peak * np.exp(-0.5 * r2)
     contour_levels = np.sort(
         np.concatenate([density_levels[::-1], np.array([density_peak])])
     )
-    colors = plt.get_cmap(cmap)(np.linspace(0.20, 0.92, 4))
+
+    cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    if isinstance(cmap_obj, ListedColormap):
+        colors = [cmap_obj(i / max(n_levels - 1, 1)) for i in range(n_levels)]
+    else:
+        colors = cmap_obj(np.linspace(0.20, 0.92, n_levels))
 
     ax.contourf(
         xx,
@@ -374,7 +383,7 @@ def add_sigma_alpha_prior_density(
         density,
         levels=contour_levels,
         colors=colors,
-        alpha=0.75,
+        alpha=0.65,
         antialiased=True,
     )
     ax.contour(
@@ -382,10 +391,13 @@ def add_sigma_alpha_prior_density(
         yy,
         density,
         levels=contour_levels[:-1],
-        colors="white",
-        linewidths=0.8,
-        alpha=0.8,
+        colors=linecolor,
+        linewidths=0.7,
+        alpha=0.75,
     )
+    # Crosshair at prior centre
+    ax.axvline(alpha_loc_f, color=linecolor, linewidth=0.8, linestyle=":", alpha=0.9)
+    ax.axhline(sigma_loc_f, color=linecolor, linewidth=0.8, linestyle=":", alpha=0.9)
 
     if set_limits:
         ax.set_xlim(x_min, x_max)
@@ -440,6 +452,20 @@ def _merge_limits(
     if hi <= lo:
         lo, hi = default
     return lo, hi
+
+
+def _resolve_prior_colormap(
+    prior_cmap: "str | Colormap" = "viridis",
+    prior_colors: Optional[list[str]] = None,
+) -> "tuple[Colormap, int]":
+    """Return (Colormap, n_levels) from either a colormap name or explicit color list."""
+    if prior_colors is not None:
+        if len(prior_colors) < 2:
+            raise ValueError("prior_colors must contain at least 2 colors.")
+        cmap = ListedColormap([to_rgba(c) for c in prior_colors])
+        return cmap, len(prior_colors)
+    cmap_obj = plt.get_cmap(prior_cmap) if isinstance(prior_cmap, str) else prior_cmap
+    return cmap_obj, 4
 
 
 # ---------------------------------------------------------------------------
