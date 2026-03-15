@@ -1054,7 +1054,7 @@ def plot_sigma_alpha_scatter(
                     (*edge_colors[i][:3], 0.35) for i in range(len(edge_colors))
                 ]
             else:
-                edge_colors = (0, 0, 0, 1)
+                edge_colors = (0.15, 0.15, 0.15, 0.9)
                 face_colors = (1, 1, 1, alpha_scatter)
 
             if apex_height_arr is not None:
@@ -1074,7 +1074,7 @@ def plot_sigma_alpha_scatter(
                 ax.scatter(
                     alpha_peak,
                     sigma_peak,
-                    s=60,
+                    s=40,
                     facecolors=face_colors,
                     edgecolors=edge_colors,
                     linewidths=0.9,
