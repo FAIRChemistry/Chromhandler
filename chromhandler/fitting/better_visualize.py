@@ -875,6 +875,8 @@ def plot_sigma_alpha_scatter(
     alpha_scale: Optional[np.ndarray] = None,
     figsize: Optional[tuple[float, float]] = None,
     cmap: str = "viridis",
+    prior_colors: Optional[list[str]] = None,
+    prior_linecolor: str = "white",
     colorize_by: Literal[None, "sample_id", "subset"] = None,
     sample_ids: Optional[list[str]] = None,
     subset_ids: Optional[list[str]] = None,
@@ -944,6 +946,11 @@ def plot_sigma_alpha_scatter(
         raise ValueError("sigma_loc and sigma_scale must both be provided or omitted.")
     if (alpha_loc_arr is None) != (alpha_scale_arr is None):
         raise ValueError("alpha_loc and alpha_scale must both be provided or omitted.")
+
+    prior_cmap_obj, prior_n_levels = _resolve_prior_colormap(
+        prior_cmap=cmap,
+        prior_colors=prior_colors,
+    )
 
     panel_valid_masks: list[np.ndarray] = []
     panel_alpha: list[np.ndarray] = []
@@ -1030,7 +1037,9 @@ def plot_sigma_alpha_scatter(
                 sigma_scale=float(sigma_scale_arr[peak_idx]),
                 x_data=alpha_peak,
                 y_data=sigma_peak,
-                cmap=cmap,
+                cmap=prior_cmap_obj,
+                n_levels=prior_n_levels,
+                linecolor=prior_linecolor,
                 set_limits=False,
             )
 
