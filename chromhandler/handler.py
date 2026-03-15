@@ -770,16 +770,19 @@ class Handler(BaseModel):
                 continue
 
             # Chromatogram at t=0 that contains a peak for this molecule
-            for c in sample.chromatograms:
-                if (
-                    c.reaction_time is not None
+            chrom = next(
+                (
+                    c
+                    for c in sample.chromatograms
+                    if c.reaction_time is not None
                     and c.reaction_time == 0.0
                     and any(p.molecule_id == molecule.id for p in c.peaks)
-                ):
-                    chrom = c
-                    break
+                ),
+                None,
+            )
+            if chrom is None:
+                continue
 
-            # Peak for this molecule
             peak = next(p for p in chrom.peaks if p.molecule_id == molecule.id)
 
             # Extract area: posterior samples > median > mean
@@ -1325,6 +1328,7 @@ class Handler(BaseModel):
         samples: list[str] | None = None,
         figsize: tuple[float, float] | None = None,
         show_balance: bool = False,
+        colors: dict[str, str] | None = None,
     ) -> tuple[object, np.ndarray]:
         """Plot peak areas over reaction time for one or more samples.
 
@@ -1339,6 +1343,9 @@ class Handler(BaseModel):
                 height grows with the number of plotted samples.
             show_balance: If ``True``, draw a faint dashed line showing the sum
                 of assigned peak areas at each reaction time.
+            colors: Optional dict mapping molecule ID to a hex color string
+                (e.g. ``{"SAHH": "#FF5733"}``).  Molecule IDs not present in
+                the dict fall back to the default ``tab10`` colormap.
 
         Returns:
             ``(fig, axes)`` where *axes* is a 1-D numpy array of matplotlib axes.
@@ -1379,9 +1386,12 @@ class Handler(BaseModel):
                         molecule_ids.append(mol_id)
 
         cmap = plt.get_cmap("tab10")
-        molecule_colors = {
-            mol_id: cmap(idx % 10) for idx, mol_id in enumerate(molecule_ids)
-        }
+        molecule_colors: dict[str, object] = {}
+        for idx, mol_id in enumerate(molecule_ids):
+            if colors is not None and mol_id in colors:
+                molecule_colors[mol_id] = colors[mol_id]
+            else:
+                molecule_colors[mol_id] = cmap(idx % 10)
 
         for ax, sample in zip(axes, selected_samples):
             time_unit = "min"
@@ -1443,7 +1453,7 @@ class Handler(BaseModel):
                     linewidth=1.5,
                     color="0.25",
                     alpha=0.4,
-                    label="total area",
+                    label="summed area",
                 )
 
             if not points_by_molecule:
@@ -1458,9 +1468,10 @@ class Handler(BaseModel):
                 )
 
             ax.set_title(str(sample.id), loc="left")
-            ax.set_xlabel(f"Time [{time_unit}]")
-            ax.set_ylabel("signal")
+            ax.set_xlabel(f"time [{time_unit}]")
+            ax.set_ylabel("signal [AU]")
             ax.grid(True, alpha=0.3)
+            ax.patch.set_facecolor("none")
 
             handles, labels = ax.get_legend_handles_labels()
             if handles:
@@ -1468,12 +1479,14 @@ class Handler(BaseModel):
                 ax.legend(
                     by_label.values(),
                     by_label.keys(),
-                    title="molecule",
                     fontsize=8,
-                    title_fontsize=9,
-                    loc="best",
+                    loc="upper left",
+                    bbox_to_anchor=(1.01, 1.0),
+                    borderaxespad=0.0,
+                    frameon=True,
                 )
 
+        fig.patch.set_facecolor("none")
         fig.tight_layout()
         return fig, axes
 
