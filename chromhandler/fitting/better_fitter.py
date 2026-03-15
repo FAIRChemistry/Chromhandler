@@ -175,9 +175,11 @@ class BetterFitter:
         # --- Subset storage (new unified design) ---
         self._subsets: dict[str, Subset] = {}
         # Per-subset posteriors (populated after fit())
-        self._posteriors: dict[str, object] = {}   # subset_name → InferenceData
-        self._samples_dict: dict[str, dict] = {}   # subset_name → {param: array}
-        self._subset_trace_ids: dict[str, np.ndarray] = {}  # subset_name → chromatogram_ids
+        self._posteriors: dict[str, object] = {}  # subset_name → InferenceData
+        self._samples_dict: dict[str, dict] = {}  # subset_name → {param: array}
+        self._subset_trace_ids: dict[
+            str, np.ndarray
+        ] = {}  # subset_name → chromatogram_ids
         # Per-subset baseline-prior cache
         self._baseline_priors_cache: dict[str, BaselinePriors] = {}
         # Per-subset shape-features cache
@@ -375,9 +377,7 @@ class BetterFitter:
         slope = np.asarray(bp.slope, dtype=float)[:, None]
         return intercept + slope * self.time[mask]
 
-    def compute_priors(
-        self, subset: str | None = None
-    ) -> list[GeometricPeakPriors]:
+    def compute_priors(self, subset: str | None = None) -> list[GeometricPeakPriors]:
         """Compute window-geometry priors for *subset* (or the single registered subset)."""
         priors, _ = self._compute_position_priors(subset=subset)
         return priors
@@ -397,9 +397,7 @@ class BetterFitter:
         x = np.nanmedian(self.time[mask], axis=0)
         return build_fwhm_shape_diagnostics(s.peaks, x, self.signal[mask], baseline)
 
-    def get_shape_features(
-        self, subset: str | None = None
-    ) -> FwhmShapeDiagnostics:
+    def get_shape_features(self, subset: str | None = None) -> FwhmShapeDiagnostics:
         """Per-trace FWHM-derived shape diagnostics with NaN for invalid entries.
 
         Continuous fields (``sigma_trace``, ``alpha_trace``,
@@ -409,11 +407,7 @@ class BetterFitter:
         The result is cached per subset after first access; call
         :meth:`compute_fwhm_shape_diagnostics` directly for an uncached copy.
         """
-        cache_key = (
-            self._resolve_subset(subset).name
-            if self._subsets
-            else "_direct_"
-        )
+        cache_key = self._resolve_subset(subset).name if self._subsets else "_direct_"
         if cache_key not in self._shape_features_cache:
             diag = self.compute_fwhm_shape_diagnostics(
                 subset=(subset if self._subsets else None)
@@ -776,8 +770,7 @@ class BetterFitter:
         """
         if name not in self._subsets:
             raise KeyError(
-                f"No subset named '{name}'. "
-                f"Registered subsets: {list(self._subsets)}."
+                f"No subset named '{name}'. Registered subsets: {list(self._subsets)}."
             )
         return self._subsets[name]
 
@@ -917,13 +910,26 @@ class BetterFitter:
             )
 
     def peak_structure(self) -> dict[str, np.ndarray]:
-        """Extract mode-specific peak structure arrays from ``self.peaks``."""
+        """Extract mode-specific peak structure arrays from ``self.peaks``.
+
+        Returns local indices splitting free-doublet peaks by separation
+        variance:
+
+        - ``free_fixed_local_index``: positions within the *n_free* axis where
+          ``vary_separation=False`` (default).  These peaks share a single
+          common separation across all traces.
+        - ``free_vary_local_index``: positions within the *n_free* axis where
+          ``vary_separation=True``.  These peaks get per-trace separation with
+          a sampled per-peak trace-scale hyperparameter.
+        """
         n_peak = len(self.peaks)
         peak_mode_code = np.zeros(n_peak, dtype=np.int32)
         artefact_side = np.zeros(n_peak, dtype=np.int32)
         artefact_indices: list[int] = []
         free_indices: list[int] = []
         nonfree_indices: list[int] = []
+        free_fixed_local: list[int] = []
+        free_vary_local: list[int] = []
 
         for i, peak in enumerate(self.peaks):
             peak_mode_code[i] = PEAK_MODE_TO_CODE[peak.mode]
@@ -933,7 +939,12 @@ class BetterFitter:
                 artefact_indices.append(i)
                 artefact_side[i] = -1 if peak.artefact_side == "left" else 1
             elif peak_is_free_mode(peak.mode):
+                local_pos = len(free_indices)
                 free_indices.append(i)
+                if peak.vary_separation:
+                    free_vary_local.append(local_pos)
+                else:
+                    free_fixed_local.append(local_pos)
 
         return {
             "peak_mode_code": peak_mode_code,
@@ -941,6 +952,8 @@ class BetterFitter:
             "artefact_peak_index": np.array(artefact_indices, dtype=np.int32),
             "free_peak_index": np.array(free_indices, dtype=np.int32),
             "nonfree_peak_index": np.array(nonfree_indices, dtype=np.int32),
+            "free_fixed_local_index": np.array(free_fixed_local, dtype=np.int32),
+            "free_vary_local_index": np.array(free_vary_local, dtype=np.int32),
         }
 
     def compute_model_inputs(self) -> dict[str, np.ndarray]:
@@ -955,7 +968,9 @@ class BetterFitter:
         """
         priors, trace_shift_scale = self._compute_position_priors()
         prior_arrays = geometric_priors_to_arrays(priors)
-        prior_arrays["trace_shift_scale"] = np.asarray(trace_shift_scale, dtype=np.float32)
+        prior_arrays["trace_shift_scale"] = np.asarray(
+            trace_shift_scale, dtype=np.float32
+        )
 
         prior_arrays["dominant_area_loc_per_trace"] = self._stabilize_area_prior_matrix(
             prior_arrays["dominant_area_loc_per_trace"].T
@@ -1030,6 +1045,16 @@ class BetterFitter:
         figsize: tuple[float, float] | None = None,
         cmap: str = "viridis",
         colorize_by: Literal[None, "sample_id", "subset"] = None,
+        prior_colors: list[str] | None = None,
+        prior_linecolor: str = "white",
+        label_fontsize: float = 9,
+        title_fontsize: float = 10,
+        tick_fontsize: float = 8,
+        spine_linewidth: float = 0.8,
+        marker_size: float = 40,
+        marker_linewidth: float = 0.9,
+        transparent: bool = True,
+        show_prior_density: bool = True,
     ) -> tuple[object, np.ndarray]:
         """Plot per-trace FWHM-derived sigma-vs-alpha scatter for each peak.
 
@@ -1039,6 +1064,20 @@ class BetterFitter:
             figsize: Figure size (width, height).
             cmap: Colormap for prior density background.
             colorize_by: How to color scatter points.
+            prior_colors: Colors for prior density background.
+            prior_linecolor: Color for prior density lines.
+            label_fontsize: Font size for x/y axis labels.
+            title_fontsize: Font size for subplot titles.
+            tick_fontsize: Font size for tick labels.
+            spine_linewidth: Line width for axis spines and tick marks.
+            marker_size: Base scatter marker size (pt²).  When
+                *apex_height_trace* is available the height-derived sizes are
+                scaled proportionally so both paths stay consistent.
+            marker_linewidth: Line width of scatter marker edges.
+            transparent: When ``True`` (default) figure and axes backgrounds
+                are transparent.
+            show_prior_density: When ``True`` (default) show 2-D KDE contours
+                for prior density. Set to ``False`` for a cleaner scatter plot.
         """
         from .better_visualize import plot_sigma_alpha_scatter
 
@@ -1051,7 +1090,9 @@ class BetterFitter:
             effective_peaks = s.peaks
             mask = self._compute_subset_mask(s)
             sample_ids_arr = (
-                self.trace_sample_ids[mask] if self.trace_sample_ids is not None else None
+                self.trace_sample_ids[mask]
+                if self.trace_sample_ids is not None
+                else None
             )
             subset_arr = (
                 self.trace_subsets[mask] if self.trace_subsets is not None else None
@@ -1080,9 +1121,19 @@ class BetterFitter:
             alpha_scale=np.asarray([p.alpha_scale for p in priors], dtype=float),
             figsize=figsize,
             cmap=cmap,
+            prior_colors=prior_colors,
+            prior_linecolor=prior_linecolor,
             colorize_by=colorize_by,
             sample_ids=sample_ids,
             subset_ids=subset_ids,
+            label_fontsize=label_fontsize,
+            title_fontsize=title_fontsize,
+            tick_fontsize=tick_fontsize,
+            spine_linewidth=spine_linewidth,
+            marker_size=marker_size,
+            marker_linewidth=marker_linewidth,
+            transparent=transparent,
+            show_prior_density=show_prior_density,
         )
         return fig, axes
 
@@ -1348,7 +1399,9 @@ class BetterFitter:
         alpha_r_raw = np.asarray(pvar["alpha_r"].values)
         area_l_raw = np.asarray(pvar["area_l"].values)
         area_r_raw = np.asarray(pvar["area_r"].values)
-        bl_int_raw = np.asarray(pvar["baseline_intercept"].values)  # [n_chain,n_draw,n_trace]
+        bl_int_raw = np.asarray(
+            pvar["baseline_intercept"].values
+        )  # [n_chain,n_draw,n_trace]
         bl_slp_raw = np.asarray(pvar["baseline_slope"].values)
 
         n_chain, n_draw = xi_l_raw.shape[:2]
@@ -1361,7 +1414,7 @@ class BetterFitter:
             """Flatten chains then select traces."""
             return _flatten(arr)[:, local_idx]
 
-        xi_l = _select(xi_l_raw)       # [n_total, n_sel, n_peak]
+        xi_l = _select(xi_l_raw)  # [n_total, n_sel, n_peak]
         xi_r = _select(xi_r_raw)
         sigma_l = _select(sigma_l_raw)
         sigma_r = _select(sigma_r_raw)
@@ -1408,26 +1461,28 @@ class BetterFitter:
         x_flat = np.broadcast_to(x_eval[None, :], (n_flat, n_x)).copy()
 
         def _skew_normal_pdf(
-            x_2d: np.ndarray,       # [n, n_x]
-            xi: np.ndarray,         # [n, n_comp]
-            sigma: np.ndarray,      # [n, n_comp]
-            alpha: np.ndarray,      # [n, n_comp]
-        ) -> np.ndarray:            # [n, n_comp, n_x]
+            x_2d: np.ndarray,  # [n, n_x]
+            xi: np.ndarray,  # [n, n_comp]
+            sigma: np.ndarray,  # [n, n_comp]
+            alpha: np.ndarray,  # [n, n_comp]
+        ) -> np.ndarray:  # [n, n_comp, n_x]
             sig = np.maximum(sigma[:, :, None], 1e-6)
             z = (x_2d[:, None, :] - xi[:, :, None]) / sig
             log_pdf = (
                 np.log(2.0)
                 - np.log(sig)
-                - 0.5 * z ** 2
+                - 0.5 * z**2
                 - 0.5 * np.log(2.0 * np.pi)
                 + np.log(np.clip(_ndtr(alpha[:, :, None] * z), 1e-300, None))
             )
             return np.exp(log_pdf)
 
-        pdf_l = _skew_normal_pdf(x_flat, xi_l_f, sigma_l_f, alpha_l_f)   # [n_flat, n_peak, n_x]
+        pdf_l = _skew_normal_pdf(
+            x_flat, xi_l_f, sigma_l_f, alpha_l_f
+        )  # [n_flat, n_peak, n_x]
         pdf_r = _skew_normal_pdf(x_flat, xi_r_f, sigma_r_f, alpha_r_f)
 
-        comp_l_f = area_l_f[:, :, None] * pdf_l   # [n_flat, n_peak, n_x]
+        comp_l_f = area_l_f[:, :, None] * pdf_l  # [n_flat, n_peak, n_x]
         comp_r_f = area_r_f[:, :, None] * pdf_r
 
         # Reshape back to [n_samp, n_sel, n_peak, n_x]
@@ -1451,9 +1506,9 @@ class BetterFitter:
                 np.percentile(arr, hi_pct, axis=0),
             )
 
-        t_med, t_lo, t_hi = _pct(total_samps)          # each [n_sel, n_x]
+        t_med, t_lo, t_hi = _pct(total_samps)  # each [n_sel, n_x]
         bl_med, bl_lo, bl_hi = _pct(baseline_samps)
-        cl_med, cl_lo, cl_hi = _pct(comp_l)             # each [n_sel, n_peak, n_x]
+        cl_med, cl_lo, cl_hi = _pct(comp_l)  # each [n_sel, n_peak, n_x]
         cr_med, cr_lo, cr_hi = _pct(comp_r)
 
         chrom_ids: list[str] | None = (
@@ -1489,6 +1544,7 @@ class BetterFitter:
         hdi_prob: float = 0.95,
         n_samples_max: int = 2000,
         figsize: tuple[float, float] | None = None,
+        colors: list[str] | None = None,
     ) -> tuple[object, np.ndarray]:
         """Plot raw data and posterior fit for *subset*.
 
@@ -1507,6 +1563,10 @@ class BetterFitter:
                 :meth:`posterior_curves` (default 0.95).
             n_samples_max: Max posterior draws used for HDI evaluation.
             figsize: Figure size; auto-scaled when ``None``.
+            colors: List of hex color codes (e.g., ['#FF5733', '#33FF57'])
+                for the total fitted signal per peak.  Length must match the
+                number of peaks in the subset.  When ``None`` (default), uses
+                blue ('C0') for all peaks.
 
         Returns:
             ``(fig, axes)`` — the matplotlib Figure and ``[n_display, n_col]``
@@ -1600,6 +1660,7 @@ class BetterFitter:
             chromatogram_ids=chrom_ids_display,
             hdi_prob=hdi_prob,
             figsize=figsize,
+            colors=colors,
         )
 
     # ------------------------------------------------------------------
@@ -1697,7 +1758,9 @@ class BetterFitter:
                 import os
 
                 base, ext = os.path.splitext(save_summary)
-                subset_summary = f"{base}_{name}{ext}" if len(active) > 1 else save_summary
+                subset_summary = (
+                    f"{base}_{name}{ext}" if len(active) > 1 else save_summary
+                )
 
             view._run_mcmc(
                 num_samples=num_samples,
@@ -1762,6 +1825,8 @@ class BetterFitter:
             "artefact_peak_index",
             "free_peak_index",
             "nonfree_peak_index",
+            "free_fixed_local_index",
+            "free_vary_local_index",
             "apex_loc",
             "apex_scale",
             "trace_shift_scale",
@@ -1772,6 +1837,8 @@ class BetterFitter:
             "dominant_area_loc_per_trace",
             "area_total_loc_per_trace",
             "artefact_area_loc_shared",
+            "window_lo",
+            "window_hi",
             "baseline_intercept_loc",
             "baseline_intercept_scale",
             "baseline_slope_loc",
@@ -1818,6 +1885,33 @@ class BetterFitter:
     # Posterior area extraction (view-level helpers)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _molecule_area_slice(
+        peak: PeakAnnotation,
+        area_l: np.ndarray,
+        area_r: np.ndarray,
+    ) -> np.ndarray:
+        """Return the area array that represents the molecule's concentration.
+
+        Centralises mode-dependent area-selection so every downstream method
+        uses identical logic:
+
+        * ``single`` — left component only (right is zero by construction).
+        * ``free_doublet`` — sum of both components.
+        * ``artefact_doublet`` — dominant-side component only, **unless**
+          ``include_artefact_in_area=True``, in which case both are summed.
+        """
+        if peak.mode == "single":
+            return area_l
+        if peak.mode == "free_doublet":
+            return area_l + area_r
+        # artefact_doublet
+        if peak.include_artefact_in_area:
+            return area_l + area_r
+        if peak.artefact_side == "left":
+            return area_r  # artefact on left → dominant on right
+        return area_l  # artefact on right → dominant on left
+
     @property
     def posterior_area_matrix(self) -> np.ndarray:
         """Median posterior area matrix ``[n_trace, n_peak, 2]``.
@@ -1850,15 +1944,9 @@ class BetterFitter:
         area_r = np.asarray(samples["area_r"])
         mol_area = np.empty_like(area_l)
         for p_idx, peak in enumerate(peaks):
-            if peak.mode == "single":
-                mol_area[..., p_idx] = area_l[..., p_idx]
-            elif peak.mode == "free_doublet":
-                mol_area[..., p_idx] = area_l[..., p_idx] + area_r[..., p_idx]
-            else:
-                if peak.artefact_side == "left":
-                    mol_area[..., p_idx] = area_r[..., p_idx]
-                else:
-                    mol_area[..., p_idx] = area_l[..., p_idx]
+            mol_area[..., p_idx] = self._molecule_area_slice(
+                peak, area_l[..., p_idx], area_r[..., p_idx]
+            )
         _, q_med, _ = quantiles
         return np.quantile(mol_area, q_med, axis=0)
 
@@ -1909,22 +1997,26 @@ class BetterFitter:
         mol_apex = np.empty_like(apex_l)
 
         for p_idx, peak in enumerate(peaks):
+            al = area_l[..., p_idx]
+            ar = area_r[..., p_idx]
+            mol_area[..., p_idx] = BetterFitter._molecule_area_slice(peak, al, ar)
             if peak.mode == "single":
-                mol_area[..., p_idx] = area_l[..., p_idx]
                 mol_apex[..., p_idx] = apex_l[..., p_idx]
             elif peak.mode == "free_doublet":
-                mol_area[..., p_idx] = area_l[..., p_idx] + area_r[..., p_idx]
-                total = area_l[..., p_idx] + area_r[..., p_idx]
+                total = al + ar
                 mol_apex[..., p_idx] = (
-                    apex_l[..., p_idx] * area_l[..., p_idx]
-                    + apex_r[..., p_idx] * area_r[..., p_idx]
+                    apex_l[..., p_idx] * al + apex_r[..., p_idx] * ar
                 ) / np.where(total > 0, total, 1.0)
             else:  # artefact_doublet
-                if peak.artefact_side == "left":
-                    mol_area[..., p_idx] = area_r[..., p_idx]
+                if peak.include_artefact_in_area:
+                    # Both components contribute — use area-weighted centroid
+                    total = al + ar
+                    mol_apex[..., p_idx] = (
+                        apex_l[..., p_idx] * al + apex_r[..., p_idx] * ar
+                    ) / np.where(total > 0, total, 1.0)
+                elif peak.artefact_side == "left":
                     mol_apex[..., p_idx] = apex_r[..., p_idx]
                 else:
-                    mol_area[..., p_idx] = area_l[..., p_idx]
                     mol_apex[..., p_idx] = apex_l[..., p_idx]
 
         q_low, _, q_high = quantiles
@@ -1985,15 +2077,9 @@ class BetterFitter:
 
         mol_area = np.empty_like(area_l)
         for p_idx, peak in enumerate(peaks):
-            if peak.mode == "single":
-                mol_area[..., p_idx] = area_l[..., p_idx]
-            elif peak.mode == "free_doublet":
-                mol_area[..., p_idx] = area_l[..., p_idx] + area_r[..., p_idx]
-            else:
-                if peak.artefact_side == "left":
-                    mol_area[..., p_idx] = area_r[..., p_idx]
-                else:
-                    mol_area[..., p_idx] = area_l[..., p_idx]
+            mol_area[..., p_idx] = BetterFitter._molecule_area_slice(
+                peak, area_l[..., p_idx], area_r[..., p_idx]
+            )
 
         q_data = np.moveaxis(
             np.quantile(mol_area, quantiles, axis=0), 0, -1
