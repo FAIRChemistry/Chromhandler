@@ -1308,6 +1308,7 @@ def plot_fit(
     chromatogram_ids: Optional[list[str]] = None,
     hdi_prob: float = 0.95,
     figsize: Optional[tuple[float, float]] = None,
+    colors: Optional[list[str]] = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot raw data and posterior fit curves.
 
@@ -1345,6 +1346,11 @@ def plot_fit(
         Credible-interval probability; used only for legend labels.
     figsize : tuple or None
         Figure size; auto-scaled when ``None``.
+    colors : list[str] or None
+        List of hex color codes (e.g., ['#FF5733', '#33FF57']) for the total
+        fitted signal line + HDI band, one per peak.  Length must match
+        ``n_peak``.  When ``None`` (default), uses blue ('C0') for all peaks.
+        The combined column (when n_peak > 1) always uses blue.
 
     Returns
     -------
@@ -1359,6 +1365,9 @@ def plot_fit(
     n_peak = len(peaks)
     has_combined = n_peak > 1
     n_col = n_peak + (1 if has_combined else 0)
+
+    if colors is not None:
+        _validate_hex_colors(colors, n_peak)
 
     if chromatogram_ids is not None and len(chromatogram_ids) != n_display:
         raise ValueError(
