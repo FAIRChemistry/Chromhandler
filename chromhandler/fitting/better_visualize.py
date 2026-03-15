@@ -1425,6 +1425,9 @@ def plot_fit(
         for p, peak in enumerate(peaks):
             ax = axes[t, p]
 
+            # Determine color for this peak's total fitted signal
+            color_for_peak = colors[p] if colors is not None else "C0"
+
             # Raw scatter masked to this window
             raw_mask = (x_trace >= peak.rt_min) & (x_trace <= peak.rt_max)
             x_raw, y_raw = x_trace[raw_mask], y_trace[raw_mask]
@@ -1496,14 +1499,14 @@ def plot_fit(
                         linestyle="--",
                         label=f"Right comp. ({hdi_label})" if first else "",
                     )
-                    # Total — blue
+                    # Total — custom color or blue
                     _plot_hdi_line(
                         ax,
                         x_c,
                         curves.total_median[ci, win],
                         curves.total_lower[ci, win],
                         curves.total_upper[ci, win],
-                        color="C0",
+                        color=color_for_peak,
                         alpha=0.3,
                         linewidth=1.5,
                         linestyle="-",

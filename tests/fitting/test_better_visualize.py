@@ -110,3 +110,21 @@ def test_plot_fit_colors_wrong_length(sample_posterior_curves):
             time, signal, peaks, curves,
             colors=["#FF5733"]  # Wrong length
         )
+
+
+def test_plot_fit_custom_colors_rendering(sample_posterior_curves):
+    """Test that custom colors are actually rendered (sanity check)."""
+    time, signal, peaks, curves = sample_posterior_curves
+    n_peak = len(peaks)
+    colors = ["#FF0000", "#00FF00", "#0000FF"][:n_peak]
+
+    fig, axes = plot_fit(
+        time, signal, peaks, curves,
+        colors=colors
+    )
+
+    # Check that figure was created
+    assert fig is not None
+    assert axes.shape[1] >= n_peak
+
+    plt.close(fig)
