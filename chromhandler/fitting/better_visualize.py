@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,6 +18,50 @@ from matplotlib.colors import Colormap, ListedColormap, to_rgba
 from matplotlib.patches import Patch
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+
+# ---------------------------------------------------------------------------
+# Validation Helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_hex_colors(colors: list[str], n_peak: int) -> None:
+    """Validate that colors is a list of valid hex codes with correct length.
+
+    Parameters
+    ----------
+    colors : list[str]
+        List of hex color codes.
+    n_peak : int
+        Expected number of peaks/colors.
+
+    Raises
+    ------
+    ValueError
+        If length doesn't match n_peak or any color is not a valid hex code.
+    """
+    if len(colors) != n_peak:
+        raise ValueError(
+            f"colors must have length n_peak={n_peak}, got {len(colors)}. "
+            "Provide one hex color code per peak."
+        )
+
+    for i, color in enumerate(colors):
+        if not isinstance(color, str):
+            raise ValueError(
+                f"colors[{i}] is not a string, got {type(color).__name__}."
+            )
+        if not color.startswith("#"):
+            raise ValueError(
+                f"colors[{i}]='{color}' is not a valid hex code. "
+                "Use format '#RRGGBB' (e.g., '#FF0000' for red)."
+            )
+        if len(color) not in (7, 9):  # #RRGGBB or #RRGGBBAA
+            raise ValueError(
+                f"colors[{i}]='{color}' is not a valid hex code. "
+                "Use format '#RRGGBB' (e.g., '#FF0000' for red) or "
+                "'#RRGGBBAA' with alpha."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Full-trace overview
@@ -362,7 +405,9 @@ def add_sigma_alpha_prior_density(
 
     # Chi-square(df=2) quantiles give equal probability mass per band.
     # r^2_p = -2 log(1-p) maps mass fraction to squared Mahalanobis radius.
-    mass_levels = np.linspace(1.0 / (n_levels + 1), 1.0 - 1.0 / (n_levels + 1), n_levels)
+    mass_levels = np.linspace(
+        1.0 / (n_levels + 1), 1.0 - 1.0 / (n_levels + 1), n_levels
+    )
     mass_levels[-1] = min(float(mass_levels[-1]), 0.95)
     r2 = -2.0 * np.log(1.0 - mass_levels)
     density_peak = 1.0 / (2.0 * np.pi * alpha_scale_f * sigma_scale_f)
@@ -395,10 +440,6 @@ def add_sigma_alpha_prior_density(
         linewidths=0.7,
         alpha=0.75,
     )
-    # Crosshair at prior centre
-    ax.axvline(alpha_loc_f, color=linecolor, linewidth=0.8, linestyle=":", alpha=0.9)
-    ax.axhline(sigma_loc_f, color=linecolor, linewidth=0.8, linestyle=":", alpha=0.9)
-
     if set_limits:
         ax.set_xlim(x_min, x_max)
         ax.set_ylim(y_min, y_max)
@@ -880,6 +921,14 @@ def plot_sigma_alpha_scatter(
     colorize_by: Literal[None, "sample_id", "subset"] = None,
     sample_ids: Optional[list[str]] = None,
     subset_ids: Optional[list[str]] = None,
+    label_fontsize: float = 9,
+    title_fontsize: float = 10,
+    tick_fontsize: float = 8,
+    spine_linewidth: float = 0.8,
+    marker_size: float = 40,
+    marker_linewidth: float = 0.9,
+    transparent: bool = True,
+    show_prior_density: bool = True,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot per-trace FWHM-derived ``sigma`` vs ``alpha`` with 2-D prior density.
 
@@ -1008,10 +1057,11 @@ def plot_sigma_alpha_scatter(
         sharey=False,
         squeeze=False,
     )
-    fig.patch.set_facecolor("none")
+    bg = "none" if transparent else "white"
+    fig.patch.set_facecolor(bg)
     axes = axes.reshape(1, n_peak)
     for ax in axes.flat:
-        ax.patch.set_facecolor("none")
+        ax.patch.set_facecolor(bg)
 
     for peak_idx, peak in enumerate(peaks):
         ax = axes[0, peak_idx]
@@ -1020,7 +1070,8 @@ def plot_sigma_alpha_scatter(
         sigma_peak = panel_sigma[peak_idx]
 
         if (
-            alpha_loc_arr is not None
+            show_prior_density
+            and alpha_loc_arr is not None
             and alpha_scale_arr is not None
             and sigma_loc_arr is not None
             and sigma_scale_arr is not None
@@ -1059,14 +1110,15 @@ def plot_sigma_alpha_scatter(
 
             if apex_height_arr is not None:
                 heights_peak = apex_height_arr[valid_peak, peak_idx]
-                sizes_peak = _marker_sizes_from_values(heights_peak)
+                # Scale height-derived sizes proportionally to marker_size baseline
+                sizes_peak = _marker_sizes_from_values(heights_peak) * (marker_size / 40)
                 ax.scatter(
                     alpha_peak,
                     sigma_peak,
                     s=sizes_peak,
                     facecolors=face_colors,
                     edgecolors=edge_colors,
-                    linewidths=0.9,
+                    linewidths=marker_linewidth,
                     alpha=None,
                     zorder=4,
                 )
@@ -1074,10 +1126,10 @@ def plot_sigma_alpha_scatter(
                 ax.scatter(
                     alpha_peak,
                     sigma_peak,
-                    s=40,
+                    s=marker_size,
                     facecolors=face_colors,
                     edgecolors=edge_colors,
-                    linewidths=0.9,
+                    linewidths=marker_linewidth,
                     alpha=None,
                     zorder=4,
                 )
@@ -1089,16 +1141,18 @@ def plot_sigma_alpha_scatter(
                 transform=ax.transAxes,
                 ha="center",
                 va="center",
-                fontsize=10,
+                fontsize=label_fontsize,
                 color="0.4",
             )
 
-        ax.set_title(peak.molecule_id, fontsize=10)
-        ax.set_xlabel(r"$\alpha$ (–)", fontsize=9)
+        ax.set_title(peak.molecule_id, fontsize=title_fontsize)
+        ax.set_xlabel(r"$\alpha$ [–]", fontsize=label_fontsize)
         if peak_idx == 0:
-            ax.set_ylabel(r"$\sigma$ (min)", fontsize=9)
+            ax.set_ylabel(r"$\sigma$ [min]", fontsize=label_fontsize)
         ax.grid(True, alpha=0.3, linestyle="--")
-        ax.tick_params(labelsize=8)
+        ax.tick_params(labelsize=tick_fontsize, width=spine_linewidth)
+        for spine in ax.spines.values():
+            spine.set_linewidth(spine_linewidth)
         ax.set_xlim(*x_lim_per_panel[peak_idx])
         ax.set_ylim(*y_lim_per_panel[peak_idx])
 
@@ -1124,52 +1178,52 @@ def plot_sigma_alpha_scatter(
 # ---------------------------------------------------------------------------
 
 
-def _compute_skew_normal_component(
-    x: jnp.ndarray,
-    xi: jnp.ndarray,
-    sigma: jnp.ndarray,
-    alpha: jnp.ndarray,
-    area: jnp.ndarray,
-) -> np.ndarray:
-    """Compute area-scaled skew-normal PDF values.
+# def _compute_skew_normal_component(
+#     x: jnp.ndarray,
+#     xi: jnp.ndarray,
+#     sigma: jnp.ndarray,
+#     alpha: jnp.ndarray,
+#     area: jnp.ndarray,
+# ) -> np.ndarray:
+#     """Compute area-scaled skew-normal PDF values.
 
-    Parameters
-    ----------
-    x : jnp.ndarray
-        Time axis [n_window]
-    xi : jnp.ndarray
-        Location parameter [n_total]
-    sigma : jnp.ndarray
-        Scale parameter [n_total]
-    alpha : jnp.ndarray
-        Skewness parameter [n_total]
-    area : jnp.ndarray
-        Area scaling factor [n_total]
+#     Parameters
+#     ----------
+#     x : jnp.ndarray
+#         Time axis [n_window]
+#     xi : jnp.ndarray
+#         Location parameter [n_total]
+#     sigma : jnp.ndarray
+#         Scale parameter [n_total]
+#     alpha : jnp.ndarray
+#         Skewness parameter [n_total]
+#     area : jnp.ndarray
+#         Area scaling factor [n_total]
 
-    Returns
-    -------
-    np.ndarray
-        Component signal [n_total, n_window]
-    """
-    x_broad = x[None, :]  # [1, n_window]
-    xi_broad = xi[:, None]  # [n_total, 1]
-    sigma_broad = sigma[:, None]  # [n_total, 1]
-    alpha_broad = alpha[:, None]  # [n_total, 1]
+#     Returns
+#     -------
+#     np.ndarray
+#         Component signal [n_total, n_window]
+#     """
+#     x_broad = x[None, :]  # [1, n_window]
+#     xi_broad = xi[:, None]  # [n_total, 1]
+#     sigma_broad = sigma[:, None]  # [n_total, 1]
+#     alpha_broad = alpha[:, None]  # [n_total, 1]
 
-    # Compute log PDF (sigma normalization already included)
-    sigma_safe = jnp.maximum(sigma_broad, 1e-6)
-    z = (x_broad - xi_broad) / sigma_safe
-    log_pdf = (
-        jnp.log(2.0)
-        - jnp.log(sigma_safe)
-        - 0.5 * z**2
-        - 0.5 * jnp.log(2.0 * jnp.pi)
-        + jnp.log(jax.scipy.special.ndtr(alpha_broad * z))
-    )
-    # Exponentiate directly (sigma normalization already in log_pdf)
-    pdf = jnp.exp(log_pdf)  # [n_total, n_window]
-    component = area[:, None] * pdf  # [n_total, n_window]
-    return np.asarray(component)
+#     # Compute log PDF (sigma normalization already included)
+#     sigma_safe = jnp.maximum(sigma_broad, 1e-6)
+#     z = (x_broad - xi_broad) / sigma_safe
+#     log_pdf = (
+#         jnp.log(2.0)
+#         - jnp.log(sigma_safe)
+#         - 0.5 * z**2
+#         - 0.5 * jnp.log(2.0 * jnp.pi)
+#         + jnp.log(jax.scipy.special.ndtr(alpha_broad * z))
+#     )
+#     # Exponentiate directly (sigma normalization already in log_pdf)
+#     pdf = jnp.exp(log_pdf)  # [n_total, n_window]
+#     component = area[:, None] * pdf  # [n_total, n_window]
+#     return np.asarray(component)
 
 
 def add_hdi_band(
