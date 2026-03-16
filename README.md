@@ -2,103 +2,46 @@
 
 ![PyPI - Version](https://img.shields.io/pypi/v/chromhandler)
 [![Documentation](https://img.shields.io/badge/Documentation-Online-blue.svg)](https://fairchemistry.github.io/Chromhandler/)
-[![Tests](https://github.com/FAIRChemistry/Chromhandler/actions/workflows/run_tests.yaml/badge.svg)](https://github.com/FAIRChemistry/Chromhandler/actions/workflows/run_tests.yaml)
-
 
 ## ℹ️ Overview
 
-`chromhandler` (formerly `chromatopy`) is a Python package that aims to streamline the data processing and analysis of time-course chromatographic reaction data. It allows processing raw or pre-processed chromatographic data, enriching it with metadata such as reaction time, temperature, pH, and initial concentrations of reaction components. Finally, the peaks of interest can be aggregated, concentrations calculated, and the time-course data for each analyte transformed to EnzymeML data.
+`chromhandler` is Python software that streamlines data acquisition and processing for chromatographic time-course reaction data.
 
-`chromhandler` is designed to work seamlessly with [OpenChrom](https://lablicate.com/platform/openchrom), enabling batch processing of proprietary chromatographic data. After processing in OpenChrom and exporting to an open file format, the data can be further analyzed in Jupyter Notebooks using `chromhandler`. This allows for creating and applying calibration curves and generating EnzymeML files for subsequent data analysis.
-For some output formats, `chromhandler` provides a direct interface to read in data. For more information on the supported file formats and data preparation to use the `chromhandler` workflow, refer to the [data preparation](https://fairchemistry.github.io/chromhandler/supported_formats/#supported-formats) section.
+It is built to reduce manual spreadsheet work and to support reproducible processing workflows from exported chromatograms to structured, analysis-ready datasets. The package focuses on handling chromatographic measurements, organizing metadata, aggregating peaks of interest, and preparing consistent outputs for downstream analysis.
 
-``` mermaid
-graph LR
-  AD[🌈 Chromatographic Instrument] --> CAL
-  AD --> RXN
+## 🚀 Upcoming release
 
-  subgraph "📁experimental_data"
+A new version planned for **04/2026** will introduce:
 
-      CAL["<div style='text-align:left;font-family:monospace'>
-📂 calib_substrate<br>
-├── mh1_10mM.json<br>
-├── mh2_50mM.json<br>
-└── mh3_90mM.json<br><br>
-📂 calib_prod1<br>
-├── prod1_10mM.json<br>
-├── prod1_50mM.json<br>
-└── prod1_90mM.json<br><br>
-</div>"]
+- **📊 Joint analysis of chromatographic time-course data**  
+  Improved support for processing related chromatograms as coherent experimental series.
 
-      RXN["<div style='text-align:left;font-family:monospace'>
-📂 reaction_mh9<br>
-├── mh9_1h.json<br>
-├── mh9_2h.json<br>
-├── mh9_3h.json<br>
-├── mh9_4h.json<br>
-├── mh9_5h.json<br>
-├── mh9_6h.json<br>
-└── mh9_12h.json
-</div>"]
-  end
+- **🧩 Streamlined creation of analysis-ready datasets**  
+  Faster transition from exported chromatograms to structured datasets ready for downstream evaluation.
 
-  CAL -->|read| C_cal{"<span style='font-family:monospace'><b>chromhandler</b></span><br>"}
-  RXN -->|read| C_react{"<span style='font-family:monospace'><b>chromhandler</b></span><br>"}
+- **🎲 Probabilistic peak processing**  
+  Support for uncertainty-aware peak handling and more robust area estimation.
 
-  cal1["<div style='text-align:left'>
-Define measured molecules<br>
-– retention time<br>
-– PubChem CID
-</div>"]
+## ⭐ Key features
 
-  cal2["<div style='text-align:left'>
-Create calibration standard
-</div>"]
+- **🌱 Low-friction chromatogram processing**  
+  Process exported chromatographic data without relying on spreadsheet-based workflows.
 
-  E4["Define reaction conditions"]
-  E3["Add measured molecules"]
-  E5["Define enzymes"]
-  Enz[📄 EnzymeML Document]
+- **🧪 Metadata enrichment**  
+  Attach reaction metadata such as time, temperature, pH, or sample information to chromatographic measurements.
 
-  subgraph "Calibration mode"
-    C_cal --> cal1
-    cal1 --> cal2
-  end
+- **📈 Calibration support**  
+  Create and apply calibration curves for consistent concentration estimation across experiments.
 
-  subgraph "Reaction mode"
-    C_react --> E4
-    E4 --> E3
-    E3 --> E5
-    cal2 --> E3
-  end
+- **⏱️ Time-course data handling**  
+  Organize chromatographic reaction series in a structured and reproducible way.
 
-  E5 -->|convert| Enz
-```
-
-## ⭐ Key Features
-
-- **🌱 Low friction data processing**   
-Leave behind data processing in spreadsheet applications and directly start with data analysis based on raw data.
-- **🧪 Enrich reaction data with metadata**  
-Assign metadata like initial concentrations of reactants, temperature, pH, etc., to reaction data to yield modeling-ready data.
-- **📈 Create and apply calibration curves**  
-Create calibrators for your analytes and use them throughout your data analysis for seamless concentration calculation.
-- **📂 FAIR data**  
-Transform your data into EnzymeML format for subsequent analysis pipelines.
+- **📂 FAIR-oriented outputs**  
+  Prepare datasets for transparent reuse and downstream integration.
 
 ## 🛠️ Installation
 
-Install `chromhandler` using `pip`:
+Install from PyPI:
 
 ```bash
 pip install chromhandler
-```
-
-or
-
-
-```bash
-pip install git+https://github.com/FAIRChemistry/Chromhandler.git
-```
-
-For more information and examples, please refer to the [Documentation](https://fairchemistry.github.io/chromhandler/) section.
