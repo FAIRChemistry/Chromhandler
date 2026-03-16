@@ -132,17 +132,34 @@ class ASMReader(AbstractReader):
         else:
             raise ValueError(f"Unit '{time_unit}' not recognized")
 
-        try:
-            peak_list = meas_document["peak list"]["peak"]
-        except KeyError:
-            analyte_document = doc[0]["analyte aggregate document"]["analyteDocument"]
+        peak_list = None
+        peak_block = meas_document.get("peak list")
+        if isinstance(peak_block, dict):
+            peaks = peak_block.get("peak")
+            if isinstance(peaks, list):
+                peak_list = peaks
 
-            if len(analyte_document) > 1:
-                logger.warning(
-                    f"More than one analyte document found in '{path}'. Using the first analyte document only."
-                )
+        doc_entry = doc[0]
+        if peak_list is None and isinstance(doc_entry, dict):
+            analyte_aggregate = doc_entry.get("analyte aggregate document")
+            analyte_document = None
+            if isinstance(analyte_aggregate, dict):
+                analyte_document = analyte_aggregate.get("analyteDocument")
 
-            peak_list = analyte_document[0]["peak list"]["peak"]
+            if isinstance(analyte_document, list) and analyte_document:
+                if len(analyte_document) > 1:
+                    logger.warning(
+                        f"More than one analyte document found in '{path}'. Using the first analyte document only."
+                    )
+
+                analyte_peak_block = analyte_document[0].get("peak list")
+                if isinstance(analyte_peak_block, dict):
+                    peaks = analyte_peak_block.get("peak")
+                    if isinstance(peaks, list):
+                        peak_list = peaks
+
+        if peak_list is None:
+            peak_list = []
 
         peaks = [self.map_peaks(peak) for peak in peak_list]
 
