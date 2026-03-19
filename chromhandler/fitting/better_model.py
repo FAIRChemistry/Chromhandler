@@ -288,14 +288,14 @@ def model(
     # ------------------------------------------------------------------ primitive shape latents
     sigma_loc_safe = jnp.maximum(jnp.asarray(sigma_loc, dtype=jnp.float32), 1e-6)
     sigma_scale_safe = jnp.maximum(jnp.asarray(sigma_scale, dtype=jnp.float32), 1e-6)
+    # For free doublets each component is ~half the window width, so halve the reference.
     sigma_prior_loc = jnp.where(free_mask, 0.5 * sigma_loc_safe, sigma_loc_safe)
-    sigma_prior_scale = jnp.where(free_mask, 0.5 * sigma_scale_safe, sigma_scale_safe)
-    log_sigma_loc, log_sigma_scale = _lognormal_params_from_linear(
-        sigma_prior_loc,
-        sigma_prior_scale,
-    )
+    # LogUniform: sample log(sigma) ~ Uniform(log(0.5*ref), log(2.0*ref)).
+    # Hard bounds prevent sigma from escaping to implausible values under VI.
+    log_sigma_lo = jnp.log(0.5 * sigma_prior_loc)
+    log_sigma_hi = jnp.log(2.0 * sigma_prior_loc)
     log_sigma_base = numpyro.sample(
-        "log_sigma_base", dist.Normal(log_sigma_loc, log_sigma_scale)
+        "log_sigma_base", dist.Uniform(log_sigma_lo, log_sigma_hi)
     )  # [n_peak]
     sigma_base = numpyro.deterministic("sigma_base", jnp.exp(log_sigma_base))
     if n_artefact > 0:
@@ -563,17 +563,34 @@ def model(
     area_flat = _stack_left_right(area_l, area_r)
 
     # ------------------------------------------------------------------ baseline
+    # Centre x at the peak-window midpoint so that baseline_intercept is the
+    # baseline level *within the observed region* rather than an extrapolation
+    # to x = 0.  Without centring, intercept and slope share a near-perfect
+    # anti-correlation ridge (a change of Δb₁ in slope requires
+    # Δb₀ ≈ −x_mid·Δb₁ ≈ −3·Δb₁ to keep the baseline constant), making both
+    # parameters essentially unidentifiable from windowed data.
+    x_mid = 0.5 * (jnp.min(window_lo) + jnp.max(window_hi))  # scalar
+
+    # Transform the caller's x = 0 prior to the x = x_mid basis:
+    #   E[b₀ + b₁·x_mid]   = b₀_loc + b₁_loc·x_mid
+    #   Var[b₀ + b₁·x_mid] ≈ Var(b₀) + x_mid²·Var(b₁)
+    # (conservative: ignores the negative b₀–b₁ covariance in the linear fit,
+    # so the prior is slightly wider than optimal — harmless, the likelihood
+    # tightens it).
+    baseline_mid_loc = baseline_intercept_loc + baseline_slope_loc * x_mid
+    baseline_mid_scale = jnp.sqrt(
+        jnp.maximum(baseline_intercept_scale, 1e-6) ** 2
+        + (x_mid * jnp.maximum(baseline_slope_scale, 1e-8)) ** 2
+    )
     baseline_intercept = numpyro.sample(
         "baseline_intercept",
-        dist.Normal(
-            baseline_intercept_loc, jnp.maximum(baseline_intercept_scale, 1e-6)
-        ),
-    )  # [n_trace]
+        dist.Normal(baseline_mid_loc, jnp.maximum(baseline_mid_scale, 1e-6)),
+    )  # [n_trace] — baseline level at x_mid (directly observable, identifiable)
     baseline_slope = numpyro.sample(
         "baseline_slope",
         dist.Normal(baseline_slope_loc, jnp.maximum(baseline_slope_scale, 1e-8)),
     )  # [n_trace]
-    baseline = baseline_intercept[:, None] + baseline_slope[:, None] * x
+    baseline = baseline_intercept[:, None] + baseline_slope[:, None] * (x - x_mid)
     numpyro.deterministic("baseline_curve", baseline)
 
     # ------------------------------------------------------------------ likelihood

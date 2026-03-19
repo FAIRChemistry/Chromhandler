@@ -522,3 +522,27 @@ def test_molecule_area_slice_free_doublet_sums_both() -> None:
     np.testing.assert_array_equal(
         BetterFitter._molecule_area_slice(peak, a_l, a_r), a_l + a_r
     )
+
+
+def test_sigma_base_respects_loguniform_bounds() -> None:
+    """sigma_base must stay within [0.5, 2.0] × sigma_prior_loc for every prior sample."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    kwargs = _model_kwargs()
+    sigma_loc = np.asarray(kwargs["sigma_loc"])  # [0.03, 0.05, 0.06]
+    peak_mode_code = np.asarray(kwargs["peak_mode_code"])  # [0, 1, 2]
+    free_mask = peak_mode_code == 2  # [False, False, True]
+    sigma_prior_loc = np.where(free_mask, 0.5 * sigma_loc, sigma_loc)
+    lower = 0.5 * sigma_prior_loc
+    upper = 2.0 * sigma_prior_loc
+
+    for seed in range(30):
+        trace = handlers.trace(handlers.seed(model, rng_seed=seed)).get_trace(**kwargs)
+        sigma_base = np.asarray(trace["sigma_base"]["value"])
+        assert np.all(sigma_base >= lower - 1e-5), (
+            f"seed={seed}: sigma_base={sigma_base} below lower={lower}"
+        )
+        assert np.all(sigma_base <= upper + 1e-5), (
+            f"seed={seed}: sigma_base={sigma_base} above upper={upper}"
+        )
