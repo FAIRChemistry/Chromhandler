@@ -28,7 +28,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from jax.scipy.special import log_ndtr
+from jax.scipy.special import expit, log_ndtr
 
 numpyro.set_host_device_count(8)
 
@@ -44,11 +44,16 @@ _AREA_LOG_SIGMA: float = 0.4
 # while strongly enforcing the constant-artefact constraint across traces.
 _SH_AREA_LOG_SIGMA: float = 0.3
 
-# Free-doublet separation hierarchy
-_FREE_SEPARATION_MIN_SIGMA_MULTIPLIER: float = 0.5
-_FREE_SEPARATION_TYPICAL_SIGMA_MULTIPLIER: float = 1.5
-_FREE_SEPARATION_REL_SCALE_MEDIAN: float = 0.10
-_FREE_SEPARATION_REL_SCALE_LOG_SCALE: float = 0.35
+# Free-doublet separation: sigmoid-bounded hierarchy
+_FREE_SEP_MIN_SIGMA_MULT: float = 0.5  # sep_min = mult × sigma_loc
+_FREE_SEP_TYPICAL_SIGMA_MULT: float = 1.5  # target typical = mult × sigma_loc
+_FREE_SEP_MAX_WINDOW_FRAC: float = 0.5  # sep_max = frac × window_width
+_FREE_SEP_TRACE_SCALE_PRIOR: float = (
+    0.5  # HalfNormal scale for per-peak trace variation
+)
+
+# Artefact area hierarchy
+_ARTEFACT_AREA_TRACE_LOG_SCALE: float = 0.15  # ~15% CV per-trace variation
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +147,37 @@ def _bounded_alpha_prior_to_raw(
     return raw_loc, raw_scale
 
 
+def _bounded_separation_prior_to_raw(
+    target: jnp.ndarray,
+    target_scale: jnp.ndarray,
+    sep_min: jnp.ndarray,
+    sep_max: jnp.ndarray,
+    *,
+    bound_eps: float = 1e-4,
+    scale_floor: float = 1e-4,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Map bounded separation priors to sigmoid raw-space Normal parameters.
+
+    Analogous to ``_bounded_alpha_prior_to_raw`` but uses the logistic
+    sigmoid instead of tanh.  Given a target separation in
+    ``[sep_min, sep_max]``, returns ``(raw_loc, raw_scale)`` such that
+    ``sep_min + (sep_max - sep_min) * sigmoid(raw)`` recovers the target.
+    """
+    sep_range = jnp.maximum(sep_max - sep_min, 1e-8)
+    frac = jnp.clip(
+        (jnp.asarray(target, dtype=jnp.float32) - sep_min) / sep_range,
+        bound_eps,
+        1.0 - bound_eps,
+    )
+    raw_loc = jnp.log(frac) - jnp.log1p(-frac)  # logit
+    derivative = sep_range * frac * (1.0 - frac)  # delta method
+    raw_scale = jnp.asarray(target_scale, dtype=jnp.float32) / jnp.maximum(
+        derivative, scale_floor
+    )
+    raw_scale = jnp.maximum(raw_scale, scale_floor)
+    return raw_loc, raw_scale
+
+
 def _lognormal_params_from_linear(
     loc: jnp.ndarray,
     scale: jnp.ndarray,
@@ -200,6 +236,8 @@ def model(
     artefact_peak_index: jnp.ndarray,  # [n_artefact]  indices into peaks
     free_peak_index: jnp.ndarray,  # [n_free]  indices into peaks
     nonfree_peak_index: jnp.ndarray,  # [n_nonfree] indices into peaks
+    free_fixed_local_index: jnp.ndarray,  # [n_free_fixed]  positions within n_free axis, vary_separation=False
+    free_vary_local_index: jnp.ndarray,  # [n_free_vary]   positions within n_free axis, vary_separation=True
     # --- peak priors (from geometric_priors_to_arrays) ---
     apex_loc: jnp.ndarray,  # [n_peak]
     apex_scale: jnp.ndarray,  # [n_peak]
@@ -211,6 +249,9 @@ def model(
     dominant_area_loc_per_trace: jnp.ndarray,  # [n_trace, n_peak]  per-trace dominant-component area prior
     area_total_loc_per_trace: jnp.ndarray,  # [n_trace, n_peak]  per-trace total free-doublet area prior
     artefact_area_loc_shared: jnp.ndarray,  # [n_artefact]  shared artefact area prior centres
+    # --- peak window bounds (from geometric_priors_to_arrays) ---
+    window_lo: jnp.ndarray,  # [n_peak]  peak window lower bounds (minutes)
+    window_hi: jnp.ndarray,  # [n_peak]  peak window upper bounds (minutes)
     # --- baseline priors (from estimate_baseline) ---
     baseline_intercept_loc: jnp.ndarray,  # [n_trace]
     baseline_intercept_scale: jnp.ndarray,  # [n_trace]
@@ -225,12 +266,14 @@ def model(
     n_artefact = int(artefact_peak_index.shape[0])
     n_free = int(free_peak_index.shape[0])
     n_nonfree = int(nonfree_peak_index.shape[0])
+    n_free_vary = int(free_vary_local_index.shape[0])
 
     mode_code = jnp.asarray(peak_mode_code, dtype=jnp.int32)
     artefact_side_v = jnp.asarray(artefact_side, dtype=jnp.float32)
     artefact_idx = jnp.asarray(artefact_peak_index, dtype=jnp.int32)
     free_idx = jnp.asarray(free_peak_index, dtype=jnp.int32)
     nonfree_idx = jnp.asarray(nonfree_peak_index, dtype=jnp.int32)
+    free_vary_local = jnp.asarray(free_vary_local_index, dtype=jnp.int32)
     free_mask = mode_code == _MODE_FREE_DOUBLET
     nonfree_position = (
         jnp.cumsum((mode_code != _MODE_FREE_DOUBLET).astype(jnp.int32)) - 1
@@ -336,61 +379,78 @@ def model(
             jnp.asarray(artefact_area_loc_shared, dtype=jnp.float32),
             1e-8,
         )
-        area_artefact_shared = numpyro.sample(
-            "area_artefact_shared",
+        area_artefact_typical = numpyro.sample(
+            "area_artefact_typical",
             dist.LogNormal(jnp.log(artefact_area_safe), _SH_AREA_LOG_SIGMA),
         )
+        area_artefact_trace_offset = numpyro.sample(
+            "area_artefact_trace_offset",
+            dist.Normal(0.0, 1.0).expand([n_trace, n_artefact]),
+        )
+        area_artefact = numpyro.deterministic(
+            "area_artefact",
+            area_artefact_typical[None, :]
+            * jnp.exp(_ARTEFACT_AREA_TRACE_LOG_SCALE * area_artefact_trace_offset),
+        )
     if n_free > 0:
-        separation_free_min = numpyro.deterministic(
+        # --- Geometric bounds (all free peaks) ---
+        sep_min = numpyro.deterministic(
             "separation_free_min",
-            _FREE_SEPARATION_MIN_SIGMA_MULTIPLIER * sigma_loc_safe[free_idx],
+            _FREE_SEP_MIN_SIGMA_MULT * sigma_loc_safe[free_idx],
         )
-        separation_free_above_min_loc, separation_free_above_min_scale = (
-            _lognormal_params_from_linear(
-                (
-                    _FREE_SEPARATION_TYPICAL_SIGMA_MULTIPLIER
-                    - _FREE_SEPARATION_MIN_SIGMA_MULTIPLIER
-                )
-                * sigma_loc_safe[free_idx],
-                (
-                    _FREE_SEPARATION_TYPICAL_SIGMA_MULTIPLIER
-                    - _FREE_SEPARATION_MIN_SIGMA_MULTIPLIER
-                )
-                * sigma_scale_safe[free_idx],
+        window_width_free = (
+            jnp.asarray(window_hi, dtype=jnp.float32)[free_idx]
+            - jnp.asarray(window_lo, dtype=jnp.float32)[free_idx]
+        )
+        sep_max = numpyro.deterministic(
+            "separation_free_max",
+            _FREE_SEP_MAX_WINDOW_FRAC * window_width_free,
+        )
+        sep_range = sep_max - sep_min
+
+        # --- Population-level typical (all free peaks, sigmoid-bounded) ---
+        sep_target = _FREE_SEP_TYPICAL_SIGMA_MULT * sigma_loc_safe[free_idx]
+        sep_target_scale = _FREE_SEP_TYPICAL_SIGMA_MULT * sigma_scale_safe[free_idx]
+        sep_typical_raw_loc, sep_typical_raw_scale = _bounded_separation_prior_to_raw(
+            sep_target,
+            sep_target_scale,
+            sep_min,
+            sep_max,
+        )
+        sep_typical_raw = numpyro.sample(
+            "sep_typical_raw",
+            dist.Normal(sep_typical_raw_loc, sep_typical_raw_scale),
+        )
+        sep_typical = sep_min + sep_range * expit(sep_typical_raw)
+        numpyro.deterministic("separation_free_typical", sep_typical)
+
+        # --- Assemble separation_free [n_trace, n_free] ---
+        # Start: all peaks at their typical separation (correct for fixed peaks)
+        separation_free_arr = jnp.broadcast_to(sep_typical[None, :], (n_trace, n_free))
+
+        # Varying peaks: override with per-trace sigmoid-bounded values
+        if n_free_vary > 0:
+            sep_trace_scale = numpyro.sample(
+                "sep_trace_scale",
+                dist.HalfNormal(_FREE_SEP_TRACE_SCALE_PRIOR).expand([n_free_vary]),
             )
-        )
-        log_separation_free_above_min_typical = numpyro.sample(
-            "log_separation_free_above_min_typical",
-            dist.Normal(
-                separation_free_above_min_loc,
-                separation_free_above_min_scale,
-            ),
-        )
-        separation_free_typical = numpyro.deterministic(
-            "separation_free_typical",
-            separation_free_min + jnp.exp(log_separation_free_above_min_typical),
-        )
-        log_separation_free_trace_scale = numpyro.sample(
-            "log_separation_free_trace_scale",
-            dist.Normal(
-                jnp.log(_FREE_SEPARATION_REL_SCALE_MEDIAN),
-                _FREE_SEPARATION_REL_SCALE_LOG_SCALE,
-            ),
-        )
-        separation_free_trace_scale = numpyro.deterministic(
-            "separation_free_trace_scale",
-            jnp.exp(log_separation_free_trace_scale),
-        )
-        separation_free_trace_offset = numpyro.sample(
-            "separation_free_trace_offset",
-            dist.Normal(0.0, 1.0).expand([n_trace, n_free]),
-        )
-        separation_free = numpyro.deterministic(
-            "separation_free",
-            separation_free_min[None, :]
-            + (separation_free_typical - separation_free_min)[None, :]
-            * jnp.exp(separation_free_trace_scale * separation_free_trace_offset),
-        )
+            separation_free_trace_offset = numpyro.sample(
+                "separation_free_trace_offset",
+                dist.Normal(0.0, 1.0).expand([n_trace, n_free_vary]),
+            )
+            sep_raw_vary = (
+                sep_typical_raw[None, free_vary_local]
+                + sep_trace_scale[None, :] * separation_free_trace_offset
+            )
+            sep_vary = sep_min[None, free_vary_local] + sep_range[
+                None, free_vary_local
+            ] * expit(sep_raw_vary)
+            separation_free_arr = separation_free_arr.at[:, free_vary_local].set(
+                sep_vary
+            )
+
+        separation_free = numpyro.deterministic("separation_free", separation_free_arr)
+
         area_total_safe = jnp.maximum(
             jnp.asarray(area_total_loc_per_trace, dtype=jnp.float32)[:, free_idx],
             1e-8,
@@ -434,7 +494,7 @@ def model(
         sigma_art = _broadcast_peak_to_traces(sigma_r_artefact, n_trace)
         alpha_dom_art = _broadcast_peak_to_traces(alpha_base[artefact_idx], n_trace)
         area_dom_art = area_dominant[:, artefact_nonfree_idx]
-        area_art = _broadcast_peak_to_traces(area_artefact_shared, n_trace)
+        area_art = area_artefact
         separation_art = _broadcast_peak_to_traces(separation_artefact, n_trace)
         artefact_left = artefact_side_v[artefact_idx] < 0.0
 
@@ -542,7 +602,7 @@ SUMMARY_PARAMETER_NAMES = (
     "trace_shift",
     "apex",
     "separation_free_typical",
-    "separation_free_trace_scale",
+    "sep_trace_scale",
     "separation",
     "sigma_base",
     "sigma_r_artefact",
@@ -552,6 +612,7 @@ SUMMARY_PARAMETER_NAMES = (
     "area_l",
     "area_r",
     "area_total",
+    "area_artefact_typical",
     "baseline_intercept",
     "baseline_slope",
     "sigma_y",

@@ -29,6 +29,14 @@ class PeakAnnotation(BaseModel):
             ``"artefact_doublet"`` (main peak + fixed-side artefact shoulder).
         artefact_side: Which side carries the shoulder; required when
             *mode* is ``"artefact_doublet"``, must be ``None`` otherwise.
+        vary_separation: When ``True`` and *mode* is ``"free_doublet"``,
+            the separation is allowed to vary across traces via a per-peak
+            trace-scale hyperparameter.  When ``False`` (default) all traces
+            share a single common separation.
+        include_artefact_in_area: When ``True`` and *mode* is
+            ``"artefact_doublet"``, the artefact shoulder area is summed
+            with the dominant component's area when computing molecule
+            concentration.  Defaults to ``False`` (artefact excluded).
 
     Example::
 
@@ -48,6 +56,8 @@ class PeakAnnotation(BaseModel):
     rt_max: float
     mode: PeakMode
     artefact_side: ArtefactSide | None = None
+    vary_separation: bool = False
+    include_artefact_in_area: bool = False
 
     @model_validator(mode="after")
     def _validate(self) -> PeakAnnotation:
@@ -57,6 +67,16 @@ class PeakAnnotation(BaseModel):
             )
         if self.mode != "artefact_doublet" and self.artefact_side is not None:
             raise ValueError(f"artefact_side must be None when mode='{self.mode}'.")
+        if self.vary_separation and self.mode != "free_doublet":
+            raise ValueError(
+                f"vary_separation=True is only valid for mode='free_doublet', "
+                f"got mode='{self.mode}'."
+            )
+        if self.include_artefact_in_area and self.mode != "artefact_doublet":
+            raise ValueError(
+                f"include_artefact_in_area=True is only valid for "
+                f"mode='artefact_doublet', got mode='{self.mode}'."
+            )
         if self.rt_max <= self.rt_min:
             raise ValueError(
                 f"rt_max ({self.rt_max}) must be greater than rt_min ({self.rt_min})."

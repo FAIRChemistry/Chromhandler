@@ -174,7 +174,7 @@ def plot_trace_rows(
                 float(t_max) if t_max is not None else None,
             )
 
-    axes_col[-1].set_xlabel("Time", fontsize=9)
+    axes_col[-1].set_xlabel("Retention time [min]", fontsize=9)
 
     if show_peak_legend and peaks:
         legend_handles = [
@@ -877,9 +877,9 @@ def plot_prior_traces(
             # Labels and formatting
             ax.set_title(f"{peak.molecule_id} (trace {t})", fontsize=9)
             if p == 0:
-                ax.set_ylabel("Signal", fontsize=8)
+                ax.set_ylabel("Intensity [AU]", fontsize=8)
             if t == n_trace - 1:
-                ax.set_xlabel("Time", fontsize=8)
+                ax.set_xlabel("Retention time [min]", fontsize=8)
 
             ax.grid(True, alpha=0.3, linestyle="--")
             ax.tick_params(labelsize=7)
@@ -1111,7 +1111,9 @@ def plot_sigma_alpha_scatter(
             if apex_height_arr is not None:
                 heights_peak = apex_height_arr[valid_peak, peak_idx]
                 # Scale height-derived sizes proportionally to marker_size baseline
-                sizes_peak = _marker_sizes_from_values(heights_peak) * (marker_size / 40)
+                sizes_peak = _marker_sizes_from_values(heights_peak) * (
+                    marker_size / 40
+                )
                 ax.scatter(
                     alpha_peak,
                     sigma_peak,
@@ -1516,9 +1518,9 @@ def plot_fit(
             add_peak_window_bounds(ax, peak, color="red", alpha=0.3, linewidth=0.8)
             ax.set_title(f"{peak.molecule_id} ({trace_label(t)})", fontsize=9)
             if p == 0:
-                ax.set_ylabel("Signal", fontsize=8)
+                ax.set_ylabel("Intensity [AU]", fontsize=8)
             if t == n_display - 1:
-                ax.set_xlabel("Time (min)", fontsize=8)
+                ax.set_xlabel("Retention time [min]", fontsize=8)
             ax.grid(True, alpha=0.3, linestyle="--")
             ax.tick_params(labelsize=7)
 
@@ -1568,7 +1570,7 @@ def plot_fit(
 
             ax_c.set_title(f"Combined — {trace_label(t)}", fontsize=9)
             if t == n_display - 1:
-                ax_c.set_xlabel("Time (min)", fontsize=8)
+                ax_c.set_xlabel("Retention time [min]", fontsize=8)
             ax_c.grid(True, alpha=0.3, linestyle="--")
             ax_c.tick_params(labelsize=7)
 
