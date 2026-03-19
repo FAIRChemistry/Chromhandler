@@ -637,7 +637,7 @@ def test_hierarchical_slope_pop_scale_positive() -> None:
     import numpyro.handlers as handlers
     from chromhandler.fitting.better_model import model
 
-    for seed in range(20):
+    for seed in range(30):
         trace = handlers.trace(handlers.seed(model, rng_seed=seed)).get_trace(**_model_kwargs())
         pop_scale = float(np.asarray(trace["baseline_slope_pop_scale"]["value"]))
         assert pop_scale > 0.0, f"seed={seed}: pop_scale={pop_scale} not positive"
@@ -671,3 +671,29 @@ def test_sigma_base_respects_loguniform_bounds() -> None:
         assert np.all(sigma_base <= upper + 1e-5), (
             f"seed={seed}: sigma_base={sigma_base} above upper={upper}"
         )
+
+
+def test_hierarchical_slope_formula_under_substitution() -> None:
+    """baseline_slope deterministic must equal pop_mean + pop_scale * raw."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    kwargs = _model_kwargs()  # n_trace=2
+    known_mean = jnp.asarray(0.05, dtype=jnp.float32)
+    known_scale = jnp.asarray(0.02, dtype=jnp.float32)
+    known_raw = jnp.asarray([1.0, -0.5], dtype=jnp.float32)
+
+    trace = handlers.trace(
+        handlers.substitute(
+            handlers.seed(model, rng_seed=0),
+            data={
+                "baseline_slope_pop_mean": known_mean,
+                "baseline_slope_pop_scale": known_scale,
+                "baseline_slope_raw": known_raw,
+            },
+        )
+    ).get_trace(**kwargs)
+
+    expected = float(known_mean) + float(known_scale) * np.asarray(known_raw)
+    actual = np.asarray(trace["baseline_slope"]["value"])
+    np.testing.assert_allclose(actual, expected, rtol=1e-5)

@@ -611,13 +611,16 @@ def model(
     # Prior: HalfNormal with scale = mean per-trace OLS uncertainty.
     slope_variation_prior = jnp.maximum(
         jnp.mean(jnp.asarray(baseline_slope_scale, dtype=jnp.float32)),
-        1e-8,
+        1e-6,
     )
     baseline_slope_pop_scale = numpyro.sample(
         "baseline_slope_pop_scale",
         dist.HalfNormal(slope_variation_prior),
     )  # scalar ≥ 0
-    # Per-trace slopes: non-centered; shape [n_trace]
+    # Per-trace slopes: non-centered; shape [n_trace].
+    # Note: NOT mean-subtracted (unlike trace_shift_raw) — there is no
+    # sum-to-zero identifiability constraint on slopes; pop_mean absorbs
+    # the overall level.
     baseline_slope_raw = numpyro.sample(
         "baseline_slope_raw",
         dist.Normal(0.0, 1.0).expand([n_trace]),
