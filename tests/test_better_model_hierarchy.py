@@ -524,6 +524,59 @@ def test_molecule_area_slice_free_doublet_sums_both() -> None:
     )
 
 
+def test_sigma_r_artefact_respects_loguniform_bounds() -> None:
+    """sigma_r_artefact must stay within [0.5, 2.0] × sigma_prior_loc[artefact_idx]."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    kwargs = _model_kwargs()
+    sigma_loc = np.asarray(kwargs["sigma_loc"])  # [0.03, 0.05, 0.06]
+    artefact_idx = np.asarray(kwargs["artefact_peak_index"])  # [1]
+    # artefact peaks are always nonfree → sigma_prior_loc = sigma_loc
+    ref = sigma_loc[artefact_idx]  # [0.05]
+    lower = 0.5 * ref
+    upper = 2.0 * ref
+
+    for seed in range(30):
+        trace = handlers.trace(handlers.seed(model, rng_seed=seed)).get_trace(**kwargs)
+        sigma_art = np.asarray(trace["sigma_r_artefact"]["value"])
+        assert np.all(sigma_art >= lower - 1e-5), (
+            f"seed={seed}: sigma_r_artefact={sigma_art} below lower={lower}"
+        )
+        assert np.all(sigma_art <= upper + 1e-5), (
+            f"seed={seed}: sigma_r_artefact={sigma_art} above upper={upper}"
+        )
+
+
+def test_baseline_centring_flat_when_slope_is_zero() -> None:
+    """When baseline_slope=0 for all traces, baseline_curve must equal baseline_intercept."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    kwargs = _model_kwargs()
+    # Force baseline_slope to zero via substitute
+    trace = handlers.trace(
+        handlers.substitute(
+            handlers.seed(model, rng_seed=0),
+            data={
+                "baseline_slope": jnp.zeros((2,), dtype=jnp.float32),
+            },
+        )
+    ).get_trace(**kwargs)
+
+    baseline_intercept = np.asarray(trace["baseline_intercept"]["value"])  # [n_trace]
+    baseline_curve = np.asarray(trace["baseline_curve"]["value"])  # [n_trace, n_time]
+
+    # When slope=0, baseline = intercept everywhere
+    for t in range(baseline_intercept.shape[0]):
+        np.testing.assert_allclose(
+            baseline_curve[t],
+            np.full(baseline_curve.shape[1], baseline_intercept[t]),
+            rtol=1e-5,
+            err_msg=f"trace {t}: baseline_curve not flat when slope=0",
+        )
+
+
 def test_sigma_base_respects_loguniform_bounds() -> None:
     """sigma_base must stay within [0.5, 2.0] × sigma_prior_loc for every prior sample."""
     import numpyro.handlers as handlers

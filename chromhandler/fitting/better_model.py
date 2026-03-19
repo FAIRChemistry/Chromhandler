@@ -299,9 +299,12 @@ def model(
     )  # [n_peak]
     sigma_base = numpyro.deterministic("sigma_base", jnp.exp(log_sigma_base))
     if n_artefact > 0:
+        # LogUniform bounded by the same reference as the dominant sigma for that peak.
+        # Prevents artefact sigma from expanding to absorb baseline curvature.
+        art_ref = sigma_prior_loc[artefact_idx]  # already sigma_loc_safe for nonfree peaks
         log_sigma_r_artefact = numpyro.sample(
             "log_sigma_r_artefact",
-            dist.Normal(log_sigma_base[artefact_idx], 0.15),
+            dist.Uniform(jnp.log(0.5 * art_ref), jnp.log(2.0 * art_ref)),
         )
         sigma_r_artefact = numpyro.deterministic(
             "sigma_r_artefact",
