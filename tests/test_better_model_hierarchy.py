@@ -673,6 +673,86 @@ def test_sigma_base_respects_loguniform_bounds() -> None:
         )
 
 
+def test_svi_smoke_with_loguniform_sigma_and_hierarchical_slope() -> None:
+    """End-to-end: SVI should complete and posterior shapes should be correct."""
+    x = np.linspace(0.0, 6.0, 400, dtype=float)
+    shifts = np.asarray([-0.030, 0.000, 0.018, 0.045], dtype=float)
+    scales = np.asarray([1.00, 0.92, 1.08, 0.97], dtype=float)
+    peak_centers = np.asarray([1.15, 2.55, 4.20], dtype=float)
+    peak_widths = np.asarray([0.055, 0.070, 0.080], dtype=float)
+    peak_heights = np.asarray([1.30, 0.95, 0.75], dtype=float)
+
+    signal_rows: list[np.ndarray] = []
+    for shift, scale in zip(shifts, scales, strict=True):
+        y = np.full_like(x, 0.05)
+        for center, width, height in zip(
+            peak_centers, peak_widths, peak_heights, strict=True
+        ):
+            z = (x - (center + shift)) / width
+            y = y + scale * height * np.exp(-0.5 * z**2)
+        signal_rows.append(y)
+
+    peaks = [
+        PeakAnnotation(molecule_id="p_single", rt_min=0.95, rt_max=1.35, mode="single"),
+        PeakAnnotation(
+            molecule_id="p_art",
+            rt_min=2.30,
+            rt_max=2.85,
+            mode="artefact_doublet",
+            artefact_side="right",
+        ),
+        PeakAnnotation(
+            molecule_id="p_free",
+            rt_min=3.90,
+            rt_max=4.50,
+            mode="free_doublet",
+        ),
+    ]
+    baselines = [
+        BaselineAnnotation(rt_min=0.10, rt_max=0.45),
+        BaselineAnnotation(rt_min=5.30, rt_max=5.80),
+    ]
+
+    fitter = BetterFitter(
+        np.broadcast_to(x[None, :], (len(signal_rows), x.size)).copy(),
+        np.asarray(signal_rows, dtype=float),
+        peaks=peaks,
+        baselines=baselines,
+    )
+    fitter.fit(
+        backend="svi",
+        num_steps=50,
+        n_posterior_samples=20,
+        progress_bar=False,
+        guide_type="diagonal",
+    )
+    assert fitter._posteriors, "posteriors dict must not be empty after fit()"
+    posterior = next(iter(fitter._posteriors.values())).posterior
+    # sigma_base: [1, 20, n_peak=3]
+    assert posterior["sigma_base"].shape == (1, 20, 3), (
+        f"sigma_base shape: {posterior['sigma_base'].shape}"
+    )
+    # baseline_slope: [1, 20, n_trace=4]
+    assert posterior["baseline_slope"].shape == (1, 20, 4), (
+        f"baseline_slope shape: {posterior['baseline_slope'].shape}"
+    )
+    # hierarchical hyperpriors: scalars [1, 20]
+    assert posterior["baseline_slope_pop_mean"].shape == (1, 20), (
+        f"pop_mean shape: {posterior['baseline_slope_pop_mean'].shape}"
+    )
+    assert posterior["baseline_slope_pop_scale"].shape == (1, 20), (
+        f"pop_scale shape: {posterior['baseline_slope_pop_scale'].shape}"
+    )
+    # sigma_r_artefact: [1, 20, n_artefact=1]
+    assert posterior["sigma_r_artefact"].shape == (1, 20, 1), (
+        f"sigma_r_artefact shape: {posterior['sigma_r_artefact'].shape}"
+    )
+    # sigma_r_free: [1, 20, n_free=1]
+    assert posterior["sigma_r_free"].shape == (1, 20, 1), (
+        f"sigma_r_free shape: {posterior['sigma_r_free'].shape}"
+    )
+
+
 def test_hierarchical_slope_formula_under_substitution() -> None:
     """baseline_slope deterministic must equal pop_mean + pop_scale * raw."""
     import numpyro.handlers as handlers
