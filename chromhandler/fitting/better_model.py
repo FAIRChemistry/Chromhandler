@@ -311,9 +311,10 @@ def model(
             jnp.exp(log_sigma_r_artefact),
         )
     if n_free > 0:
+        free_ref = sigma_prior_loc[free_idx]  # 0.5 * sigma_loc for free peaks
         log_sigma_r_free = numpyro.sample(
             "log_sigma_r_free",
-            dist.Normal(log_sigma_base[free_idx], 0.05),
+            dist.Uniform(jnp.log(0.5 * free_ref), jnp.log(2.0 * free_ref)),
         )
         sigma_r_free = numpyro.deterministic(
             "sigma_r_free",

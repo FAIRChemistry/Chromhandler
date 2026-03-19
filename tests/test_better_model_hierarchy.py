@@ -577,6 +577,32 @@ def test_baseline_centring_flat_when_slope_is_zero() -> None:
         )
 
 
+def test_sigma_r_free_respects_loguniform_bounds() -> None:
+    """sigma_r_free must stay within [0.5, 2.0] × sigma_prior_loc[free_idx]."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    kwargs = _model_kwargs()
+    sigma_loc = np.asarray(kwargs["sigma_loc"])  # [0.03, 0.05, 0.06]
+    free_idx = np.asarray(kwargs["free_peak_index"])  # [2]
+    peak_mode_code = np.asarray(kwargs["peak_mode_code"])
+    free_mask = peak_mode_code == 2
+    sigma_prior_loc = np.where(free_mask, 0.5 * sigma_loc, sigma_loc)
+    ref = sigma_prior_loc[free_idx]  # 0.5 * 0.06 = 0.03
+    lower = 0.5 * ref
+    upper = 2.0 * ref
+
+    for seed in range(30):
+        trace = handlers.trace(handlers.seed(model, rng_seed=seed)).get_trace(**kwargs)
+        sigma_free = np.asarray(trace["sigma_r_free"]["value"])
+        assert np.all(sigma_free >= lower - 1e-5), (
+            f"seed={seed}: sigma_r_free={sigma_free} below lower={lower}"
+        )
+        assert np.all(sigma_free <= upper + 1e-5), (
+            f"seed={seed}: sigma_r_free={sigma_free} above upper={upper}"
+        )
+
+
 def test_sigma_base_respects_loguniform_bounds() -> None:
     """sigma_base must stay within [0.5, 2.0] × sigma_prior_loc for every prior sample."""
     import numpyro.handlers as handlers
