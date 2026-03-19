@@ -554,12 +554,15 @@ def test_baseline_centring_flat_when_slope_is_zero() -> None:
     from chromhandler.fitting.better_model import model
 
     kwargs = _model_kwargs()
-    # Force baseline_slope to zero via substitute
+    # Force all per-trace slope components to zero:
+    # baseline_slope = pop_mean + pop_scale * raw
+    # → set pop_mean=0 and raw=zeros  (pop_scale can be anything)
     trace = handlers.trace(
         handlers.substitute(
             handlers.seed(model, rng_seed=0),
             data={
-                "baseline_slope": jnp.zeros((2,), dtype=jnp.float32),
+                "baseline_slope_pop_mean": jnp.zeros((), dtype=jnp.float32),
+                "baseline_slope_raw": jnp.zeros((2,), dtype=jnp.float32),
             },
         )
     ).get_trace(**kwargs)
@@ -601,6 +604,49 @@ def test_sigma_r_free_respects_loguniform_bounds() -> None:
         assert np.all(sigma_free <= upper + 1e-5), (
             f"seed={seed}: sigma_r_free={sigma_free} above upper={upper}"
         )
+
+
+def test_hierarchical_slope_sites_exist_in_trace() -> None:
+    """Model must produce baseline_slope_pop_mean, baseline_slope_pop_scale, baseline_slope_raw."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    trace = handlers.trace(handlers.seed(model, rng_seed=0)).get_trace(**_model_kwargs())
+    assert "baseline_slope_pop_mean" in trace, "missing baseline_slope_pop_mean"
+    assert "baseline_slope_pop_scale" in trace, "missing baseline_slope_pop_scale"
+    assert "baseline_slope_raw" in trace, "missing baseline_slope_raw"
+    assert "baseline_slope" in trace, "baseline_slope deterministic missing"
+
+
+def test_hierarchical_slope_per_trace_shapes() -> None:
+    """baseline_slope_raw [n_trace], baseline_slope [n_trace], pop scalars."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    kwargs = _model_kwargs()  # n_trace=2
+    trace = handlers.trace(handlers.seed(model, rng_seed=1)).get_trace(**kwargs)
+
+    assert np.asarray(trace["baseline_slope_pop_mean"]["value"]).shape == ()
+    assert np.asarray(trace["baseline_slope_pop_scale"]["value"]).shape == ()
+    assert np.asarray(trace["baseline_slope_raw"]["value"]).shape == (2,)
+    assert np.asarray(trace["baseline_slope"]["value"]).shape == (2,)
+
+
+def test_hierarchical_slope_pop_scale_positive() -> None:
+    """Population scale is always positive (HalfNormal)."""
+    import numpyro.handlers as handlers
+    from chromhandler.fitting.better_model import model
+
+    for seed in range(20):
+        trace = handlers.trace(handlers.seed(model, rng_seed=seed)).get_trace(**_model_kwargs())
+        pop_scale = float(np.asarray(trace["baseline_slope_pop_scale"]["value"]))
+        assert pop_scale > 0.0, f"seed={seed}: pop_scale={pop_scale} not positive"
+
+
+def test_hierarchical_slope_in_summary_parameter_names() -> None:
+    from chromhandler.fitting.better_model import SUMMARY_PARAMETER_NAMES
+    assert "baseline_slope_pop_mean" in SUMMARY_PARAMETER_NAMES
+    assert "baseline_slope_pop_scale" in SUMMARY_PARAMETER_NAMES
 
 
 def test_sigma_base_respects_loguniform_bounds() -> None:

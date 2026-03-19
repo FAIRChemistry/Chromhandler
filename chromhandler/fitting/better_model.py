@@ -590,10 +590,43 @@ def model(
         "baseline_intercept",
         dist.Normal(baseline_mid_loc, jnp.maximum(baseline_mid_scale, 1e-6)),
     )  # [n_trace] — baseline level at x_mid (directly observable, identifiable)
-    baseline_slope = numpyro.sample(
+
+    # Hierarchical slope: pool across traces so that traces with weak signal
+    # borrow information from their neighbours.  Non-centered parameterisation
+    # is numerically stable for both MCMC and VI.
+    #
+    # Hyperprior mean: centred at the mean of the OLS slope estimates.
+    # Hyperprior scale: covers the spread of OLS estimates + average per-trace uncertainty.
+    slope_pop_loc = jnp.mean(jnp.asarray(baseline_slope_loc, dtype=jnp.float32))
+    slope_pop_scale_prior = jnp.maximum(
+        jnp.std(jnp.asarray(baseline_slope_loc, dtype=jnp.float32))
+        + jnp.mean(jnp.asarray(baseline_slope_scale, dtype=jnp.float32)),
+        1e-6,
+    )
+    baseline_slope_pop_mean = numpyro.sample(
+        "baseline_slope_pop_mean",
+        dist.Normal(slope_pop_loc, slope_pop_scale_prior),
+    )  # scalar — population-average slope
+    # How much individual traces vary around the population mean.
+    # Prior: HalfNormal with scale = mean per-trace OLS uncertainty.
+    slope_variation_prior = jnp.maximum(
+        jnp.mean(jnp.asarray(baseline_slope_scale, dtype=jnp.float32)),
+        1e-8,
+    )
+    baseline_slope_pop_scale = numpyro.sample(
+        "baseline_slope_pop_scale",
+        dist.HalfNormal(slope_variation_prior),
+    )  # scalar ≥ 0
+    # Per-trace slopes: non-centered; shape [n_trace]
+    baseline_slope_raw = numpyro.sample(
+        "baseline_slope_raw",
+        dist.Normal(0.0, 1.0).expand([n_trace]),
+    )
+    baseline_slope = numpyro.deterministic(
         "baseline_slope",
-        dist.Normal(baseline_slope_loc, jnp.maximum(baseline_slope_scale, 1e-8)),
+        baseline_slope_pop_mean + baseline_slope_pop_scale * baseline_slope_raw,
     )  # [n_trace]
+
     baseline = baseline_intercept[:, None] + baseline_slope[:, None] * (x - x_mid)
     numpyro.deterministic("baseline_curve", baseline)
 
@@ -636,6 +669,8 @@ SUMMARY_PARAMETER_NAMES = (
     "area_artefact_typical",
     "baseline_intercept",
     "baseline_slope",
+    "baseline_slope_pop_mean",
+    "baseline_slope_pop_scale",
     "sigma_y",
 )
 
