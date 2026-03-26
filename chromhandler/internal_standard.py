@@ -15,21 +15,11 @@ class InternalStandard(BaseModel):
     standard_molecule_id: str = Field(
         description="The ID of the standard molecule.",
     )
-    molecule_init_conc: float = Field(
-        description="The initial concentration of the molecule."
-    )
-    molecule_conc_unit: UnitDefinition = Field(
-        description="The unit of concentration for the molecule."
-    )
-    standard_init_conc: float = Field(
-        description="The initial concentration of the standard."
-    )
-    molecule_t0_signal: float | None = Field(
-        description="The t0 signal of the molecule.", default=None
-    )
-    standard_t0_signal: float | None = Field(
-        description="The t0 signal of the standard.", default=None
-    )
+    molecule_init_conc: float = Field(description="The initial concentration of the molecule.")
+    molecule_conc_unit: UnitDefinition = Field(description="The unit of concentration for the molecule.")
+    standard_init_conc: float = Field(description="The initial concentration of the standard.")
+    molecule_t0_signal: float | None = Field(description="The t0 signal of the molecule.", default=None)
+    standard_t0_signal: float | None = Field(description="The t0 signal of the standard.", default=None)
 
     def _set_t0_signals(
         self,
@@ -43,17 +33,13 @@ class InternalStandard(BaseModel):
             (c for c in sample.chromatograms if c.reaction_time is not None),
             key=lambda c: c.reaction_time,  # type: ignore[arg-type]
         )
-        assert chroms_at_t0, (
-            "No chromatogram with a reaction_time found in the sample."
-        )
+        assert chroms_at_t0, "No chromatogram with a reaction_time found in the sample."
         assert chroms_at_t0[0].reaction_time == 0, (
             "No measurement data is available at t=0. Concentration calculation is not "
             "possible without a chromatogram at reaction_time=0."
         )
 
-        for peak in _resolve_chromatogram(
-            chromatograms=[chroms_at_t0[0]], wavelength=None
-        ).peaks:
+        for peak in _resolve_chromatogram(chromatograms=[chroms_at_t0[0]], wavelength=None).peaks:
             if peak.molecule_id == self.molecule_id:
                 self.molecule_t0_signal = peak.area
             elif peak.molecule_id == self.standard_molecule_id:
@@ -67,13 +53,9 @@ class InternalStandard(BaseModel):
         No peak area for {self.standard_molecule_id} was found in measurement at t=0.
         """
 
-        logger.debug(
-            f"molecule t0: {self.molecule_t0_signal}, standard t0: {self.standard_t0_signal}"
-        )
+        logger.debug(f"molecule t0: {self.molecule_t0_signal}, standard t0: {self.standard_t0_signal}")
 
-    def calculate_conc(
-        self, molecue_signal: float, standard_molecule_signal: float
-    ) -> float:
+    def calculate_conc(self, molecue_signal: float, standard_molecule_signal: float) -> float:
         """Calculates the concentration of the internal standard based on the peak area.
 
         Args:

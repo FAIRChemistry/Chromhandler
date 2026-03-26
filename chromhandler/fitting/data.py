@@ -8,7 +8,7 @@ backwards compatibility within the fitting subpackage.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import jax.numpy as jnp
 
@@ -90,8 +90,7 @@ class ChromatogramRecord:
     def __post_init__(self) -> None:
         if len(self.time) != len(self.signal):
             raise ValueError(
-                "time and signal must have same length, got "
-                f"{len(self.time)} and {len(self.signal)}"
+                f"time and signal must have same length, got {len(self.time)} and {len(self.signal)}"
             )
 
     def add_peak(
@@ -131,15 +130,11 @@ class ChromatogramRecord:
                 f"time range={min(self.time)} to {max(self.time)}"
             )
         if rt_min >= rt_max:
-            raise ValueError(
-                f"rt_min must be less than rt_max, got rt_min={rt_min}, rt_max={rt_max}"
-            )
+            raise ValueError(f"rt_min must be less than rt_max, got rt_min={rt_min}, rt_max={rt_max}")
         baseline = BaselineAnnotation(rt_min=rt_min, rt_max=rt_max)
         for b in self.baselines:
             if b.rt_min == rt_min and b.rt_max == rt_max:
-                raise ValueError(
-                    f"baseline already exists, got rt_min={rt_min}, rt_max={rt_max}"
-                )
+                raise ValueError(f"baseline already exists, got rt_min={rt_min}, rt_max={rt_max}")
         self.baselines.append(baseline)
 
 
@@ -149,9 +144,7 @@ class ChromatogramRecord:
 
 
 def get_chromatogram_tensor(chromatograms: list[ChromatogramRecord]) -> jnp.ndarray:
-    signal_tensor = []
-    for chromatogram in chromatograms:
-        signal_tensor.append(chromatogram.signal)
+    signal_tensor = [chromatogram.signal for chromatogram in chromatograms]
     return jnp.array(signal_tensor).reshape(len(chromatograms), -1)
 
 
@@ -177,9 +170,7 @@ def region_to_mask(low: float, high: float, time: jnp.ndarray) -> jnp.ndarray:
     return (time >= low) & (time <= high)
 
 
-def baseline_to_mask(
-    baselines: list[BaselineAnnotation], time: jnp.ndarray
-) -> jnp.ndarray:
+def baseline_to_mask(baselines: list[BaselineAnnotation], time: jnp.ndarray) -> jnp.ndarray:
     """Boolean mask True for time points in any baseline region."""
     if not baselines:
         return jnp.zeros(time.shape, dtype=bool)
@@ -193,6 +184,6 @@ def peaks_to_mask(peaks: list[PeakAnnotation], time: jnp.ndarray) -> jnp.ndarray
     Returns shape ``(n_peaks, n_chromatograms, n_timepoints)``.
     """
     peak_centers = jnp.array([(p.rt_min + p.rt_max) / 2 for p in peaks])
-    sorted_indices = jnp.argsort(peak_centers)
+    sorted_indices = [int(i) for i in jnp.argsort(peak_centers).tolist()]
     sorted_peaks = [peaks[i] for i in sorted_indices]
-    return jnp.stack([region_to_mask(p.rt_min, p.rt_max, time) for p in sorted_peaks])
+    return jnp.stack([region_to_mask(low=p.rt_min, high=p.rt_max, time=time) for p in sorted_peaks])

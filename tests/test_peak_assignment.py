@@ -1,234 +1,393 @@
-from typing import Any
+import math
 
 import pytest
-from pytest import CaptureFixture
 
+from chromhandler import pretty
 from chromhandler.handler import Handler
 from chromhandler.model import Chromatogram, Estimate, Peak, Sample
 from chromhandler.molecule import Molecule
 
 
-class TestPeakAssignment:
-    """Test class for peak assignment functionality."""
+def _molecule(molecule_id: str = "test_mol") -> Molecule:
+    return Molecule(
+        id=molecule_id,
+        pubchem_cid=12345,
+        name="Test Molecule",
+    )
 
-    @pytest.fixture
-    def mock_molecule(self) -> Molecule:
-        """Create a test molecule with defined retention time."""
-        return Molecule(
-            id="test_mol",
-            pubchem_cid=12345,
-            name="Test Molecule",
-            retention_time=5.0,
-            retention_tolerance=0.2,
-            min_signal=100.0,
-        )
 
-    def create_peak(self, retention_time: float, area: float, chrom_id: str = "chrom_0") -> Peak:
-        return Peak(
-            chromatogram_id=chrom_id,
-            location=Estimate(mean=retention_time),
-            area=Estimate(mean=area),
-        )
+def _peak(
+    retention_time: float,
+    area: float,
+    *,
+    amplitude: float | None = None,
+    chrom_id: str = "chrom_0",
+    molecule_id: str | None = None,
+) -> Peak:
+    return Peak(
+        chromatogram_id=chrom_id,
+        location=Estimate(mean=retention_time),
+        area=Estimate(mean=area),
+        amplitude=amplitude,
+        molecule_id=molecule_id,
+    )
 
-    def create_chromatogram(self, peaks: list[Peak], sample_id: str = "s0") -> Chromatogram:
-        return Chromatogram(id="chrom_0", sample_id=sample_id, peaks=peaks, wavelength=254.0)
 
-    def create_sample(self, sample_id: str, peaks: list[Peak]) -> Sample:
-        chrom = self.create_chromatogram(peaks, sample_id=sample_id)
-        return Sample(id=sample_id, chromatograms=[chrom])
+def _chromatogram(
+    chrom_id: str,
+    sample_id: str,
+    peaks: list[Peak],
+    *,
+    wavelength: float | None = 254.0,
+) -> Chromatogram:
+    return Chromatogram(
+        id=chrom_id,
+        sample_id=sample_id,
+        peaks=peaks,
+        wavelength=wavelength,
+    )
 
-    def create_analyzer(self, samples: list[Sample]) -> Handler:
-        return Handler(id="test_analyzer", name="Test Analyzer", samples=samples)
 
-    def test_single_peak_assignment(
-        self, mock_molecule: Molecule, capsys: CaptureFixture[Any]
-    ) -> None:
-        """Test normal case: single peak within tolerance gets assigned."""
-        peaks = [self.create_peak(retention_time=5.0, area=500.0)]
-        sample = self.create_sample("meas_001", peaks)
-        analyzer = self.create_analyzer([sample])
-        analyzer.molecules.append(mock_molecule)
+def _sample(sample_id: str, *chromatograms: Chromatogram) -> Sample:
+    return Sample(id=sample_id, chromatograms=list(chromatograms))
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
 
-        assert peaks[0].molecule_id == "test_mol"
+def _handler(*samples: Sample, molecules: list[Molecule] | None = None) -> Handler:
+    mol_dict = {mol.id: mol for mol in (molecules or [])}
+    return Handler(samples=list(samples), molecules=mol_dict)
 
-        captured = capsys.readouterr()
-        assert "Assigned Test Molecule to 1 peaks" in captured.out
-        assert "Warning" not in captured.out
 
-    def test_multiple_peaks_closest_assigned(
-        self, mock_molecule: Molecule, capsys: CaptureFixture[Any]
-    ) -> None:
-        """Test multiple peaks: closest one gets assigned with warning."""
-        peaks = [
-            self.create_peak(retention_time=4.9, area=300.0),
-            self.create_peak(retention_time=5.15, area=400.0),
-            self.create_peak(retention_time=4.85, area=200.0),
-        ]
-        sample = self.create_sample("meas_001", peaks)
-        analyzer = self.create_analyzer([sample])
-        analyzer.molecules.append(mock_molecule)
+def test_add_peak_window_requires_existing_molecule() -> None:
+    handler = Handler()
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
+    with pytest.raises(ValueError, match="unknown"):
+        handler.add_peak_window("unknown", 4.8, 5.2)
 
-        assigned_peaks = [p for p in peaks if p.molecule_id == "test_mol"]
-        assert len(assigned_peaks) == 1
-        assert assigned_peaks[0].location.mean == 4.9
 
-        captured = capsys.readouterr()
-        assert "Assigned Test Molecule to 1 peaks" in captured.out
-        assert "Warning: Multiple peaks found within tolerance" in captured.out
-        assert "4.900" in captured.out and "5.150" in captured.out and "4.850" in captured.out
-        assert "Tip: Consider setting a higher min_signal value" in captured.out
+def test_assign_molecules_assigns_single_matching_peak() -> None:
+    peak = _peak(5.0, 500.0, amplitude=250.0, chrom_id="chrom_1")
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [peak])),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-    def test_no_peaks_found_warning(
-        self, mock_molecule: Molecule, capsys: CaptureFixture[Any]
-    ) -> None:
-        """Test no peaks found: warning is displayed."""
-        peaks = [
-            self.create_peak(retention_time=3.0, area=500.0),
-            self.create_peak(retention_time=7.0, area=500.0),
-        ]
-        sample = self.create_sample("meas_001", peaks)
-        analyzer = self.create_analyzer([sample])
-        analyzer.molecules.append(mock_molecule)
+    handler.assign_molecules(silent=True)
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
+    assert peak.molecule_id == "test_mol"
 
-        assigned_peaks = [p for p in peaks if p.molecule_id == "test_mol"]
-        assert len(assigned_peaks) == 0
 
-        captured = capsys.readouterr()
-        assert "Assigned Test Molecule to 0 peaks" not in captured.out
-        assert "Warning: No peaks found for Test Molecule in 1 measurement(s)" in captured.out
-        assert "meas_001" in captured.out
-        assert "5.000 min" in captured.out
+def test_assign_molecules_reports_missing_peaks() -> None:
+    peak = _peak(3.0, 500.0, amplitude=250.0, chrom_id="chrom_1")
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [peak])),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-    def test_min_signal_filtering(
-        self, mock_molecule: Molecule, capsys: CaptureFixture[Any]
-    ) -> None:
-        """Test that peaks below min_signal are filtered out."""
-        peaks = [
-            self.create_peak(retention_time=5.0, area=50.0),   # below min_signal
-            self.create_peak(retention_time=5.1, area=150.0),  # above min_signal
-        ]
-        sample = self.create_sample("meas_001", peaks)
-        analyzer = self.create_analyzer([sample])
-        analyzer.molecules.append(mock_molecule)
+    handler.assign_molecules(silent=True)
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
+    assert peak.molecule_id is None
 
-        assigned_peaks = [p for p in peaks if p.molecule_id == "test_mol"]
-        assert len(assigned_peaks) == 1
-        assert assigned_peaks[0].area.mean == 150.0
 
-        captured = capsys.readouterr()
-        assert "Assigned Test Molecule to 1 peaks" in captured.out
+def test_assign_molecules_raises_for_multiple_peaks_in_window() -> None:
+    peaks = [
+        _peak(4.95, 300.0, amplitude=180.0, chrom_id="chrom_1"),
+        _peak(5.05, 400.0, amplitude=220.0, chrom_id="chrom_1"),
+    ]
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", peaks)),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-    def test_multiple_samples_mixed_scenarios(
-        self, mock_molecule: Molecule, capsys: CaptureFixture[Any]
-    ) -> None:
-        """Test complex scenario with multiple samples."""
-        peaks1 = [self.create_peak(retention_time=5.0, area=300.0)]
-        peaks2 = [
-            self.create_peak(retention_time=4.95, area=200.0),
-            self.create_peak(retention_time=5.1, area=400.0),
-        ]
-        peaks3 = [self.create_peak(retention_time=3.0, area=500.0)]
-        peaks4 = [self.create_peak(retention_time=5.0, area=50.0)]  # below min_signal
+    with pytest.raises(ValueError, match="matched multiple peaks"):
+        handler.assign_molecules(silent=True)
 
-        analyzer = self.create_analyzer([
-            self.create_sample("meas_001", peaks1),
-            self.create_sample("meas_002", peaks2),
-            self.create_sample("meas_003", peaks3),
-            self.create_sample("meas_004", peaks4),
-        ])
-        analyzer.molecules.append(mock_molecule)
+    assert all(peak.molecule_id is None for peak in peaks)
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
 
-        assert len([p for p in peaks1 if p.molecule_id == "test_mol"]) == 1
-        assigned2 = [p for p in peaks2 if p.molecule_id == "test_mol"]
-        assert len(assigned2) == 1
-        assert assigned2[0].location.mean == 4.95
-        assert len([p for p in peaks3 if p.molecule_id == "test_mol"]) == 0
-        assert len([p for p in peaks4 if p.molecule_id == "test_mol"]) == 0
+def test_assign_molecules_skip_multiple_peaks_in_window() -> None:
+    ambiguous_peaks = [
+        _peak(4.95, 300.0, amplitude=180.0, chrom_id="chrom_1"),
+        _peak(5.05, 400.0, amplitude=220.0, chrom_id="chrom_1"),
+    ]
+    single_peak = _peak(5.0, 350.0, amplitude=200.0, chrom_id="chrom_2")
+    handler = _handler(
+        _sample(
+            "sample_1",
+            _chromatogram("chrom_1", "sample_1", ambiguous_peaks),
+            _chromatogram("chrom_2", "sample_1", [single_peak]),
+        ),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-        captured = capsys.readouterr()
-        assert "Assigned Test Molecule to 2 peaks" in captured.out
-        assert "Warning: Multiple peaks found within tolerance" in captured.out
-        assert "Warning: No peaks found for Test Molecule in 2 measurement(s)" in captured.out
-        assert "meas_003" in captured.out and "meas_004" in captured.out
+    handler.assign_molecules(on_multiple="skip", silent=True)
 
-    def test_no_retention_time_raises_error(self) -> None:
-        """Test that molecule without retention time raises ValueError."""
-        molecule_no_rt = Molecule(
-            id="no_rt_mol",
-            pubchem_cid=67890,
-            name="No RT Molecule",
-            retention_time=None,
-        )
-        peaks = [self.create_peak(retention_time=5.0, area=300.0)]
-        analyzer = self.create_analyzer([self.create_sample("meas_001", peaks)])
-        analyzer.molecules.append(molecule_no_rt)
+    assert all(peak.molecule_id is None for peak in ambiguous_peaks)
+    assert single_peak.molecule_id == "test_mol"
 
-        with pytest.raises(ValueError, match="no_rt_mol"):
-            analyzer._register_peaks(molecule_no_rt, 0.2, 254.0)
 
-    def test_tolerance_boundary_conditions(
-        self,
-        capsys: CaptureFixture[Any],
-    ) -> None:
-        """Test peaks exactly at tolerance boundaries."""
-        molecule = Molecule(
-            id="boundary_mol",
-            pubchem_cid=11111,
-            name="Boundary Molecule",
-            retention_time=5.0,
-            retention_tolerance=0.2,
-            min_signal=100.0,
-        )
+def test_assign_molecules_filters_small_artefact_peaks_by_amplitude() -> None:
+    artefact = _peak(4.95, 50.0, amplitude=25.0, chrom_id="chrom_1")
+    main_peak = _peak(5.02, 400.0, amplitude=250.0, chrom_id="chrom_1")
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [artefact, main_peak])),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-        peaks = [
-            self.create_peak(retention_time=4.85, area=300.0),  # within tolerance
-            self.create_peak(retention_time=5.15, area=400.0),  # within tolerance
-            self.create_peak(retention_time=4.75, area=200.0),  # outside tolerance
-        ]
-        analyzer = self.create_analyzer([self.create_sample("meas_001", peaks)])
-        analyzer.molecules.append(molecule)
+    handler.assign_molecules(min_amplitude=100.0, silent=True)
 
-        analyzer._register_peaks(molecule, molecule.retention_tolerance, 254.0)
+    assert artefact.molecule_id is None
+    assert main_peak.molecule_id == "test_mol"
 
-        assigned_peaks = [p for p in peaks if p.molecule_id == "boundary_mol"]
-        assert len(assigned_peaks) == 1
-        assert assigned_peaks[0].location.mean == 4.85
 
-        captured = capsys.readouterr()
-        assert "Warning: Multiple peaks found within tolerance" in captured.out
-        assert "4.850" in captured.out and "5.150" in captured.out
+def test_assign_molecules_skip_mode_separates_missing_and_ambiguous() -> None:
+    ambiguous_peaks = [
+        _peak(4.95, 300.0, amplitude=180.0, chrom_id="chrom_1"),
+        _peak(5.05, 400.0, amplitude=220.0, chrom_id="chrom_1"),
+    ]
+    handler = _handler(
+        _sample(
+            "sample_1",
+            _chromatogram("chrom_1", "sample_1", ambiguous_peaks),
+            _chromatogram("chrom_2", "sample_1", []),
+        ),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-    def test_empty_samples(self, mock_molecule: Molecule) -> None:
-        """Test behavior with empty samples list."""
-        analyzer = self.create_analyzer([])
-        analyzer.molecules.append(mock_molecule)
+    handler.assign_molecules(on_multiple="skip", silent=True)
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
 
-    def test_chromatogram_with_no_peaks(
-        self, mock_molecule: Molecule, capsys: CaptureFixture[Any]
-    ) -> None:
-        """Test behavior with chromatogram containing no peaks."""
-        sample = Sample(
-            id="empty_meas",
-            chromatograms=[Chromatogram(id="c0", sample_id="empty_meas", peaks=[], wavelength=254.0)],
-        )
-        analyzer = self.create_analyzer([sample])
-        analyzer.molecules.append(mock_molecule)
+def test_assign_molecules_skip_mode_still_reports_ambiguity_after_filtering() -> None:
+    peaks = [
+        _peak(4.95, 50.0, amplitude=25.0, chrom_id="chrom_1"),
+        _peak(5.02, 400.0, amplitude=250.0, chrom_id="chrom_1"),
+        _peak(5.08, 380.0, amplitude=240.0, chrom_id="chrom_1"),
+    ]
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", peaks)),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
 
-        analyzer._register_peaks(mock_molecule, mock_molecule.retention_tolerance, 254.0)
+    handler.assign_molecules(
+        min_amplitude=100.0,
+        on_multiple="skip",
+        silent=True,
+    )
 
-        captured = capsys.readouterr()
-        assert "Assigned Test Molecule to 0 peaks" not in captured.out
-        assert "Warning: No peaks found for Test Molecule in 1 measurement(s)" in captured.out
-        assert "empty_meas" in captured.out
+    assert all(peak.molecule_id is None for peak in peaks)
+
+
+def test_assign_molecules_is_idempotent_for_targeted_molecules() -> None:
+    first_peak = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_1")
+    second_peak = _peak(6.0, 350.0, amplitude=220.0, chrom_id="chrom_1")
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [first_peak, second_peak])),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
+    handler.assign_molecules(silent=True)
+
+    handler.add_peak_window("test_mol", 5.8, 6.2)
+    handler.assign_molecules(silent=True)
+
+    assert first_peak.molecule_id is None
+    assert second_peak.molecule_id == "test_mol"
+
+
+def test_assign_molecules_skip_mode_clears_previous_assignments() -> None:
+    first_peak = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_1")
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [first_peak])),
+        molecules=[_molecule()],
+    )
+    handler.add_peak_window("test_mol", 4.8, 5.2)
+    handler.assign_molecules(silent=True)
+
+    second_peak = _peak(5.05, 280.0, amplitude=190.0, chrom_id="chrom_1")
+    handler.samples[0].chromatograms[0].peaks.append(second_peak)
+
+    handler.assign_molecules(on_multiple="skip", silent=True)
+
+    assert first_peak.molecule_id is None
+    assert second_peak.molecule_id is None
+
+
+def test_assign_molecules_assigns_across_multiple_chromatograms_per_sample() -> None:
+    """Time-course style: one sample, several chromatograms, same wavelength."""
+    p0 = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_t0")
+    p30 = _peak(5.02, 280.0, amplitude=190.0, chrom_id="chrom_t30")
+    sample = _sample(
+        "sample_1",
+        _chromatogram("chrom_t0", "sample_1", [p0], wavelength=254.0),
+        _chromatogram("chrom_t30", "sample_1", [p30], wavelength=254.0),
+    )
+    handler = _handler(sample, molecules=[_molecule()])
+    handler.add_peak_window("test_mol", 4.8, 5.2)
+
+    handler.assign_molecules(silent=True)
+
+    assert p0.molecule_id == "test_mol"
+    assert p30.molecule_id == "test_mol"
+
+
+def test_assign_molecules_uses_window_wavelength_to_pick_chromatogram() -> None:
+    peak_254 = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_254")
+    peak_280 = _peak(5.02, 450.0, amplitude=260.0, chrom_id="chrom_280")
+    sample = _sample(
+        "sample_1",
+        _chromatogram("chrom_254", "sample_1", [peak_254], wavelength=254.0),
+        _chromatogram("chrom_280", "sample_1", [peak_280], wavelength=280.0),
+    )
+    handler = _handler(sample, molecules=[_molecule()])
+    handler.add_peak_window("test_mol", 4.8, 5.2, wavelength=280.0)
+
+    handler.assign_molecules(silent=True)
+
+    assert peak_254.molecule_id is None
+    assert peak_280.molecule_id == "test_mol"
+
+
+def test_unassign_peaks_clears_specific_molecule_in_selected_chromatogram() -> None:
+    peak_target = _peak(5.0, 300.0, chrom_id="chrom_1", molecule_id="test_mol")
+    peak_other = _peak(6.0, 200.0, chrom_id="chrom_1", molecule_id="other_mol")
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [peak_target, peak_other])),
+        molecules=[_molecule(), _molecule("other_mol")],
+    )
+
+    removed = handler.unassign_peaks(
+        chromatogram_ids=["chrom_1"],
+        molecule_ids=["test_mol"],
+    )
+
+    assert peak_target.molecule_id is None
+    assert peak_other.molecule_id == "other_mol"
+    assert removed == [
+        {
+            "sample_id": "sample_1",
+            "chromatogram_id": "chrom_1",
+            "reaction_time": None,
+            "peak_index": 0,
+            "peak_rt": 5.0,
+            "previous_molecule_id": "test_mol",
+        }
+    ]
+
+
+def test_unassign_peaks_can_match_sample_and_reaction_time() -> None:
+    peak_t0 = _peak(5.0, 300.0, chrom_id="chrom_t0", molecule_id="test_mol")
+    peak_t30 = _peak(5.0, 280.0, chrom_id="chrom_t30", molecule_id="test_mol")
+    sample = _sample(
+        "sample_1",
+        Chromatogram(
+            id="chrom_t0",
+            sample_id="sample_1",
+            peaks=[peak_t0],
+            wavelength=254.0,
+            reaction_time=0.0,
+        ),
+        Chromatogram(
+            id="chrom_t30",
+            sample_id="sample_1",
+            peaks=[peak_t30],
+            wavelength=254.0,
+            reaction_time=30.0,
+        ),
+    )
+    handler = _handler(sample, molecules=[_molecule()])
+
+    removed = handler.unassign_peaks(
+        sample_ids=["sample_1"],
+        molecule_ids=["test_mol"],
+        reaction_times=[30.0],
+    )
+
+    assert peak_t0.molecule_id == "test_mol"
+    assert peak_t30.molecule_id is None
+    assert removed[0]["chromatogram_id"] == "chrom_t30"
+
+
+def test_unassign_peaks_raises_for_unknown_chromatogram_id() -> None:
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [])),
+        molecules=[_molecule()],
+    )
+
+    with pytest.raises(ValueError, match="Unknown chromatogram IDs"):
+        handler.unassign_peaks(chromatogram_ids=["missing"])
+
+
+def test_peak_assignment_summary_table_handles_ambiguous_entries() -> None:
+    handler = _handler(molecules=[_molecule()])
+    window = handler.add_peak_window("test_mol", 4.8, 5.2)
+
+    table = pretty.create_peak_assignment_summary_table(
+        handler,
+        [
+            {
+                "molecule": handler.get_molecule("test_mol"),
+                "window": window,
+                "assigned_peak_count": 1,
+                "chromatograms_with_no_peaks": ["chrom_missing"],
+                "chromatograms_with_multiple_peaks": ["chrom_ambiguous"],
+                "chromatograms_considered": ["chrom_missing", "chrom_ambiguous"],
+                "min_amplitude": 100.0,
+                "on_multiple": "skip",
+            }
+        ],
+    )
+
+    assert [column.header for column in table.columns] == [
+        "Molecule",
+        "Window",
+        "Assigned",
+        "Missing",
+        "Ambiguous",
+        "Details",
+    ]
+
+
+def test_subset_returns_independent_handler_with_copied_peak_windows() -> None:
+    sample_a = _sample(
+        "sample_a",
+        _chromatogram(
+            "chrom_a",
+            "sample_a",
+            [_peak(5.0, 100.0, amplitude=120.0, chrom_id="chrom_a")],
+        ),
+    )
+    sample_b = _sample(
+        "sample_b",
+        _chromatogram(
+            "chrom_b",
+            "sample_b",
+            [_peak(6.0, 200.0, amplitude=180.0, chrom_id="chrom_b")],
+        ),
+    )
+    parent = _handler(sample_a, sample_b, molecules=[_molecule()])
+    parent.add_peak_window("test_mol", 4.8, 5.2)
+
+    child = parent.subset(["chrom_b"])
+    child.add_peak_window("test_mol", 5.8, 6.2)
+
+    assert len(child.samples) == 1
+    assert child.samples[0].id == "sample_b"
+    assert [chrom.id for chrom in child.samples[0].chromatograms] == ["chrom_b"]
+    assert math.isclose(parent.peak_windows["test_mol"].rt_min, 4.8, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(child.peak_windows["test_mol"].rt_min, 5.8, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_subset_raises_for_unknown_chromatogram_ids() -> None:
+    handler = _handler(
+        _sample("sample_1", _chromatogram("chrom_1", "sample_1", [])),
+        molecules=[_molecule()],
+    )
+
+    with pytest.raises(ValueError, match="not found"):
+        handler.subset(["missing"])

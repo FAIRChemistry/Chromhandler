@@ -3,7 +3,7 @@ from __future__ import annotations
 import warnings as _warnings
 from typing import Any
 
-from .annotations import BaselineAnnotation, PeakAnnotation
+from .annotations import BaselineAnnotation, PeakAnnotation, PeakWindow
 from .handler import Handler
 from .molecule import CalibrationMethod, LinearCalibration, Molecule
 from .protein import Protein
@@ -54,14 +54,15 @@ def __getattr__(name: str) -> Handler:
 
 
 __all__ = [
-    "Handler",
-    "ChromAnalyzer",
-    "Molecule",
-    "Protein",
-    "PeakAnnotation",
     "BaselineAnnotation",
-    "LinearCalibration",
     "CalibrationMethod",
+    "ChromAnalyzer",
+    "Handler",
+    "LinearCalibration",
+    "Molecule",
+    "PeakAnnotation",
+    "PeakWindow",
+    "Protein",
 ]
 
 __version__ = "0.10.4"

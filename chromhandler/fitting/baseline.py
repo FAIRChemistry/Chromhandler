@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
+import jax
 import jax.numpy as jnp
 
-from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+if TYPE_CHECKING:
+    from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 
 _DEFAULT_PERCENTILE: Final = 5.0
 _DEFAULT_EDGE_FRACTION: Final = 0.20
@@ -22,18 +24,18 @@ _GLOBAL_SCALE_CAP: Final = 2.0
 class BaselinePriors:
     """Per-trace linear baseline priors for the Bayesian model."""
 
-    intercept: jnp.ndarray  # [n_trace] location
-    slope: jnp.ndarray  # [n_trace] location
-    intercept_scale: jnp.ndarray  # [n_trace]
-    slope_scale: jnp.ndarray  # [n_trace]
+    intercept: jax.Array  # [n_trace] location
+    slope: jax.Array  # [n_trace] location
+    intercept_scale: jax.Array  # [n_trace]
+    slope_scale: jax.Array  # [n_trace]
 
 
 def estimate_baseline(
-    time: jnp.ndarray,
-    signal: jnp.ndarray,
+    time: jax.Array,
+    signal: jax.Array,
     *,
     peaks: list[PeakAnnotation],
-    baselines: list[BaselineAnnotation] = (),
+    baselines: list[BaselineAnnotation] | None = None,
     edge_fraction: float = _DEFAULT_EDGE_FRACTION,
     percentile: float = _DEFAULT_PERCENTILE,
 ) -> BaselinePriors:
@@ -72,11 +74,13 @@ def estimate_baseline(
     if not (0.0 < float(edge_fraction) <= 0.5):
         raise ValueError("edge_fraction must satisfy 0 < edge_fraction <= 0.5.")
 
+    baseline_regions = [] if baselines is None else baselines
+
     anchor_mask = _select_anchors(
         time,
         signal,
         peaks=peaks,
-        baselines=baselines,
+        baselines=baseline_regions,
         edge_fraction=float(edge_fraction),
         percentile=float(percentile),
     )
@@ -110,14 +114,14 @@ def estimate_baseline(
 
 
 def _select_anchors(
-    time: jnp.ndarray,
-    signal: jnp.ndarray,
+    time: jax.Array,
+    signal: jax.Array,
     *,
     peaks: list[PeakAnnotation],
     baselines: list[BaselineAnnotation],
     edge_fraction: float,
     percentile: float,
-) -> jnp.ndarray:
+) -> jax.Array:
     """Build a per-trace boolean mask of baseline anchor points.
 
     Explicit baseline sections contribute all their finite points.
@@ -143,47 +147,29 @@ def _select_anchors(
         )
         edge_mask = left_edge | right_edge
 
-        left_threshold = jnp.nanquantile(
-            jnp.where(left_edge, signal, jnp.nan), q, axis=1
-        )
-        right_threshold = jnp.nanquantile(
-            jnp.where(right_edge, signal, jnp.nan), q, axis=1
-        )
-        left_threshold = jnp.where(
-            jnp.isfinite(left_threshold), left_threshold, -jnp.inf
-        )
-        right_threshold = jnp.where(
-            jnp.isfinite(right_threshold), right_threshold, -jnp.inf
-        )
+        left_threshold = jnp.nanquantile(jnp.where(left_edge, signal, jnp.nan), q, axis=1)
+        right_threshold = jnp.nanquantile(jnp.where(right_edge, signal, jnp.nan), q, axis=1)
+        left_threshold = jnp.where(jnp.isfinite(left_threshold), left_threshold, -jnp.inf)
+        right_threshold = jnp.where(jnp.isfinite(right_threshold), right_threshold, -jnp.inf)
 
         edge_selected = (left_edge & (signal <= left_threshold[:, None])) | (
             right_edge & (signal <= right_threshold[:, None])
         )
 
         # Fallback: full-window percentile when edges are too sparse.
-        full_threshold = jnp.nanquantile(
-            jnp.where(in_window, signal, jnp.nan), q, axis=1
-        )
-        full_threshold = jnp.where(
-            jnp.isfinite(full_threshold), full_threshold, -jnp.inf
-        )
+        full_threshold = jnp.nanquantile(jnp.where(in_window, signal, jnp.nan), q, axis=1)
+        full_threshold = jnp.where(jnp.isfinite(full_threshold), full_threshold, -jnp.inf)
         full_selected = in_window & (signal <= full_threshold[:, None])
 
         has_edges = jnp.any(edge_mask, axis=1)
-        selected = selected | jnp.where(
-            has_edges[:, None], edge_selected, full_selected
-        )
+        selected = selected | jnp.where(has_edges[:, None], edge_selected, full_selected)
 
     # Ensure ≥2 anchor points per trace; fall back to all annotated points.
     all_annotated = jnp.zeros_like(finite, dtype=bool)
     for pk in peaks:
-        all_annotated = all_annotated | (
-            (time >= float(pk.rt_min)) & (time <= float(pk.rt_max)) & finite
-        )
+        all_annotated = all_annotated | ((time >= float(pk.rt_min)) & (time <= float(pk.rt_max)) & finite)
     for bl in baselines:
-        all_annotated = all_annotated | (
-            (time >= float(bl.rt_min)) & (time <= float(bl.rt_max)) & finite
-        )
+        all_annotated = all_annotated | ((time >= float(bl.rt_min)) & (time <= float(bl.rt_max)) & finite)
 
     anchor_count = jnp.sum(selected, axis=1)
     selected = jnp.where(anchor_count[:, None] >= 2, selected, all_annotated)
@@ -193,11 +179,11 @@ def _select_anchors(
 
 
 def _window_edge_masks(
-    in_window: jnp.ndarray,
+    in_window: jax.Array,
     *,
     edge_fraction: float,
     min_edge_points: int,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jax.Array, jax.Array]:
     """Return left/right edge masks for each trace in a peak window."""
     n_time = in_window.shape[1]
     indices = jnp.arange(n_time, dtype=jnp.int32)[None, :]
@@ -217,10 +203,10 @@ def _window_edge_masks(
 
 
 def _fit_line(
-    time: jnp.ndarray,
-    signal: jnp.ndarray,
-    mask: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    time: jax.Array,
+    signal: jax.Array,
+    mask: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """OLS linear fit per trace through masked points.
 
     Returns:
@@ -243,9 +229,7 @@ def _fit_line(
     sxy = jnp.nansum((t - xm) * (y - ym), axis=1)
 
     slope = jnp.where(sxx > 1e-12, sxy / sxx, 0.0)
-    intercept = jnp.nan_to_num(ym[..., 0], nan=0.0) - slope * jnp.nan_to_num(
-        xm[..., 0], nan=0.0
-    )
+    intercept = jnp.nan_to_num(ym[..., 0], nan=0.0) - slope * jnp.nan_to_num(xm[..., 0], nan=0.0)
 
     # OLS standard errors
     n = jnp.sum(mask, axis=1).astype(jnp.float32)
@@ -255,15 +239,12 @@ def _fit_line(
     sigma2 = sse / jnp.maximum(n - 2.0, 1.0)
     valid = (n > 2.0) & jnp.isfinite(sigma2) & (sxx_se > 1e-12)
 
-    se_slope = jnp.where(
-        valid, jnp.sqrt(jnp.maximum(sigma2 / jnp.maximum(sxx_se, 1e-12), 0.0)), jnp.nan
-    )
+    se_slope = jnp.where(valid, jnp.sqrt(jnp.maximum(sigma2 / jnp.maximum(sxx_se, 1e-12), 0.0)), jnp.nan)
     se_intercept = jnp.where(
         valid,
         jnp.sqrt(
             jnp.maximum(
-                sigma2
-                * (1.0 / jnp.maximum(n, 1.0) + x_mean**2 / jnp.maximum(sxx_se, 1e-12)),
+                sigma2 * (1.0 / jnp.maximum(n, 1.0) + x_mean**2 / jnp.maximum(sxx_se, 1e-12)),
                 0.0,
             )
         ),
@@ -272,15 +253,11 @@ def _fit_line(
     return intercept, slope, se_intercept, se_slope
 
 
-def _scale_from_se(se: jnp.ndarray, *, floor: float) -> jnp.ndarray:
+def _scale_from_se(se: jax.Array, *, floor: float) -> jax.Array:
     """Convert OLS standard errors to prior scales."""
     raw = _PRIOR_SE_MULTIPLIER * se
     finite = raw[jnp.isfinite(raw) & (raw > 0.0)]
-    fallback = (
-        max(float(jnp.nanmedian(finite)), float(floor))
-        if int(finite.size) > 0
-        else float(floor)
-    )
+    fallback = max(float(jnp.nanmedian(finite)), float(floor)) if int(finite.size) > 0 else float(floor)
     return jnp.where(
         jnp.isfinite(raw) & (raw > 0.0),
         jnp.maximum(raw, floor),
@@ -288,7 +265,7 @@ def _scale_from_se(se: jnp.ndarray, *, floor: float) -> jnp.ndarray:
     )
 
 
-def _robust_scale(values: jnp.ndarray, *, floor: float) -> jnp.ndarray:
+def _robust_scale(values: jax.Array, *, floor: float) -> jax.Array:
     """Robust across-trace spread (MAD-based) with floor."""
     finite = values[jnp.isfinite(values)]
     if int(finite.size) <= 1:
@@ -296,6 +273,3 @@ def _robust_scale(values: jnp.ndarray, *, floor: float) -> jnp.ndarray:
     med = jnp.median(finite)
     mad = jnp.median(jnp.abs(finite - med))
     return jnp.asarray(max(float(1.4826 * mad), float(floor)), dtype=values.dtype)
-
-
-__all__ = ["BaselinePriors", "estimate_baseline"]

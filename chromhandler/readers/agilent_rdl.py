@@ -1,5 +1,4 @@
 import re
-from typing import Tuple
 
 from chromhandler.model import Chromatogram, Data, Measurement, Peak
 from chromhandler.readers.abstractreader import AbstractReader
@@ -45,13 +44,13 @@ class AgilentRDLReader(AbstractReader):
 
     @staticmethod
     def read_file(file_path: str) -> list[str]:
-        with open(file_path, "r", encoding="utf-8") as file:
+        with open(file_path, encoding="utf-8") as file:
             lines = file.readlines()
 
         return lines
 
     @staticmethod
-    def extract_information(lines: list[str]) -> Tuple[list[list[str]], list[str], str]:
+    def extract_information(lines: list[str]) -> tuple[list[list[str]], list[str], str]:
         data = []
         for i, line in enumerate(lines):
             # Check for first line with float values after space and pipe characters
@@ -97,7 +96,7 @@ class AgilentRDLReader(AbstractReader):
         if row2_columns:
             aligned_columns = [
                 f"{col1}{col2}".strip()
-                for col1, col2 in zip(row1_columns, row2_columns)
+                for col1, col2 in zip(row1_columns, row2_columns, strict=False)
             ]
             return aligned_columns[1:-1]
 

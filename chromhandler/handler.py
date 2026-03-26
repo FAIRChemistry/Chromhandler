@@ -4,31 +4,99 @@ import copy
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
-from calipytion.tools.utility import pubchem_request_molecule_name
-from loguru import logger
-from pydantic import BaseModel, Field
-from rich.console import Console, Group
+from dotted_dict import PreserveKeysDottedDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from . import pretty, visualize
-from .annotations import PeakAnnotation
+from .annotations import PeakAnnotation, PeakWindow
+from .enzymeml import handler_to_enzymeml_document
 from .model import Chromatogram, InitialCondition, Peak, Sample
 from .molecule import CalibrationMethod, LinearCalibration, Molecule
 from .protein import Protein
-from .readers.abstractreader import AbstractReader
-from .utility import _resolve_chromatogram
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from rich.console import Console, Group
+
+    from .readers.abstractreader import AbstractReader
 
 # Matches numeric value + unit at the end (or anywhere) of a filename stem,
 # e.g. "CV10_120min", "sample_30sec", "run_2h".
 _TIME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(min|sec|h)\b", re.IGNORECASE)
 
 
+def _coerce_molecule_registry(v: object) -> PreserveKeysDottedDict:
+    """Accept ``PreserveKeysDottedDict``, ``dict``, or legacy ``list`` of molecules."""
+    if isinstance(v, PreserveKeysDottedDict):
+        return v
+    out: PreserveKeysDottedDict = PreserveKeysDottedDict()
+    if isinstance(v, dict):
+        for raw in cast("dict[str, Any]", v).values():
+            mol = raw if isinstance(raw, Molecule) else Molecule.model_validate(raw)
+            out[mol.id] = mol
+        return out
+    if isinstance(v, list):
+        for raw in cast("list[Any]", v):
+            mol = raw if isinstance(raw, Molecule) else Molecule.model_validate(raw)
+            out[mol.id] = mol
+        return out
+    raise TypeError(f"molecules must be PreserveKeysDottedDict, dict, or list, not {type(v).__name__}")
+
+
+def _coerce_protein_registry(v: object) -> PreserveKeysDottedDict:
+    """Accept ``PreserveKeysDottedDict``, ``dict``, or legacy ``list`` of proteins."""
+    if isinstance(v, PreserveKeysDottedDict):
+        return v
+    out: PreserveKeysDottedDict = PreserveKeysDottedDict()
+    if isinstance(v, dict):
+        for raw in cast("dict[str, Any]", v).values():
+            prot = raw if isinstance(raw, Protein) else Protein.model_validate(raw)
+            out[prot.id] = prot
+        return out
+    if isinstance(v, list):
+        for raw in cast("list[Any]", v):
+            prot = raw if isinstance(raw, Protein) else Protein.model_validate(raw)
+            out[prot.id] = prot
+        return out
+    raise TypeError(f"proteins must be PreserveKeysDottedDict, dict, or list, not {type(v).__name__}")
+
+
+def _coerce_peak_window_registry(v: object) -> PreserveKeysDottedDict:
+    """Accept ``PreserveKeysDottedDict`` or ``dict`` mapping molecule id → window."""
+    if isinstance(v, PreserveKeysDottedDict):
+        return v
+    out: PreserveKeysDottedDict = PreserveKeysDottedDict()
+    if isinstance(v, dict):
+        for raw in cast("dict[str, Any]", v).values():
+            win = raw if isinstance(raw, PeakWindow) else PeakWindow.model_validate(raw)
+            out[win.molecule_id] = win
+        return out
+    raise TypeError(f"peak_windows must be PreserveKeysDottedDict or dict, not {type(v).__name__}")
+
+
+MoleculeRegistry = Annotated[
+    PreserveKeysDottedDict | dict[str, Molecule],
+    BeforeValidator(_coerce_molecule_registry),
+]
+ProteinRegistry = Annotated[
+    PreserveKeysDottedDict | dict[str, Protein],
+    BeforeValidator(_coerce_protein_registry),
+]
+PeakWindowRegistry = Annotated[
+    PreserveKeysDottedDict,
+    BeforeValidator(_coerce_peak_window_registry),
+]
+
+
 def _fit_linear(
-    x: np.ndarray,
-    y: np.ndarray,
+    x: npt.NDArray[np.floating[Any]],
+    y: npt.NDArray[np.floating[Any]],
     *,
     fit_intercept: bool,
 ) -> tuple[float, float]:
@@ -49,220 +117,6 @@ def _fit_linear(
         return float(result[0]), float(result[1])
     slope = float(np.dot(x, y) / np.dot(x, x))
     return slope, 0.0
-
-
-# ---------------------------------------------------------------------------
-# EnzymeML export helpers (module-level pure functions)
-# ---------------------------------------------------------------------------
-
-
-def _enzml_filter_samples(
-    samples: list[Sample],
-    sample_ids: list[str] | None,
-) -> list[Sample]:
-    """Return the subset of *samples* matching *sample_ids* (or all if ``None``)."""
-    if sample_ids is None:
-        return list(samples)
-    id_set = set(sample_ids)
-    missing = id_set - {s.id for s in samples}
-    if missing:
-        raise ValueError(f"to_enzymeml: sample_ids not found in handler: {missing}")
-    return [s for s in samples if s.id in id_set]
-
-
-def _enzml_assert_calibrations(molecules: list[Molecule]) -> None:
-    """Raise ``ValueError`` if any non-constant molecule is missing a calibration."""
-    missing = [m.id for m in molecules if not m.constant and m.calibration is None]
-    if missing:
-        raise ValueError(
-            f"to_enzymeml: to_concentration=True but the following molecules "
-            f"have no calibration — run handler.calibrate_molecules() first: {missing}"
-        )
-
-
-def _enzml_add_species(
-    doc: Any, molecules: list[Molecule], proteins: list[Protein]
-) -> None:
-    """Populate *doc* with SmallMolecule and Protein entries."""
-    from pyenzyme import Protein as EnzymeMLProtein
-    from pyenzyme import SmallMolecule
-
-    pubchem_base = "https://pubchem.ncbi.nlm.nih.gov/compound/"
-    for mol in molecules:
-        kwargs: dict[str, Any] = {
-            "id": mol.id,
-            "name": mol.name,
-            "constant": mol.constant,
-        }
-        if mol.pubchem_cid and mol.pubchem_cid > 0:
-            kwargs["ld_id"] = f"{pubchem_base}{mol.pubchem_cid}"
-        doc.small_molecules.append(SmallMolecule(**kwargs))
-
-    for prot in proteins:
-        doc.proteins.append(
-            EnzymeMLProtein(
-                id=prot.id,
-                name=prot.name,
-                constant=prot.constant,
-                sequence=prot.sequence or "",
-            )
-        )
-
-
-def _enzml_build_measurement(
-    *,
-    sample: Sample,
-    molecules: list[Molecule],
-    proteins: list[Protein],
-    temperature: float,
-    temperature_unit: str,
-    ph: float,
-    to_concentration: bool,
-    extrapolate: bool,
-    draw_idx: int | None,
-) -> Any:
-    """Build one pyenzyme ``Measurement`` for a single *sample* / *draw_idx* pair."""
-    from pyenzyme import DataTypes, MeasurementData
-    from pyenzyme import Measurement as EnzymeMLMeasurement
-
-    meas_id = sample.id if draw_idx is None else f"{sample.id}_draw{draw_idx:04d}"
-
-    # Chromatograms sorted by reaction_time (skip those with no time assigned)
-    chroms = sorted(
-        [c for c in sample.chromatograms if c.reaction_time is not None],
-        key=lambda c: c.reaction_time,  # type: ignore[arg-type]
-    )
-
-    species_data = []
-
-    for mol in molecules:
-        md = _enzml_build_measurement_data(
-            chroms=chroms,
-            sample=sample,
-            species=mol,
-            to_concentration=to_concentration,
-            extrapolate=extrapolate,
-            draw_idx=draw_idx,
-        )
-        if md is not None:
-            species_data.append(md)
-
-    # Proteins: constant concentration stored in initial/prepared, no timecourse
-    for prot in proteins:
-        init_conc = prot.init_conc
-        unit_str = str(prot.conc_unit) if prot.conc_unit else ""
-        species_data.append(
-            MeasurementData(
-                species_id=prot.id,
-                initial=init_conc,
-                prepared=init_conc,
-                data_unit=unit_str,
-                data_type=DataTypes.CONCENTRATION,
-                time_unit="min",
-                data=[],
-                time=[],
-            )
-        )
-
-    return EnzymeMLMeasurement(
-        id=meas_id,
-        name=meas_id,
-        temperature=temperature,
-        temperature_unit=temperature_unit,
-        ph=ph,
-        species_data=species_data,
-    )
-
-
-def _enzml_build_measurement_data(
-    *,
-    chroms: list[Chromatogram],
-    sample: Sample,
-    species: Molecule,
-    to_concentration: bool,
-    extrapolate: bool,
-    draw_idx: int | None,
-) -> Any:
-    """Build one ``MeasurementData`` for a single *(sample, molecule)* pair."""
-    import math
-
-    from pyenzyme import DataTypes, MeasurementData
-
-    times: list[float] = []
-    values: list[float] = []
-    time_unit = "min"
-
-    for chrom in chroms:
-        if chrom.reaction_time_unit:
-            time_unit = str(chrom.reaction_time_unit)
-
-        peak = next((p for p in chrom.peaks if p.molecule_id == species.id), None)
-        area = _enzml_resolve_area(peak, draw_idx)
-
-        # Convert area → concentration when requested and calibration is available
-        if to_concentration and area is not None and species.calibration is not None:
-            try:
-                value: float | None = species.calibration.area_to_conc(
-                    area, extrapolate=extrapolate
-                ).mean
-            except ValueError:
-                value = None  # outside calibration range and extrapolate=False
-        else:
-            value = area
-
-        times.append(float(chrom.reaction_time))  # type: ignore[arg-type]
-        values.append(value if value is not None else math.nan)
-
-    # prepared = user-set initial concentration from InitialCondition
-    ic = next(
-        (ic for ic in sample.initial_conditions if ic.molecule_id == species.id),
-        None,
-    )
-    prepared: float | None = (
-        float(ic.init_conc) if ic is not None and ic.init_conc is not None else None
-    )
-
-    # initial = actual measured value at t=0 (fallback: prepared)
-    t0_idx = next((i for i, t in enumerate(times) if t == 0.0), None)
-    if t0_idx is not None and not math.isnan(values[t0_idx]):
-        initial: float | None = values[t0_idx]
-    else:
-        initial = prepared
-
-    data_type = DataTypes.CONCENTRATION if to_concentration else DataTypes.PEAK_AREA
-    if to_concentration and species.calibration is not None:
-        print(f"we are here: {species.calibration.conc_unit}")
-        unit_str = species.calibration.conc_unit
-    else:
-        unit_str = ic.conc_unit if ic is not None and ic.conc_unit is not None else "AU"
-
-    print(f"type of unit_str: {type(unit_str)}")
-    return MeasurementData(
-        species_id=species.id,
-        initial=initial,
-        prepared=prepared,
-        data_unit=unit_str,
-        data_type=data_type,
-        time_unit=time_unit,
-        data=values,
-        time=times,
-    )
-
-
-def _enzml_resolve_area(peak: Any, draw_idx: int | None) -> float | None:
-    """Extract a scalar area value from a ``Peak.area`` ``Estimate``.
-
-    With *draw_idx* given and posterior samples available, returns the
-    sample at position ``draw_idx % len(samples)``.  Otherwise returns
-    the median (preferred) or mean point estimate.
-    """
-    if peak is None:
-        return None
-    if draw_idx is not None and peak.area.samples:
-        return float(peak.area.samples[draw_idx % len(peak.area.samples)])
-    if peak.area.median is not None:
-        return float(peak.area.median)
-    return float(peak.area.mean)
 
 
 def _parse_reaction_time(stem: str) -> float:
@@ -306,33 +160,21 @@ class Handler(BaseModel):
     Holds a collection of :class:`~chromhandler.model.Sample` objects, each
     containing one or more :class:`~chromhandler.model.Chromatogram` instances.
     Molecules and proteins are registered separately for peak annotation and
-    downstream quantification.
-
-    Example::
-
-        handler = Handler.read_asm(
-            path="/data/sahh-kinetics/asm",
-            id="sahh-exp-01",
-            name="SAHH kinetics HPLC",
-        )
-        handler.define_molecule(
-            id="s0",
-            pubchem_cid=439176,
-            retention_time=4.2,
-            auto_assign=True,
-        )
+    downstream quantification, keyed by species id in
+    ``PreserveKeysDottedDict`` from ``dotted_dict`` (attribute access works when
+    the id is a valid Python identifier). :attr:`peak_windows` uses the same type,
+    keyed by molecule id.
     """
 
-    id: str = Field(description="Unique identifier of the Handler.")
-    name: str = Field(default="", description="Human-readable name.")
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    molecules: list[Molecule] = Field(
-        default_factory=list,
-        description="Molecules registered for peak annotation / quantification.",
+    molecules: MoleculeRegistry = Field(
+        default_factory=PreserveKeysDottedDict,
+        description="Molecules keyed by :attr:`~chromhandler.molecule.Molecule.id`.",
     )
-    proteins: list[Protein] = Field(
-        default_factory=list,
-        description="Proteins present in the reaction.",
+    proteins: ProteinRegistry = Field(
+        default_factory=PreserveKeysDottedDict,
+        description="Proteins keyed by :attr:`~chromhandler.protein.Protein.id`.",
     )
     samples: list[Sample] = Field(
         default_factory=list,
@@ -341,6 +183,10 @@ class Handler(BaseModel):
     internal_standard: Molecule | None = Field(
         default=None,
         description="Internal standard molecule used for concentration normalisation.",
+    )
+    peak_windows: PeakWindowRegistry = Field(
+        default_factory=PreserveKeysDottedDict,
+        description="Retention-time peak windows keyed by molecule id.",
     )
     # ------------------------------------------------------------------
     # Core read method
@@ -394,8 +240,6 @@ class Handler(BaseModel):
     def read_asm(
         cls,
         path: Path | str,
-        id: str,
-        name: str = "",
     ) -> Handler:
         """Read a directory (or directory-of-directories) of ASM JSON files.
 
@@ -421,8 +265,6 @@ class Handler(BaseModel):
 
         Args:
             path: Root directory containing ASM JSON files or sub-directories.
-            id: Handler identifier.
-            name: Optional human-readable name.
 
         Returns:
             A fully populated :class:`Handler`.
@@ -433,16 +275,12 @@ class Handler(BaseModel):
         if not root.is_dir():
             raise NotADirectoryError(f"'{root}' is not a directory.")
 
-        handler = cls(id=id, name=name)
+        handler = cls()
         reader = ASMReader()
 
-        subdirs = sorted(
-            p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
-        )
+        subdirs = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
         json_files = sorted(
-            p
-            for p in root.iterdir()
-            if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
+            p for p in root.iterdir() if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
         )
 
         if subdirs:
@@ -452,29 +290,21 @@ class Handler(BaseModel):
                 for file in sorted(
                     p
                     for p in sample_dir.iterdir()
-                    if p.is_file()
-                    and p.suffix == ".json"
-                    and not p.name.startswith(".")
+                    if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
                 ):
                     reaction_time = _parse_reaction_time(file.stem)
-                    handler.read_chromatogram(
-                        sample_id, file.stem, file, reaction_time, reader
-                    )
+                    handler.read_chromatogram(sample_id, file.stem, file, reaction_time, reader)
         elif json_files:
             # Flat layout: all files belong to one sample named after the directory.
             sample_id = root.name
             for file in json_files:
                 reaction_time = _parse_reaction_time(file.stem)
-                handler.read_chromatogram(
-                    sample_id, file.stem, file, reaction_time, reader
-                )
+                handler.read_chromatogram(sample_id, file.stem, file, reaction_time, reader)
         else:
             raise FileNotFoundError(f"No ASM JSON files found under '{root}'.")
 
         for sample in handler.samples:
-            sample.chromatograms.sort(
-                key=lambda c: (c.reaction_time is None, c.reaction_time or 0)
-            )
+            sample.chromatograms.sort(key=lambda c: (c.reaction_time is None, c.reaction_time or 0))
 
         return handler
 
@@ -488,9 +318,9 @@ class Handler(BaseModel):
         molecule_id: str,
         init_conc: float,
         conc_unit: str,
-    ) -> InitialCondition:
+    ) -> None:
         """Register an initial condition for a molecule."""
-        sample = self._get_or_create_sample(sample_id)
+        sample = self._get_sample(sample_id)
         sample.initial_conditions.append(
             InitialCondition(
                 molecule_id=molecule_id,
@@ -509,6 +339,10 @@ class Handler(BaseModel):
 
         Columns = molecule_ids, rows = sample_ids. Values = floats (init_conc).
         sample_id: column, index level, or implicit index.
+
+        Only rows for samples that already exist in the handler are processed;
+        extra sample_ids in the file are ignored. Raises if an existing sample
+        has no non-null initial conditions in its row.
 
         Example::
 
@@ -544,13 +378,18 @@ class Handler(BaseModel):
         for col in df_mol.columns:
             df_mol[col] = pd.to_numeric(df_mol[col], errors="coerce")
 
+        existing_ids = {s.id for s in self.samples}
         for i, sample_id in enumerate(sample_ids):
+            if sample_id not in existing_ids:
+                continue
+            added_any = False
             for mol_id in df_mol.columns:
                 val = df_mol.iloc[i, df_mol.columns.get_loc(mol_id)]
                 if pd.notna(val):
-                    self.add_initial_condition(
-                        sample_id, str(mol_id), float(val), conc_unit
-                    )
+                    self.add_initial_condition(sample_id, str(mol_id), float(val), conc_unit)
+                    added_any = True
+            if not added_any:
+                raise ValueError(f"Sample '{sample_id}' has no initial conditions in the file.")
 
     # ------------------------------------------------------------------
     # Posterior area collection
@@ -651,7 +490,7 @@ class Handler(BaseModel):
         for peak in peaks:
             chrom = chrom_index.get(peak.chromatogram_id)
             if chrom is None:
-                logger.warning(
+                print(
                     f"write_fitted_peaks: chromatogram {peak.chromatogram_id} not found — skipping.",
                 )
                 continue
@@ -671,7 +510,8 @@ class Handler(BaseModel):
         *,
         fit_intercept: bool = False,
         method: str = "external",
-    ) -> dict[str, LinearCalibration]:
+        verbose: bool = True,
+    ) -> None:
         """Fit linear calibration curves for registered molecules.
 
         Uses samples with ``reaction_time == 0`` as calibration standards.
@@ -682,7 +522,8 @@ class Handler(BaseModel):
         ``Peak.area.mean``.
 
         The fitted :class:`~chromhandler.molecule.LinearCalibration` is stored on
-        ``Molecule.calibration`` and returned for immediate inspection.
+        ``Molecule.calibration`` as a side effect.  Retrieve it afterwards via
+        :meth:`get_molecule`.
 
         Args:
             molecule_ids: Which molecules to calibrate.  Default: every molecule
@@ -691,10 +532,8 @@ class Handler(BaseModel):
                 (default ``False`` — forces the curve through the origin).
             method: Calibration method.  Only ``"external"`` is implemented;
                 ``"internal"`` raises :exc:`NotImplementedError`.
-
-        Returns:
-            Mapping of ``molecule_id`` → fitted
-            :class:`~chromhandler.molecule.LinearCalibration`.
+            verbose: Print a rich calibration-summary table to stdout
+                (default ``True``).  Pass ``False`` to suppress all output.
 
         Raises:
             NotImplementedError: When *method* is ``"internal"``.
@@ -703,34 +542,33 @@ class Handler(BaseModel):
         Example::
 
             handler.write_fitted_peaks(fitter)
-            cals = handler.calibrate_molecules(molecule_ids=["Ino", "Hyp"])
+            handler.calibrate_molecules(molecule_ids=["Ino", "Hyp"])
 
             mol = handler.get_molecule("Ino")
             est = mol.calibration.area_to_conc(12_500.0)
             print(est.mean, est.std)
         """
         if method == "internal":
-            raise NotImplementedError(
-                "Internal standard calibration is not yet implemented."
-            )
+            raise NotImplementedError("Internal standard calibration is not yet implemented.")
         if method != "external":
             raise ValueError(f"Unknown calibration method: {method!r}. Use 'external'.")
 
         targets = (
             [self.get_molecule(mid) for mid in molecule_ids]
             if molecule_ids is not None
-            else list(self.molecules)
+            else list(self.molecules.values())
         )
 
-        results: dict[str, LinearCalibration] = {}
+        summary: list[tuple[Molecule, LinearCalibration | None]] = []
         for molecule in targets:
             cal = self._external_calibration(molecule, fit_intercept=fit_intercept)
             if cal is not None:
                 molecule.calibration = cal
-                self._update_molecule(molecule)
-                results[molecule.id] = cal
+                self.molecules[molecule.id] = molecule
+            summary.append((molecule, cal))
 
-        return results
+        if verbose:
+            pretty.display_calibration_summary(summary)
 
     def _external_calibration(
         self,
@@ -751,19 +589,12 @@ class Handler(BaseModel):
 
         for sample in self.samples:
             # Only calibration standards (at least one chromatogram at t=0)
-            if not any(
-                c.reaction_time is not None and c.reaction_time == 0.0
-                for c in sample.chromatograms
-            ):
+            if not any(c.reaction_time is not None and c.reaction_time == 0.0 for c in sample.chromatograms):
                 continue
 
             # Known concentration for this molecule
             ic = next(
-                (
-                    ic
-                    for ic in sample.initial_conditions
-                    if ic.molecule_id == molecule.id
-                ),
+                (ic for ic in sample.initial_conditions if ic.molecule_id == molecule.id),
                 None,
             )
             if ic is None:
@@ -801,10 +632,6 @@ class Handler(BaseModel):
             chrom_ids.append(str(chrom.id))
 
         if len(known_concs) < 1:
-            logger.warning(
-                f"calibrate_molecules: molecule {molecule.id} has only {len(known_concs)} calibration point(s) "
-                "(need ≥ 1) — skipping.",
-            )
             return None
 
         conc_arr = np.asarray(known_concs, dtype=float)
@@ -844,7 +671,7 @@ class Handler(BaseModel):
             min_conc=float(np.min(conc_arr)),
             slope_samples=slope_samples,
             intercept_samples=intercept_samples,
-            conc_unit=ic.conc_unit.id,
+            conc_unit=ic.conc_unit if isinstance(ic.conc_unit, str) else ic.conc_unit.id,
             chromatogram_ids=chrom_ids,
             concentrations=known_concs,
             areas_mean=areas_mean,
@@ -856,6 +683,7 @@ class Handler(BaseModel):
 
     def to_enzymeml(
         self,
+        name: str,
         *,
         sample_ids: list[str] | None = None,
         temperature: float,
@@ -864,7 +692,6 @@ class Handler(BaseModel):
         to_concentration: bool = False,
         n_samples: int | None = None,
         extrapolate: bool = False,
-        name: str | None = None,
     ) -> Any:
         """Export handler data as an :class:`EnzymeMLDocument`.
 
@@ -875,9 +702,10 @@ class Handler(BaseModel):
         sorted by ``reaction_time``.
 
         Args:
+            name: Document name.
             sample_ids: Samples to include.  ``None`` includes all.
             temperature: Reaction temperature value.
-            temperature_unit: Temperature unit string (e.g. ``"celsius"``).
+            temperature_unit: Temperature unit string (e.g. ``"Celsius"`` for pyenzyme/astropy).
             ph: Reaction pH.
             to_concentration: Convert peak areas → concentrations via each
                 molecule's :attr:`~chromhandler.molecule.Molecule.calibration`.
@@ -893,7 +721,7 @@ class Handler(BaseModel):
             extrapolate: Allow extrapolation beyond the calibration range
                 (passed to :meth:`~chromhandler.molecule.LinearCalibration.area_to_conc`).
                 Default ``False``.
-            name: Document name.  Defaults to ``self.name`` or ``self.id``.
+
 
         Returns:
             A :class:`pyenzyme.EnzymeMLDocument` ready for
@@ -905,113 +733,81 @@ class Handler(BaseModel):
                 *sample_id* is not found.
             ImportError: If ``pyenzyme`` is not installed.
         """
-        from pyenzyme import EnzymeMLDocument
-
-        targets = _enzml_filter_samples(self.samples, sample_ids)
-        active_mols = [m for m in self.molecules if not m.internal_standard]
-
-        if to_concentration:
-            _enzml_assert_calibrations(active_mols)
-
-        doc = EnzymeMLDocument(name=name or self.name or self.id)
-        _enzml_add_species(doc, active_mols, self.proteins)
-
-        draw_indices: list[int | None] = (
-            list(range(n_samples)) if n_samples is not None else [None]
+        active_mols = [m for m in self.molecules.values() if not m.internal_standard]
+        proteins = list(self.proteins.values())
+        return handler_to_enzymeml_document(
+            samples=self.samples,
+            molecules=active_mols,
+            proteins=proteins,
+            name=name,
+            sample_ids=sample_ids,
+            temperature=temperature,
+            temperature_unit=temperature_unit,
+            ph=ph,
+            to_concentration=to_concentration,
+            n_samples=n_samples,
+            extrapolate=extrapolate,
         )
-        for sample in targets:
-            for draw_idx in draw_indices:
-                meas = _enzml_build_measurement(
-                    sample=sample,
-                    molecules=active_mols,
-                    proteins=self.proteins,
-                    temperature=temperature,
-                    temperature_unit=temperature_unit,
-                    ph=ph,
-                    to_concentration=to_concentration,
-                    extrapolate=extrapolate,
-                    draw_idx=draw_idx,
-                )
-                doc.measurements.append(meas)
-
-        return doc
 
     # ------------------------------------------------------------------
     # Molecule / protein management
     # ------------------------------------------------------------------
 
-    def define_molecule(
+    def create_molecule(
         self,
         id: str,
-        pubchem_cid: int,
-        name: Optional[str] = None,
-        is_internal_standard: bool = False,
+        pubchem_cid: int | str,
+        name: str | None = None,
+        *,
+        constant: bool = False,
+        internal_standard: bool = False,
+        calibration: LinearCalibration | None = None,
     ) -> Molecule:
-        """Define and register a molecule.
+        """Build a :class:`~chromhandler.molecule.Molecule`, register it, and return it.
+
+        Same *id* replaces an existing molecule. If *name* is omitted, the title is
+        fetched from PubChem using the CID.
 
         Args:
-            id: Internal identifier (e.g. ``"s0"``).
-            pubchem_cid: PubChem compound ID.
-            retention_time: Expected retention time in minutes, or ``None``.
-            retention_tolerance: Tolerance in minutes for peak matching.
-            init_conc: Initial concentration (optional).
-            conc_unit: Concentration unit string (optional).
-            name: Display name; fetched from PubChem if omitted.
-            is_internal_standard: Mark as internal standard.
+            id: Internal identifier (e.g. ``"Ino"``).
+            pubchem_cid: PubChem compound ID (``int`` or digits-only ``str``).
+            name: Display name; PubChem title when ``None``.
+            constant: Concentration treated as constant over the experiment.
+            internal_standard: Mark as internal standard.
+            calibration: Optional pre-fitted linear calibration.
 
         Returns:
-            The created/updated :class:`~chromhandler.molecule.Molecule`.
+            The registered molecule instance.
         """
+        cid_int = int(pubchem_cid)
         if name is None:
-            name = pubchem_request_molecule_name(pubchem_cid)
+            name = pubchem_request_molecule_name(str(cid_int))
 
         molecule = Molecule(
             id=id,
-            pubchem_cid=pubchem_cid,
+            pubchem_cid=cid_int,
             name=name,
-            internal_standard=is_internal_standard,
+            constant=constant,
+            internal_standard=internal_standard,
+            calibration=calibration,
         )
 
-        self._update_molecule(molecule)
+        self.molecules[molecule.id] = molecule
 
         return molecule
 
-    def add_molecule(
+    def register_molecule(
         self,
         molecule: Molecule,
-        init_conc: Optional[float] = None,
-        conc_unit: Optional[str] = None,
-        retention_tolerance: Optional[float] = None,
-        min_signal: float = 0.0,
-        auto_assign: bool = False,
     ) -> None:
-        """Add (or update) a molecule.
+        """Register a pre-built molecule (deep-copied).
 
-        Args:
-            molecule: The molecule to add.
-            init_conc: Override initial concentration.
-            conc_unit: Override concentration unit.
-            retention_tolerance: Override retention time tolerance.
-            min_signal: Minimum peak area threshold.
-            auto_assign: Immediately run peak assignment after adding.
+        Use after :meth:`~chromhandler.molecule.Molecule.read_json` or when reusing a
+        ``Molecule`` across handlers. Matching :attr:`~chromhandler.molecule.Molecule.id`
+        replaces the previous entry.
         """
-        new_mol = copy.deepcopy(molecule)
-
-        if init_conc is not None:
-            new_mol.init_conc = init_conc
-        if conc_unit is not None:
-            new_mol.conc_unit = conc_unit
-        if retention_tolerance is not None:
-            new_mol.retention_tolerance = retention_tolerance
-
-        new_mol.min_signal = min_signal
-
-        self._update_molecule(new_mol)
-
-        if auto_assign and new_mol.has_retention_time:
-            self._register_peaks(
-                new_mol, new_mol.retention_tolerance, new_mol.wavelength
-            )
+        registered = copy.deepcopy(molecule)
+        self.molecules[registered.id] = registered
 
     def get_molecule(self, molecule_id: str) -> Molecule:
         """Return the molecule with `molecule_id`.
@@ -1019,10 +815,16 @@ class Handler(BaseModel):
         Raises:
             ValueError: If no molecule with that ID exists.
         """
-        for molecule in self.molecules:
-            if molecule.id == molecule_id:
-                return molecule
-        raise ValueError(f"Molecule with ID '{molecule_id}' not found.")
+        try:
+            return self.molecules[molecule_id]
+        except KeyError:
+            registered = sorted(self.molecules.keys())
+            listed = ", ".join(repr(x) for x in registered) if registered else "(none)"
+            raise ValueError(
+                f"Unknown molecule id {molecule_id!r}. Register the molecule first "
+                "with create_molecule() or register_molecule(). "
+                f"Currently registered ids: {listed}."
+            ) from None
 
     def define_protein(
         self,
@@ -1042,7 +844,7 @@ class Handler(BaseModel):
             organism_tax_id=organism_tax_id,
             constant=constant,
         )
-        self._update_protein(protein)
+        self.proteins[protein.id] = protein
 
     def add_protein(
         self,
@@ -1051,160 +853,314 @@ class Handler(BaseModel):
         """Add (or update) a protein."""
         nu_prot = copy.deepcopy(protein)
 
-        self._update_protein(nu_prot)
+        self.proteins[nu_prot.id] = nu_prot
+
+    def add_peak_window(
+        self,
+        molecule_id: str,
+        rt_min: float,
+        rt_max: float,
+        *,
+        wavelength: float | None = None,
+    ) -> PeakWindow:
+        """Add or replace the peak window for *molecule_id* on this handler."""
+        self.get_molecule(molecule_id)
+        window = PeakWindow(
+            molecule_id=molecule_id,
+            rt_min=rt_min,
+            rt_max=rt_max,
+            wavelength=wavelength,
+        )
+        self.peak_windows[molecule_id] = window
+        return window
 
     # ------------------------------------------------------------------
     # Peak assignment
     # ------------------------------------------------------------------
 
-    def get_peaks(
-        self, molecule_id: str, *, wavelength: float | None = None
-    ) -> list[Peak]:
+    def get_peaks(self, molecule_id: str, *, wavelength: float | None = None) -> list[Peak]:
         """Collect all peaks assigned to *molecule_id* across all samples.
 
         Args:
             molecule_id: ID of the molecule.
-            wavelength: Wavelength of the signal in nm.
+            wavelength: If set, only chromatograms at this wavelength (nm) are
+                searched; otherwise every chromatogram in each sample is included.
 
         Returns:
-            List of peaks assigned to the molecule.
-
-        Raises:
-            ValueError: If no matching peaks are found.
+            Peaks with matching ``molecule_id`` (possibly empty).
         """
         peaks: list[Peak] = []
         for sample in self.samples:
-            if len(sample.chromatograms) > 1 and wavelength is None:
-                raise ValueError(
-                    f"Multiple chromatograms found for sample '{sample.id}', but no wavelength is specified."
-                )
-
             for chrom in sample.chromatograms:
                 if wavelength is not None and chrom.wavelength != wavelength:
                     continue
 
-                peaks.extend(
-                    peak for peak in chrom.peaks if peak.molecule_id == molecule_id
-                )
+                peaks.extend(peak for peak in chrom.peaks if peak.molecule_id == molecule_id)
 
         return peaks
 
-    def _register_peaks(
+    def unassign_peaks(
         self,
-        molecule: Molecule,
-        ret_tolerance: float,
-        wavelength: float | None,
-        silent: bool = False,
-    ) -> dict[str, Any]:
-        """Assign peaks to *molecule* across all chromatograms.
+        *,
+        chromatogram_ids: Sequence[str] | None = None,
+        sample_ids: Sequence[str] | None = None,
+        molecule_ids: Sequence[str] | None = None,
+        reaction_times: Sequence[float] | None = None,
+        time_tolerance: float = 1e-6,
+    ) -> list[dict[str, Any]]:
+        """Clear ``peak.molecule_id`` for peaks matching the provided filters.
 
-        For each sample the chromatogram is resolved (by wavelength if given),
-        then all peaks within ±*ret_tolerance* minutes of
-        ``molecule.retention_time`` are candidates. The single closest peak
-        is assigned; if multiple candidates exist, a warning is issued.
+        This is the manual counterpart to :meth:`assign_molecules`. It is
+        useful after reviewing :meth:`plot` and deciding that one chromatogram
+        or one molecule/time-point should be excluded from downstream
+        quantification.
 
-        Returns:
-            Assignment summary dict with keys ``molecule``,
-            ``assigned_peak_count``, ``measurements_with_multiple_peaks``,
-            ``measurements_with_no_peaks``, ``retention_tolerance``.
-        """
-        if not molecule.has_retention_time:
-            raise ValueError(f"Molecule '{molecule.id}' has no retention time.")
+        Examples::
 
-        assigned_peak_count = 0
-        samples_with_multiple_peaks: list[dict[str, Any]] = []
-        samples_with_no_peaks: list[str] = []
+            # Remove every assigned peak from a bad chromatogram
+            handler.unassign_peaks(chromatogram_ids=["CW10_120min"])
 
-        for sample in self.samples:
-            chrom = _resolve_chromatogram(sample.chromatograms, wavelength)
-
-            candidate_peaks = [
-                peak
-                for peak in chrom.peaks
-                if (
-                    molecule.retention_time is not None
-                    and abs(peak.location.mean - molecule.retention_time)
-                    <= ret_tolerance
-                    and peak.area.mean >= molecule.min_signal
-                )
-            ]
-
-            if not candidate_peaks:
-                samples_with_no_peaks.append(sample.id)
-
-            elif len(candidate_peaks) == 1:
-                candidate_peaks[0].molecule_id = molecule.id
-                assigned_peak_count += 1
-                logger.debug(
-                    f"'{molecule.id}' assigned to peak at "
-                    f"{candidate_peaks[0].location.mean} in sample '{sample.id}'."
-                )
-
-            else:
-                closest = min(
-                    candidate_peaks,
-                    key=lambda p: abs(p.location.mean - molecule.retention_time)  # type: ignore[operator]
-                    if molecule.retention_time
-                    else float("inf"),
-                )
-                closest.molecule_id = molecule.id
-                assigned_peak_count += 1
-                samples_with_multiple_peaks.append(
-                    {
-                        "sample_id": sample.id,
-                        "num_peaks": len(candidate_peaks),
-                        "assigned_rt": closest.location.mean,
-                        "all_rts": [p.location.mean for p in candidate_peaks],
-                    }
-                )
-                logger.debug(
-                    f"'{molecule.id}' assigned to closest peak at "
-                    f"{closest.location.mean} in sample '{sample.id}'."
-                )
-
-        result: dict[str, Any] = {
-            "molecule": molecule,
-            "assigned_peak_count": assigned_peak_count,
-            "measurements_with_multiple_peaks": samples_with_multiple_peaks,
-            "measurements_with_no_peaks": samples_with_no_peaks,
-            "retention_tolerance": ret_tolerance,
-        }
-
-        if not silent:
-            self._print_peak_assignment_summary(
-                molecule,
-                assigned_peak_count,
-                samples_with_multiple_peaks,
-                samples_with_no_peaks,
-                ret_tolerance,
+            # Remove only the Hyp assignment at 120 min in sample CW10
+            handler.unassign_peaks(
+                sample_ids=["CW10"],
+                molecule_ids=["Hyp"],
+                reaction_times=[120.0],
             )
 
-        return result
-
-    def assign_all_peaks(self, silent_individual: bool = True) -> None:
-        """Assign peaks for all molecules that have a retention time.
-
         Args:
-            silent_individual: Suppress per-molecule output; show consolidated
-                report only.
+            chromatogram_ids: Restrict to specific chromatogram IDs.
+            sample_ids: Restrict to specific sample IDs.
+            molecule_ids: Restrict to specific assigned molecule IDs.
+            reaction_times: Restrict to chromatograms whose
+                ``reaction_time`` matches any provided value within
+                ``time_tolerance``.
+            time_tolerance: Absolute tolerance for matching
+                ``reaction_times``.
+
+        Returns:
+            List of records describing the assignments that were removed.
         """
-        if not self.molecules:
-            print("No molecules defined for peak assignment.")
-            return
+        if (
+            chromatogram_ids is None
+            and sample_ids is None
+            and molecule_ids is None
+            and reaction_times is None
+        ):
+            raise ValueError(
+                "unassign_peaks requires at least one filter "
+                "(chromatogram_ids, sample_ids, molecule_ids, or reaction_times)."
+            )
+        if time_tolerance < 0:
+            raise ValueError("time_tolerance must be non-negative.")
 
-        assignment_results = []
-        for molecule in self.molecules:
-            if molecule.has_retention_time:
-                result = self._register_peaks(
-                    molecule,
-                    molecule.retention_tolerance,
-                    molecule.wavelength,
-                    silent=silent_individual,
-                )
-                assignment_results.append(result)
+        chromatogram_id_set: set[str] | None = None
+        if chromatogram_ids is not None:
+            requested_chrom_ids = list(dict.fromkeys(chromatogram_ids))
+            available_chrom_ids = {chrom.id for sample in self.samples for chrom in sample.chromatograms}
+            missing = [chrom_id for chrom_id in requested_chrom_ids if chrom_id not in available_chrom_ids]
+            if missing:
+                raise ValueError(f"Unknown chromatogram IDs: {missing}")
+            chromatogram_id_set = set(requested_chrom_ids)
 
-        if assignment_results:
-            self._display_consolidated_assignment_report(assignment_results)
+        sample_id_set: set[str] | None = None
+        if sample_ids is not None:
+            requested_sample_ids = list(dict.fromkeys(sample_ids))
+            available_sample_ids = {sample.id for sample in self.samples}
+            missing = [
+                sample_id for sample_id in requested_sample_ids if sample_id not in available_sample_ids
+            ]
+            if missing:
+                raise ValueError(f"Unknown sample IDs: {missing}")
+            sample_id_set = set(requested_sample_ids)
+
+        molecule_id_set: set[str] | None = None
+        if molecule_ids is not None:
+            requested_molecule_ids = list(dict.fromkeys(molecule_ids))
+            available_molecule_ids = set(self.molecules.keys())
+            available_molecule_ids.update(
+                peak.molecule_id
+                for sample in self.samples
+                for chrom in sample.chromatograms
+                for peak in chrom.peaks
+                if peak.molecule_id is not None
+            )
+            missing = [
+                molecule_id
+                for molecule_id in requested_molecule_ids
+                if molecule_id not in available_molecule_ids
+            ]
+            if missing:
+                raise ValueError(f"Unknown molecule IDs: {missing}")
+            molecule_id_set = set(requested_molecule_ids)
+
+        reaction_time_values: list[float] | None = None
+        if reaction_times is not None:
+            reaction_time_values = [float(reaction_time) for reaction_time in dict.fromkeys(reaction_times)]
+
+        removed: list[dict[str, Any]] = []
+        for sample in self.samples:
+            if sample_id_set is not None and sample.id not in sample_id_set:
+                continue
+
+            for chrom in sample.chromatograms:
+                if chromatogram_id_set is not None and chrom.id not in chromatogram_id_set:
+                    continue
+
+                if reaction_time_values is not None:
+                    if chrom.reaction_time is None:
+                        continue
+                    chrom_reaction_time = float(chrom.reaction_time)
+                    if not any(
+                        abs(chrom_reaction_time - reaction_time) <= time_tolerance
+                        for reaction_time in reaction_time_values
+                    ):
+                        continue
+
+                for peak_idx, peak in enumerate(chrom.peaks):
+                    if peak.molecule_id is None:
+                        continue
+                    if molecule_id_set is not None and peak.molecule_id not in molecule_id_set:
+                        continue
+
+                    removed.append(
+                        {
+                            "sample_id": sample.id,
+                            "chromatogram_id": chrom.id,
+                            "reaction_time": chrom.reaction_time,
+                            "peak_index": peak_idx,
+                            "peak_rt": float(peak.location.mean),
+                            "previous_molecule_id": peak.molecule_id,
+                        }
+                    )
+                    peak.molecule_id = None
+
+        return removed
+
+    def assign_molecules(
+        self,
+        *,
+        min_amplitude: float | None = None,
+        on_multiple: Literal["raise", "skip"] = "raise",
+        silent: bool = False,
+    ) -> None:
+        """Assign molecules to existing peaks using the handler's peak windows.
+
+        For each configured window, **every** chromatogram in each sample is
+        considered (typical time-course: one sample, many traces at different
+        reaction times). If :attr:`~chromhandler.annotations.PeakWindow.wavelength`
+        is set, only chromatograms with that wavelength are used.
+
+        A molecule is assigned when exactly one peak per chromatogram falls
+        inside its window after optional amplitude filtering. If multiple peaks
+        match within the same chromatogram, the behavior depends on
+        ``on_multiple``: ``"raise"`` aborts immediately and ``"skip"``
+        leaves that chromatogram unassigned for the current molecule.
+        """
+        if min_amplitude is not None and min_amplitude < 0:
+            raise ValueError("min_amplitude must be non-negative.")
+        if on_multiple not in {"raise", "skip"}:
+            raise ValueError("on_multiple must be either 'raise' or 'skip'.")
+        self._validate_peak_windows()
+
+        if not self.peak_windows:
+            return []
+
+        targeted_ids = set(self.peak_windows)
+        peak_targets: dict[tuple[str, int], str] = {}
+        pending_assignments: list[tuple[str, int, str]] = []
+        results: list[dict[str, Any]] = []
+        chrom_index: dict[str, Chromatogram] = {
+            chrom.id: chrom
+            for sample in self.samples
+            for chrom in sample.chromatograms
+            if chrom.id is not None
+        }
+
+        for molecule_id, window in self.peak_windows.items():
+            molecule = self.get_molecule(molecule_id)
+            assigned_peak_count = 0
+            chromatograms_with_no_peaks: list[str] = []
+            chromatograms_with_multiple_peaks: list[str] = []
+            chromatograms_considered: list[str] = []
+
+            for sample in self.samples:
+                for chrom in self._chromatograms_for_peak_window(sample, window):
+                    chromatograms_considered.append(chrom.id)
+
+                    candidate_indices = self._peak_indices_in_window(
+                        chrom,
+                        window,
+                        min_amplitude=min_amplitude,
+                    )
+
+                    if not candidate_indices:
+                        chromatograms_with_no_peaks.append(chrom.id)
+                        continue
+
+                    if len(candidate_indices) > 1:
+                        candidate_rts = [float(chrom.peaks[idx].location.mean) for idx in candidate_indices]
+                        if on_multiple == "raise":
+                            raise ValueError(
+                                f"assign_molecules: molecule '{molecule_id}' matched multiple peaks "
+                                f"in chromatogram '{chrom.id}' for window "
+                                f"[{window.rt_min:.3f}, {window.rt_max:.3f}] "
+                                f"(candidate RTs: {candidate_rts}). "
+                                "Increase min_amplitude or split the handler first."
+                            )
+                        chromatograms_with_multiple_peaks.append(chrom.id)
+                        continue
+
+                    peak_idx = candidate_indices[0]
+                    peak = chrom.peaks[peak_idx]
+
+                    if (
+                        peak.molecule_id is not None
+                        and peak.molecule_id not in targeted_ids
+                        and peak.molecule_id != molecule_id
+                    ):
+                        raise ValueError(
+                            f"assign_molecules: peak at {peak.location.mean:.3f} min in "
+                            f"chromatogram '{chrom.id}' is already assigned to molecule "
+                            f"'{peak.molecule_id}', cannot also assign '{molecule_id}'."
+                        )
+
+                    peak_key = (chrom.id, peak_idx)
+                    existing_target = peak_targets.get(peak_key)
+                    if existing_target is not None and existing_target != molecule_id:
+                        raise ValueError(
+                            f"assign_molecules: chromatogram '{chrom.id}' peak at "
+                            f"{peak.location.mean:.3f} min matched both '{existing_target}' "
+                            f"and '{molecule_id}'. Split the handler or change peak windows."
+                        )
+
+                    peak_targets[peak_key] = molecule_id
+                    pending_assignments.append((chrom.id, peak_idx, molecule_id))
+                    assigned_peak_count += 1
+
+            results.append(
+                {
+                    "molecule": molecule,
+                    "window": window,
+                    "assigned_peak_count": assigned_peak_count,
+                    "chromatograms_with_no_peaks": chromatograms_with_no_peaks,
+                    "chromatograms_with_multiple_peaks": chromatograms_with_multiple_peaks,
+                    "chromatograms_considered": chromatograms_considered,
+                    "min_amplitude": min_amplitude,
+                    "on_multiple": on_multiple,
+                }
+            )
+
+        for sample in self.samples:
+            for chrom in sample.chromatograms:
+                for peak in chrom.peaks:
+                    if peak.molecule_id in targeted_ids:
+                        peak.molecule_id = None
+
+        for chrom_id, peak_idx, molecule_id in pending_assignments:
+            chrom_index[chrom_id].peaks[peak_idx].molecule_id = molecule_id
+
+        if not silent:
+            pretty.display_molecule_assignment_report(self, results)
 
     # ------------------------------------------------------------------
     # Sample / chromatogram utilities
@@ -1240,6 +1196,26 @@ class Handler(BaseModel):
             for chrom in sample.chromatograms
             if chrom.wavelength == wavelength
         ]
+
+    def subset(self, chromatogram_ids: Sequence[str]) -> Handler:
+        """Return a deep-copied handler containing only *chromatogram_ids*."""
+        requested_ids = list(dict.fromkeys(chromatogram_ids))
+        available_ids = {chrom.id for sample in self.samples for chrom in sample.chromatograms}
+        missing = [chrom_id for chrom_id in requested_ids if chrom_id not in available_ids]
+        if missing:
+            raise ValueError(f"subset: chromatogram_ids not found in handler: {missing}")
+
+        selected = set(requested_ids)
+        child = copy.deepcopy(self)
+        child.samples = []
+        for sample in self.samples:
+            chromatograms = [copy.deepcopy(chrom) for chrom in sample.chromatograms if chrom.id in selected]
+            if not chromatograms:
+                continue
+            sample_copy = copy.deepcopy(sample)
+            sample_copy.chromatograms = chromatograms
+            child.samples.append(sample_copy)
+        return child
 
     def cut_chromatograms(
         self,
@@ -1281,9 +1257,7 @@ class Handler(BaseModel):
             out.append((lo, hi))
         return out
 
-    def _cut_chromatogram(
-        self, chrom: Chromatogram, ranges: list[tuple[float, float]]
-    ) -> None:
+    def _cut_chromatogram(self, chrom: Chromatogram, ranges: list[tuple[float, float]]) -> None:
         """Restrict chromatogram signal/time and peaks to ranges (in-place)."""
 
         def in_ranges(t: float) -> bool:
@@ -1292,8 +1266,8 @@ class Handler(BaseModel):
         # Filter signal/time
         if chrom.time and chrom.signal:
             keep = [in_ranges(t) for t in chrom.time]
-            chrom.signal = [s for s, k in zip(chrom.signal, keep) if k]
-            chrom.time = [t for t, k in zip(chrom.time, keep) if k]
+            chrom.signal = [s for s, k in zip(chrom.signal, keep, strict=False) if k]
+            chrom.time = [t for t, k in zip(chrom.time, keep, strict=False) if k]
 
         # Filter peaks
         chrom.peaks = [p for p in chrom.peaks if in_ranges(p.location.mean)]
@@ -1329,6 +1303,7 @@ class Handler(BaseModel):
         figsize: tuple[float, float] | None = None,
         show_balance: bool = False,
         colors: dict[str, str] | None = None,
+        show_chromatogram_ids: bool = False,
     ) -> tuple[object, np.ndarray]:
         """Plot peak areas over reaction time for one or more samples.
 
@@ -1346,6 +1321,10 @@ class Handler(BaseModel):
             colors: Optional dict mapping molecule ID to a hex color string
                 (e.g. ``{"SAHH": "#FF5733"}``).  Molecule IDs not present in
                 the dict fall back to the default ``tab10`` colormap.
+            show_chromatogram_ids: If ``True``, annotate each plotted point
+                with its chromatogram ID. This is handy when you want to
+                identify a point first and then remove it with
+                :meth:`unassign_peaks`.
 
         Returns:
             ``(fig, axes)`` where *axes* is a 1-D numpy array of matplotlib axes.
@@ -1359,9 +1338,7 @@ class Handler(BaseModel):
             requested_set = set(requested_ids)
             selected_samples = [s for s in self.samples if s.id in requested_set]
             found_ids = {s.id for s in selected_samples}
-            missing = [
-                sample_id for sample_id in requested_ids if sample_id not in found_ids
-            ]
+            missing = [sample_id for sample_id in requested_ids if sample_id not in found_ids]
             if missing:
                 raise ValueError(f"Unknown sample IDs: {missing}")
 
@@ -1393,18 +1370,16 @@ class Handler(BaseModel):
             else:
                 molecule_colors[mol_id] = cmap(idx % 10)
 
-        for ax, sample in zip(axes, selected_samples):
+        for ax, sample in zip(axes, selected_samples, strict=False):
             time_unit = "min"
-            points_by_molecule: dict[str, tuple[list[float], list[float]]] = {}
+            points_by_molecule: dict[str, list[tuple[float, float, str]]] = {}
             balance_by_time: dict[float, float] = {}
 
             chromatograms = sorted(
                 sample.chromatograms,
                 key=lambda c: (
                     c.reaction_time is None,
-                    float(c.reaction_time)
-                    if c.reaction_time is not None
-                    else float("inf"),
+                    float(c.reaction_time) if c.reaction_time is not None else float("inf"),
                 ),
             )
 
@@ -1421,28 +1396,36 @@ class Handler(BaseModel):
                     if peak.molecule_id is None:
                         continue
                     area_value = (
-                        float(peak.area.median)
-                        if peak.area.median is not None
-                        else float(peak.area.mean)
+                        float(peak.area.median) if peak.area.median is not None else float(peak.area.mean)
                     )
                     mol_id = peak.molecule_id
-                    x_vals, y_vals = points_by_molecule.setdefault(mol_id, ([], []))
                     reaction_time = float(chrom.reaction_time)
-                    x_vals.append(reaction_time)
-                    y_vals.append(area_value)
-                    balance_by_time[reaction_time] = (
-                        balance_by_time.get(reaction_time, 0.0) + area_value
-                    )
+                    points_by_molecule.setdefault(mol_id, []).append((reaction_time, area_value, chrom.id))
+                    balance_by_time[reaction_time] = balance_by_time.get(reaction_time, 0.0) + area_value
 
-            for mol_id, (x_vals, y_vals) in points_by_molecule.items():
+            for mol_id, point_records in points_by_molecule.items():
+                x_vals = [point[0] for point in point_records]
+                y_vals = [point[1] for point in point_records]
+                point_color = molecule_colors.get(mol_id, "C0")
                 ax.scatter(
                     x_vals,
                     y_vals,
                     s=32,
                     alpha=0.9,
-                    color=molecule_colors.get(mol_id, "C0"),
+                    color=point_color,
                     label=mol_id,
                 )
+                if show_chromatogram_ids:
+                    for x_val, y_val, chrom_id in point_records:
+                        ax.annotate(
+                            str(chrom_id),
+                            (x_val, y_val),
+                            textcoords="offset points",
+                            xytext=(4.0, 4.0),
+                            fontsize=7,
+                            alpha=0.8,
+                            color=point_color,
+                        )
 
             if show_balance and balance_by_time:
                 balance_points = sorted(balance_by_time.items())
@@ -1475,7 +1458,7 @@ class Handler(BaseModel):
 
             handles, labels = ax.get_legend_handles_labels()
             if handles:
-                by_label = dict(zip(labels, handles))
+                by_label = dict(zip(labels, handles, strict=False))
                 ax.legend(
                     by_label.values(),
                     by_label.keys(),
@@ -1499,23 +1482,29 @@ class Handler(BaseModel):
         show_peaks: bool = True,
         rt_min: float | None = None,
         rt_max: float | None = None,
-        save_path: str | None = None,
         assigned_only: bool = False,
         overlay: bool = False,
+        share_y: bool = False,
         show_peak_annotations: bool = True,
-        peak_annotations: list[PeakAnnotation] | None = None,
+        peak_annotations: list[PeakAnnotation | PeakWindow] | None = None,
+        chromatogram_ids: list[str] = [],
         show_legend: bool = True,
-    ) -> None:
-        """Plot all chromatograms in a matplotlib grid.
+    ) -> tuple[object, object]:
+        """Plot all chromatograms; returns ``(fig, ax)`` or ``(fig, axes)``.
+
+        The figure is not saved automatically. Use ``fig.savefig(...)`` or
+        ``plt.show()`` as needed.
 
         Args:
             peak_annotations: Optional list of
-                :class:`~chromhandler.annotations.PeakAnnotation` objects to
-                overlay as shaded windows.  Typically obtained from a
-                :class:`~chromhandler.fitting.better_fitter.BetterFitter` via
-                ``fitter.get_subset("__default__").peaks``.
+                window-like objects to overlay as shaded regions. When omitted,
+                the handler's stored :attr:`peak_windows` are shown.
+            chromatogram_ids: Chromatogram IDs to display. An empty list means
+                all chromatograms. Unknown IDs raise ``ValueError``.
         """
-        visualize.visualize(
+        if peak_annotations is None:
+            peak_annotations = list(self.peak_windows.values())
+        return visualize.visualize(
             self,
             n_cols=n_cols,
             figsize=figsize,
@@ -1524,11 +1513,12 @@ class Handler(BaseModel):
             show_peaks=show_peaks,
             rt_min=rt_min,
             rt_max=rt_max,
-            save_path=save_path,
             assigned_only=assigned_only,
             overlay=overlay,
+            share_y=share_y,
             show_peak_annotations=show_peak_annotations,
             peak_annotations=peak_annotations,
+            chromatogram_ids=chromatogram_ids,
             show_legend=show_legend,
         )
 
@@ -1546,6 +1536,14 @@ class Handler(BaseModel):
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _get_sample(self, sample_id: str) -> Sample:
+        """Return sample by id. Raises ValueError if not found."""
+        for sample in self.samples:
+            if sample.id == sample_id:
+                return sample
+        available = [s.id for s in self.samples]
+        raise ValueError(f"Sample '{sample_id}' not found. Available samples: {available}")
+
     def _get_or_create_sample(self, sample_id: str) -> Sample:
         for sample in self.samples:
             if sample.id == sample_id:
@@ -1554,38 +1552,42 @@ class Handler(BaseModel):
         self.samples.append(new_sample)
         return new_sample
 
-    def _update_molecule(self, molecule: Molecule) -> None:
-        for idx, mol in enumerate(self.molecules):
-            if mol.id == molecule.id:
-                self.molecules[idx] = molecule
-                return
-        self.molecules.append(molecule)
+    def _validate_peak_windows(self) -> None:
+        molecule_ids = set(self.molecules.keys())
+        missing = sorted(set(self.peak_windows) - molecule_ids)
+        if missing:
+            raise ValueError(
+                f"Peak windows reference unknown molecule ids: {missing}. "
+                "Define the molecules on the handler before assigning peak windows."
+            )
 
-    def _update_protein(self, protein: Protein) -> None:
-        for idx, prot in enumerate(self.proteins):
-            if prot.id == protein.id:
-                self.proteins[idx] = protein
-                return
-        self.proteins.append(protein)
+    @staticmethod
+    def _chromatograms_for_peak_window(sample: Sample, window: PeakWindow) -> list[Chromatogram]:
+        """Chromatograms in *sample* to search for peaks for this *window*."""
+        if window.wavelength is not None:
+            matching = [c for c in sample.chromatograms if c.wavelength == window.wavelength]
+            if not matching:
+                raise ValueError(
+                    f"assign_molecules: no chromatogram with wavelength "
+                    f"{window.wavelength} nm in sample '{sample.id}' for window "
+                    f"'{window.molecule_id}'."
+                )
+            return matching
+        return list(sample.chromatograms)
 
-    def _display_consolidated_assignment_report(
-        self, assignment_results: list[dict[str, Any]]
-    ) -> None:
-        pretty.display_consolidated_assignment_report(self, assignment_results)
-
-    def _print_peak_assignment_summary(
-        self,
-        molecule: Molecule,
-        assigned_peak_count: int,
-        samples_with_multiple_peaks: list[dict[str, Any]],
-        samples_with_no_peaks: list[str],
-        ret_tolerance: float,
-    ) -> None:
-        pretty.print_peak_assignment_summary(
-            self,
-            molecule,
-            assigned_peak_count,
-            samples_with_multiple_peaks,
-            samples_with_no_peaks,
-            ret_tolerance,
-        )
+    @staticmethod
+    def _peak_indices_in_window(
+        chrom: Chromatogram,
+        window: PeakWindow,
+        *,
+        min_amplitude: float | None,
+    ) -> list[int]:
+        matches: list[int] = []
+        for idx, peak in enumerate(chrom.peaks):
+            rt = float(peak.location.mean)
+            if not (window.rt_min <= rt <= window.rt_max):
+                continue
+            if min_amplitude is not None and peak.amplitude is not None and peak.amplitude < min_amplitude:
+                continue
+            matches.append(idx)
+        return matches

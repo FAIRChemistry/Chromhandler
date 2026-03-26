@@ -63,7 +63,7 @@ def _handler_with_chromatograms(
     for sample_id, chrom_id in chrom_specs:
         sample = samples.setdefault(sample_id, Sample(id=sample_id))
         sample.chromatograms.append(Chromatogram(id=chrom_id, sample_id=sample_id, peaks=[]))
-    return Handler(id="handler", name="test", samples=list(samples.values()))
+    return Handler(samples=list(samples.values()))
 
 
 class TestSubsetPeakExport:

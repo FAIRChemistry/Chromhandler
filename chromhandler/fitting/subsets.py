@@ -14,10 +14,12 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from dataclasses import field
+from typing import TYPE_CHECKING
 
-from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+if TYPE_CHECKING:
+    from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 
-__all__ = ["Subset", "SubsetSpec", "AreaRecord"]
+__all__ = ["AreaRecord", "Subset", "SubsetSpec"]
 
 
 # ---------------------------------------------------------------------------

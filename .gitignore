@@ -171,8 +171,9 @@ test.py
 uv.lock
 .vscode/
 paper
-CLAUDE.md
 example.ipynb
 ex_simple.ipynb
-.claude/
+# Local Claude Code settings; keep project guidance tracked
+.claude/*
+!.claude/CLAUDE.md
 enzymeml.json

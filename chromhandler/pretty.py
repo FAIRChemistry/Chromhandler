@@ -10,7 +10,7 @@ from rich.table import Table
 
 if TYPE_CHECKING:
     from .handler import Handler
-    from .molecule import Molecule
+    from .molecule import LinearCalibration, Molecule
 
 
 def _safe_emoji(emoji: str, fallback: str) -> str:
@@ -24,18 +24,17 @@ def _safe_emoji(emoji: str, fallback: str) -> str:
         return fallback
 
 
+def _format_molecule_label(molecule: Molecule) -> str:
+    """Return a short display label: ``"<id> (<name>)"``."""
+    return f"{molecule.id} ({molecule.name})"
+
+
 def create_overview_panel(handler: Handler) -> Panel:
     """Create the Handler overview panel with basic information."""
-    overview_content = []
-    overview_content.append(f"[bold]ID:[/bold] {handler.id}")
-    overview_content.append(f"[bold]Name:[/bold] {handler.name}")
+    overview_content: list[str] = []
 
     # Add sample summary
-    total_peaks = sum(
-        len(chrom.peaks)
-        for sample in handler.samples
-        for chrom in sample.chromatograms
-    )
+    total_peaks = sum(len(chrom.peaks) for sample in handler.samples for chrom in sample.chromatograms)
     assigned_peaks = sum(
         1
         for sample in handler.samples
@@ -44,7 +43,10 @@ def create_overview_panel(handler: Handler) -> Panel:
         if peak.molecule_id
     )
 
+    total_chromatograms = sum(len(sample.chromatograms) for sample in handler.samples)
     overview_content.append(f"[bold]Samples:[/bold] {len(handler.samples)}")
+    overview_content.append(f"[bold]Chromatograms:[/bold] {total_chromatograms}")
+    overview_content.append(f"[bold]Peak Windows:[/bold] {len(handler.peak_windows)}")
     if total_peaks > 0:
         assignment_rate = (assigned_peaks / total_peaks) * 100
         overview_content.append(
@@ -71,11 +73,7 @@ def create_statistics_table(handler: Handler) -> Table:
 
     # Calculate statistics
     total_chromatograms = sum(len(sample.chromatograms) for sample in handler.samples)
-    total_peaks = sum(
-        len(chrom.peaks)
-        for sample in handler.samples
-        for chrom in sample.chromatograms
-    )
+    total_peaks = sum(len(chrom.peaks) for sample in handler.samples for chrom in sample.chromatograms)
     assigned_peaks = sum(
         1
         for sample in handler.samples
@@ -114,35 +112,32 @@ def create_species_table(handler: Handler) -> Table:
     species_table.add_column("Details")
 
     # Add molecules
-    for molecule in handler.molecules:  # Show all molecules
-        details = []
-        if hasattr(molecule, "formula") and molecule.formula:
-            details.append(f"Formula: {molecule.formula}")
-        if hasattr(molecule, "molecular_weight") and molecule.molecular_weight:
-            details.append(f"MW: {molecule.molecular_weight}")
-        if hasattr(molecule, "standard") and molecule.standard:
-            details.append("Has calibration")
+    for molecule in handler.molecules.values():
+        mol_details: list[str] = []
+        if molecule.standard:
+            mol_details.append("Has calibration")
 
         species_table.add_row(
             "Molecule",
             f"[magenta]{molecule.id}[/magenta]",
             molecule.name,
-            " | ".join(details) if details else "—",
+            " | ".join(mol_details) if mol_details else "—",
         )
 
     # Add proteins
-    for protein in handler.proteins:  # Show all proteins
-        details = []
-        if hasattr(protein, "molecular_weight") and protein.molecular_weight:
-            details.append(f"MW: {protein.molecular_weight}")
-        if hasattr(protein, "organism") and getattr(protein, "organism", None):
-            details.append(f"Organism: {protein.organism}")
+    for protein in handler.proteins.values():
+        prot_details: list[str] = []
+        molecular_weight = getattr(protein, "molecular_weight", None)
+        if molecular_weight:
+            prot_details.append(f"MW: {molecular_weight}")
+        if protein.organism:
+            prot_details.append(f"Organism: {protein.organism}")
 
         species_table.add_row(
             "Protein",
             f"[magenta]{protein.id}[/magenta]",
             protein.name,
-            " | ".join(details) if details else "—",
+            " | ".join(prot_details) if prot_details else "—",
         )
 
     return species_table
@@ -174,12 +169,7 @@ def create_measurements_content(handler: Handler) -> Table:
 
     for sample in handler.samples:
         sample_peaks = sum(len(chrom.peaks) for chrom in sample.chromatograms)
-        sample_assigned = sum(
-            1
-            for chrom in sample.chromatograms
-            for peak in chrom.peaks
-            if peak.molecule_id
-        )
+        sample_assigned = sum(1 for chrom in sample.chromatograms for peak in chrom.peaks if peak.molecule_id)
 
         reaction_times = sorted(
             {chrom.reaction_time for chrom in sample.chromatograms if chrom.reaction_time is not None}
@@ -197,179 +187,68 @@ def create_measurements_content(handler: Handler) -> Table:
     return measurements_table
 
 
-def create_peak_assignment_summary_table(
-    handler: Handler, assignment_results: list[dict[str, Any]]
-) -> Table:
-    """Create the main peak assignment summary table."""
+def create_peak_assignment_summary_table(handler: Handler, assignment_results: list[dict[str, Any]]) -> Table:
+    """Create the main molecule-assignment summary table."""
     target_emoji = _safe_emoji("🎯", ">>")
     summary_table = Table(
-        title=f"{target_emoji} Peak Assignment Summary of {handler.id}",
+        title=f"{target_emoji} Molecule Assignment Summary",
         show_header=True,
         header_style="bold cyan",
         border_style="blue",
     )
     summary_table.add_column("Molecule", style="bold green", min_width=20)
-    summary_table.add_column("Status", justify="center")
-    summary_table.add_column("Details", style="yellow")
+    summary_table.add_column("Window", style="cyan")
+    summary_table.add_column("Assigned", justify="right")
+    summary_table.add_column("Missing", justify="right")
+    summary_table.add_column("Ambiguous", justify="right")
+    summary_table.add_column("Details", style="yellow", min_width=20)
 
-    # Populate summary table
     for result in assignment_results:
         molecule = result["molecule"]
+        window = result["window"]
         assigned_count = result["assigned_peak_count"]
-        multiple_peaks = result["measurements_with_multiple_peaks"]
-        no_peaks = result["measurements_with_no_peaks"]
+        missing = result["chromatograms_with_no_peaks"]
+        ambiguous = result["chromatograms_with_multiple_peaks"]
+        details: list[str] = []
+        if window.wavelength is not None:
+            details.append(f"{window.wavelength:g} nm")
+        if result["min_amplitude"] is not None:
+            details.append(f"min amp {result['min_amplitude']:g}")
+        if result.get("on_multiple") == "skip":
+            details.append("on multiple: skip")
 
-        # Calculate total samples for this molecule
-        total_measurements = len(handler.samples)
-
-        # Safe emojis for status
-        success_emoji = _safe_emoji("✅", "[OK]")
-        partial_emoji = _safe_emoji("🟡", "[PARTIAL]")
-        failed_emoji = _safe_emoji("❌", "[FAILED]")
-        overlap_emoji = _safe_emoji("⚠️", "[OVERLAP]")
-
-        # Determine status and details (consistent format)
-        if assigned_count > 0 and not multiple_peaks and not no_peaks:
-            status = f"{success_emoji} Success"
-            details = f"({assigned_count}/{total_measurements}) peaks assigned"
-        else:
-            if assigned_count > 0:
-                status = f"{partial_emoji} Partial"
-            else:
-                status = f"{failed_emoji} Failed"
-
-            if multiple_peaks:
-                status = f"{overlap_emoji} Overlaps"
-                details = f"({assigned_count}/{total_measurements}) peaks assigned"
-            elif no_peaks:
-                # Include retention time details for failed molecules
-                ret_time = molecule.retention_time
-                tolerance = result["retention_tolerance"]
-                if assigned_count == 0:
-                    details = f"({assigned_count}/{total_measurements}) peaks at {ret_time:.1f} ± {tolerance:.1f} min"
-                else:
-                    details = f"({assigned_count}/{total_measurements}) peaks assigned"
-            else:
-                details = f"({assigned_count}/{total_measurements}) peaks assigned"
-
-        summary_table.add_row(f"{molecule.id} ({molecule.name})", status, details)
+        summary_table.add_row(
+            _format_molecule_label(molecule),
+            f"[{window.rt_min:.3f}, {window.rt_max:.3f}]",
+            str(assigned_count),
+            str(len(missing)),
+            str(len(ambiguous)),
+            " | ".join(details) if details else "—",
+        )
 
     return summary_table
 
 
-def print_peak_assignment_summary(
-    handler: Handler,
-    molecule: Molecule,
-    assigned_peak_count: int,
-    measurements_with_multiple_peaks: list[dict[str, Any]],
-    measurements_with_no_peaks: list[str],
-    ret_tolerance: float,
-) -> None:
-    """Print a formatted summary of peak assignment results (backward compatibility)."""
-    # Use force_terminal=False to avoid encoding issues on Windows CI
-    console = Console(force_terminal=False)
-
-    # Only show success message if peaks were assigned, or if there were warnings
-    has_warnings = measurements_with_multiple_peaks or measurements_with_no_peaks
-
-    # Use safe emoji that falls back to ASCII on encoding issues
-    target_emoji = _safe_emoji("🎯", ">>")
-
-    if assigned_peak_count > 0:
-        console.print(
-            f"{target_emoji} Assigned [bold green]{molecule.name}[/bold green] to [bold]{assigned_peak_count}[/bold] peaks"
-        )
-    elif not has_warnings:
-        # Only show 0 peaks message if there are no warnings (warnings will cover this)
-        console.print(
-            f"{target_emoji} Assigned [bold green]{molecule.name}[/bold green] to [bold]0[/bold] peaks"
-        )
-
-    # Warning for multiple peaks in tolerance
-    warning_emoji = _safe_emoji("⚠️", "!!")
-    if measurements_with_multiple_peaks:
-        console.print(
-            f"{warning_emoji}  [bold yellow]Warning:[/bold yellow] Multiple peaks found within tolerance for [bold]{molecule.name}[/bold]"
-        )
-
-        # Create table for multiple peaks details
-        table = Table(
-            show_header=True, header_style="bold yellow", box=None, padding=(0, 1)
-        )
-        table.add_column("Measurement", style="magenta")
-        table.add_column("Peaks Found", justify="center")
-        table.add_column("Retention Times", style="cyan")
-        table.add_column("Assigned RT", style="green")
-
-        for warning in measurements_with_multiple_peaks:
-            rts_str = (
-                ", ".join(f"{rt:.3f}" for rt in warning["all_rts"])
-                if isinstance(warning["all_rts"], list)
-                else ""
-            )
-            table.add_row(
-                warning["sample_id"],
-                str(warning["num_peaks"]),
-                f"[{rts_str}]",
-                f"{warning['assigned_rt']:.3f}",
-            )
-
-        console.print(table)
-        tip_emoji = _safe_emoji("💡", "TIP:")
-        console.print(
-            f"   {tip_emoji} [dim]Tip: Consider setting a higher min_signal value for {molecule.name} to filter out smaller peaks[/dim]"
-        )
-        console.print(
-            f"   {tip_emoji} [dim]Current min_signal: {molecule.min_signal}[/dim]"
-        )
-
-    # Warning for no peaks found
-    if measurements_with_no_peaks:
-        console.print(
-            f"{warning_emoji}  [bold red]Warning:[/bold red] No peaks found for [bold]{molecule.name}[/bold] in [bold]{len(measurements_with_no_peaks)}[/bold] measurement(s)"
-        )
-
-        # Create table for no peaks details
-        table = Table(
-            show_header=True, header_style="bold red", box=None, padding=(0, 1)
-        )
-        table.add_column("Measurements with no peaks", style="red")
-        table.add_column("Expected RT", justify="center", style="cyan")
-        table.add_column("Tolerance", justify="center", style="yellow")
-        table.add_column("Min Signal", justify="center", style="green")
-
-        table.add_row(
-            ", ".join(measurements_with_no_peaks[:5])
-            + (
-                f" ... (+{len(measurements_with_no_peaks) - 5} more)"
-                if len(measurements_with_no_peaks) > 5
-                else ""
-            ),
-            f"{molecule.retention_time:.3f} min",
-            f"±{ret_tolerance:.3f} min",
-            str(molecule.min_signal),
-        )
-
-        console.print(table)
+def _truncated_chromatogram_list(chromatograms: list[str]) -> str:
+    return ", ".join(chromatograms[:5]) + (
+        f" ... (+{len(chromatograms) - 5} more)" if len(chromatograms) > 5 else ""
+    )
 
 
-def display_rich_handler(
-    handler: Handler, console: Console | None = None, debug: bool = False
-) -> None:
+def display_rich_handler(handler: Handler, console: Console | None = None, debug: bool = False) -> None:
     """
     Display a comprehensive rich text visualization of the Handler instance.
 
     This function provides a beautiful, structured overview of the Handler including:
-    - Basic information (ID, name, mode)
+    - Basic information and assignment status
     - Molecules and their properties
     - Proteins and their properties
-    - Measurements summary with peak statistics
-    - Chromatogram details
+    - Sample summary with peak statistics
 
     Args:
         handler: The Handler instance to display
-        console (Console | None, optional): Rich console instance. If None, creates a new one. Defaults to None.
-        debug (bool, optional): If True, shows debug information about what sections are being displayed. Defaults to False.
+        console (Console | None, optional): Rich console instance. If None, creates a new one.
+        debug (bool, optional): If True, shows debug information about what sections are being displayed.
     """
     if console is None:
         # Use force_terminal=False to avoid encoding issues on Windows CI
@@ -378,7 +257,8 @@ def display_rich_handler(
     # Debug information
     if debug:
         console.print(
-            f"[dim]Debug: Molecules: {len(handler.molecules)}, Proteins: {len(handler.proteins)}, Samples: {len(handler.samples)}[/dim]"
+            f"[dim]Debug: Molecules: {len(handler.molecules)}, Proteins: {len(handler.proteins)}, "
+            f"Samples: {len(handler.samples)}[/dim]"
         )
 
     # Collect all content panels
@@ -402,9 +282,7 @@ def display_rich_handler(
     if handler.samples:
         content_panels.append(create_measurements_content(handler))
         if debug:
-            console.print(
-                f"[dim]Debug: Added samples content ({len(handler.samples)} samples)[/dim]"
-            )
+            console.print(f"[dim]Debug: Added samples content ({len(handler.samples)} samples)[/dim]")
     elif debug:
         console.print("[dim]Debug: No measurements to add[/dim]")
 
@@ -474,3 +352,136 @@ def display_consolidated_assignment_report(
     # Create and display main assignment summary table
     summary_table = create_peak_assignment_summary_table(handler, assignment_results)
     console.print(summary_table)
+
+    missing_entries = [
+        (result["molecule"], result["chromatograms_with_no_peaks"])
+        for result in assignment_results
+        if result["chromatograms_with_no_peaks"]
+    ]
+    ambiguous_entries = [
+        (result["molecule"], result["chromatograms_with_multiple_peaks"])
+        for result in assignment_results
+        if result["chromatograms_with_multiple_peaks"]
+    ]
+
+    if missing_entries:
+        missing_table = Table(
+            title="Missing Assignments",
+            show_header=True,
+            header_style="bold red",
+            border_style="red",
+        )
+        missing_table.add_column("Molecule", style="bold green")
+        missing_table.add_column("Chromatograms", style="red")
+        for molecule, chromatograms in missing_entries:
+            missing_table.add_row(
+                _format_molecule_label(molecule),
+                _truncated_chromatogram_list(chromatograms),
+            )
+        console.print(missing_table)
+
+    if ambiguous_entries:
+        ambiguous_table = Table(
+            title="Ambiguous Assignments",
+            show_header=True,
+            header_style="bold yellow",
+            border_style="yellow",
+        )
+        ambiguous_table.add_column("Molecule", style="bold green")
+        ambiguous_table.add_column("Chromatograms", style="yellow")
+        for molecule, chromatograms in ambiguous_entries:
+            ambiguous_table.add_row(
+                _format_molecule_label(molecule),
+                _truncated_chromatogram_list(chromatograms),
+            )
+        console.print(ambiguous_table)
+
+
+def display_molecule_assignment_report(handler: Handler, assignment_results: list[dict[str, Any]]) -> None:
+    """Display a consolidated molecule-assignment report."""
+    display_consolidated_assignment_report(handler, assignment_results)
+
+
+def _fmt(value: float) -> str:
+    """Format a numeric value: no decimals if |value| >= 1, else 4 decimal places."""
+    return f"{value:.0f}" if abs(value) >= 1 else f"{value:.4f}"
+
+
+def _r2_colored(r2: float) -> str:
+    """Return an R² value formatted with a colour hint for the rich table."""
+    formatted = f"{r2:.4f}"
+    if r2 >= 0.999:
+        return f"[bold green]{formatted}[/bold green]"
+    if r2 >= 0.99:
+        return f"[green]{formatted}[/green]"
+    if r2 >= 0.95:
+        return f"[yellow]{formatted}[/yellow]"
+    return f"[bold red]{formatted}[/bold red]"
+
+
+def display_calibration_summary(
+    results: list[tuple[Molecule, LinearCalibration | None]],
+) -> None:
+    """Print a transposed rich table summarising the output of ``calibrate_molecules()``.
+
+    Rows are metrics; each molecule gets its own data column.
+
+    Args:
+        results: Sequence of ``(molecule, calibration)`` pairs where
+            *calibration* is ``None`` for molecules that were skipped due to
+            insufficient calibration data.
+    """
+    console = Console(force_terminal=False)
+
+    cal_emoji = _safe_emoji("🔬", "CAL")
+    table = Table(
+        title=f"{cal_emoji} Calibration Summary",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="blue",
+    )
+
+    # Index column (metric names) — dim so it reads as a label, not data
+    table.add_column("", style="bold dim", min_width=12, no_wrap=True)
+
+    # One data column per molecule
+    for molecule, _ in results:
+        table.add_column(
+            _format_molecule_label(molecule),
+            justify="right",
+            min_width=16,
+        )
+
+    # Helper: produce one cell value per calibration
+    _D = "—"
+
+    def _standards(c: LinearCalibration | None) -> str:
+        return str(c.n_standards) if c else _D
+
+    def _r2(c: LinearCalibration | None) -> str:
+        return _r2_colored(c.r_squared) if c else _D
+
+    def _slope(c: LinearCalibration | None) -> str:
+        return _fmt(c.slope) if c else _D
+
+    def _intercept(c: LinearCalibration | None) -> str:
+        return _fmt(c.intercept) if c else _D
+
+    def _range(c: LinearCalibration | None) -> str:
+        if c is None:
+            return _D
+        unit = str(c.conc_unit) if c.conc_unit else "AU"
+        return f"{_fmt(c.min_conc)} - {_fmt(c.max_conc)} {unit}"
+
+    def _status(c: LinearCalibration | None) -> str:
+        return "[bold green]✓ fitted[/bold green]" if c else "[bold red]⚠ no data[/bold red]"
+
+    cals = [cal for _, cal in results]
+    table.add_row("Standards", *[_standards(c) for c in cals])
+    table.add_row("R²", *[_r2(c) for c in cals])
+    table.add_row("Slope", *[_slope(c) for c in cals])
+    table.add_row("Intercept", *[_intercept(c) for c in cals])
+    table.add_row("Range", *[_range(c) for c in cals])
+    table.add_row("Status", *[_status(c) for c in cals])
+
+    console.print(table)

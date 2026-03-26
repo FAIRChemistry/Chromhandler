@@ -1,9 +1,7 @@
 import json
 import re
-from typing import Optional
 
 import requests
-from mdmodels.units.annotation import UnitDefinitionAnnot
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -19,23 +17,15 @@ class Protein(BaseModel):
     name: str = Field(
         description="Name of the protein",
     )
-    init_conc: Optional[float] = Field(
-        description="Initial concentration of the protein at t=0",
-        default=None,
-    )
-    conc_unit: Optional[UnitDefinitionAnnot] = Field(
-        description="Unit of the concentration",
-        default=None,
-    )
-    sequence: Optional[str] = Field(
+    sequence: str | None = Field(
         description="Amino acid sequence of the protein",
         default=None,
     )
-    organism: Optional[str] = Field(
+    organism: str | None = Field(
         description="Organism from which the protein originates",
         default=None,
     )
-    organism_tax_id: Optional[str] = Field(
+    organism_tax_id: str | None = Field(
         description="Taxonomic ID of the organism",
         default=None,
     )
@@ -54,7 +44,7 @@ class Protein(BaseModel):
         Returns:
             Protein: The created Protein instance.
         """
-        with open(path, "r") as f:
+        with open(path) as f:
             data = json.load(f)
         return cls(**data)
 
@@ -96,15 +86,11 @@ class Protein(BaseModel):
         # Extract fields from UniProt JSON
         protein_name = None
         try:
-            protein_name = data["proteinDescription"]["recommendedName"]["fullName"][
-                "value"
-            ]
+            protein_name = data["proteinDescription"]["recommendedName"]["fullName"]["value"]
         except Exception:
             # fallback to submittedName or alternativeName if available
             try:
-                protein_name = data["proteinDescription"]["submittedName"][0][
-                    "fullName"
-                ]["value"]
+                protein_name = data["proteinDescription"]["submittedName"][0]["fullName"]["value"]
             except Exception:
                 protein_name = None
 
@@ -134,9 +120,7 @@ class Protein(BaseModel):
             str | None: URL of the UniProt page of the protein if the protein ID is defined, None otherwise.
         """
 
-        uniprot_pattern = (
-            r"[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}"
-        )
+        uniprot_pattern = r"[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}"
 
         if re.fullmatch(uniprot_pattern, self.id) is None:
             return None

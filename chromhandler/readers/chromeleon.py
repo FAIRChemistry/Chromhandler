@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import pandas as pd
 from loguru import logger
@@ -38,10 +38,10 @@ class ChromeleonReader(AbstractReader):
 
         return measurements
 
-    def _read_chromeleon_file(self, file_path: str) -> Dict[str, Any]:
+    def _read_chromeleon_file(self, file_path: str) -> dict[str, Any]:
         """Reads and processes the content of a Chromeleon file."""
 
-        with open(file_path, "r", encoding="ISO-8859-1") as file:
+        with open(file_path, encoding="ISO-8859-1") as file:
             content = file.read()
 
         sections = content.split("\n\n")
@@ -63,7 +63,7 @@ class ChromeleonReader(AbstractReader):
 
     def _map_measurement(
         self,
-        content: Dict[str, Any],
+        content: dict[str, Any],
         reaction_time: float,
         time_unit: UnitDefinition,
         file_path: str,
@@ -121,7 +121,7 @@ class ChromeleonReader(AbstractReader):
 
         return float(reaction_time), unit_str
 
-    def _transpose_data(self, data: List[List[str]]) -> pd.DataFrame:
+    def _transpose_data(self, data: list[list[str]]) -> pd.DataFrame:
         """Transposes the raw data from the file into a DataFrame."""
 
         df = pd.DataFrame(data[1:], columns=["time", "step", "value"])

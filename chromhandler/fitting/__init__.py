@@ -63,4 +63,4 @@ Performance
 from .better_fitter import BetterFitter, PosteriorCurves
 from .subsets import AreaRecord, Subset, SubsetSpec
 
-__all__ = ["BetterFitter", "PosteriorCurves", "Subset", "SubsetSpec", "AreaRecord"]
+__all__ = ["AreaRecord", "BetterFitter", "PosteriorCurves", "Subset", "SubsetSpec"]

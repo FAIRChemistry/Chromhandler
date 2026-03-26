@@ -9,7 +9,7 @@ Provides reusable plotting methods for:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -18,6 +18,9 @@ from matplotlib.colors import Colormap, ListedColormap, to_rgba
 from matplotlib.patches import Patch
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+
+if TYPE_CHECKING:
+    from chromhandler.fitting.better_fitter import PosteriorCurves
 
 # ---------------------------------------------------------------------------
 # Validation Helpers
@@ -47,9 +50,7 @@ def _validate_hex_colors(colors: list[str], n_peak: int) -> None:
 
     for i, color in enumerate(colors):
         if not isinstance(color, str):
-            raise ValueError(
-                f"colors[{i}] is not a string, got {type(color).__name__}."
-            )
+            raise ValueError(f"colors[{i}] is not a string, got {type(color).__name__}.")
         if not color.startswith("#"):
             raise ValueError(
                 f"colors[{i}]='{color}' is not a valid hex code. "
@@ -73,7 +74,7 @@ def plot_trace_rows(
     signal: np.ndarray,
     peaks: list[PeakAnnotation],
     *,
-    figsize: Optional[tuple[float, float]] = None,
+    figsize: tuple[float, float] | None = None,
     t_min: float | None = None,
     t_max: float | None = None,
     trace_color: str = "black",
@@ -91,15 +92,11 @@ def plot_trace_rows(
     signal_arr = np.asarray(signal, dtype=float)
 
     if time_arr.shape != signal_arr.shape:
-        raise ValueError(
-            f"time and signal must share shape, got {time_arr.shape} vs {signal_arr.shape}."
-        )
+        raise ValueError(f"time and signal must share shape, got {time_arr.shape} vs {signal_arr.shape}.")
     if time_arr.ndim != 2:
         raise ValueError("time and signal must be 2-D [n_trace, n_time].")
     if t_min is not None and t_max is not None and float(t_min) >= float(t_max):
-        raise ValueError(
-            f"plot_trace_rows requires t_min < t_max, got {t_min} and {t_max}."
-        )
+        raise ValueError(f"plot_trace_rows requires t_min < t_max, got {t_min} and {t_max}.")
 
     n_trace, _ = time_arr.shape
     if figsize is None:
@@ -126,18 +123,12 @@ def plot_trace_rows(
             finite &= x_trace <= float(t_max)
 
         for peak, color in zip(peaks, peak_colors, strict=False):
-            span_lo = (
-                peak.rt_min if t_min is None else max(float(peak.rt_min), float(t_min))
-            )
-            span_hi = (
-                peak.rt_max if t_max is None else min(float(peak.rt_max), float(t_max))
-            )
+            span_lo = peak.rt_min if t_min is None else max(float(peak.rt_min), float(t_min))
+            span_hi = peak.rt_max if t_max is None else min(float(peak.rt_max), float(t_max))
             if span_lo >= span_hi:
                 continue
             ax.axvspan(span_lo, span_hi, color=color, alpha=peak_alpha, linewidth=0)
-            ax.axvline(
-                peak.rt_min, color=color, alpha=0.55, linewidth=0.9, linestyle="--"
-            )
+            ax.axvline(peak.rt_min, color=color, alpha=0.55, linewidth=0.9, linestyle="--")
             ax.axvline(
                 peak.rt_max,
                 color=color,
@@ -186,13 +177,9 @@ def plot_trace_rows(
             )
             for peak, color in zip(peaks, peak_colors, strict=False)
         ]
-        axes_col[0].legend(
-            handles=legend_handles, fontsize=8, loc="best", ncol=min(4, len(peaks))
-        )
+        axes_col[0].legend(handles=legend_handles, fontsize=8, loc="best", ncol=min(4, len(peaks)))
 
-    fig.suptitle(
-        f"Chromatogram Overview: {n_trace} traces", fontsize=12, fontweight="bold"
-    )
+    fig.suptitle(f"Chromatogram Overview: {n_trace} traces", fontsize=12, fontweight="bold")
     fig.tight_layout()
     return fig, axes_col
 
@@ -280,12 +267,8 @@ def add_peak_window_bounds(
     linewidth : float
         Line width.
     """
-    ax.axvline(
-        peak.rt_min, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
-    )
-    ax.axvline(
-        peak.rt_max, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
-    )
+    ax.axvline(peak.rt_min, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth)
+    ax.axvline(peak.rt_max, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth)
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +340,9 @@ def add_sigma_alpha_prior_density(
     alpha_scale: float,
     sigma_loc: float,
     sigma_scale: float,
-    x_data: Optional[np.ndarray] = None,
-    y_data: Optional[np.ndarray] = None,
-    cmap: "str | Colormap" = "viridis",
+    x_data: np.ndarray | None = None,
+    y_data: np.ndarray | None = None,
+    cmap: str | Colormap = "viridis",
     n_levels: int = 4,
     linecolor: str = "white",
     n_grid: int = 220,
@@ -399,22 +382,16 @@ def add_sigma_alpha_prior_density(
 
     z_alpha = (xx - alpha_loc_f) / alpha_scale_f
     z_sigma = (yy - sigma_loc_f) / sigma_scale_f
-    density = np.exp(-0.5 * (z_alpha**2 + z_sigma**2)) / (
-        2.0 * np.pi * alpha_scale_f * sigma_scale_f
-    )
+    density = np.exp(-0.5 * (z_alpha**2 + z_sigma**2)) / (2.0 * np.pi * alpha_scale_f * sigma_scale_f)
 
     # Chi-square(df=2) quantiles give equal probability mass per band.
     # r^2_p = -2 log(1-p) maps mass fraction to squared Mahalanobis radius.
-    mass_levels = np.linspace(
-        1.0 / (n_levels + 1), 1.0 - 1.0 / (n_levels + 1), n_levels
-    )
+    mass_levels = np.linspace(1.0 / (n_levels + 1), 1.0 - 1.0 / (n_levels + 1), n_levels)
     mass_levels[-1] = min(float(mass_levels[-1]), 0.95)
     r2 = -2.0 * np.log(1.0 - mass_levels)
     density_peak = 1.0 / (2.0 * np.pi * alpha_scale_f * sigma_scale_f)
     density_levels = density_peak * np.exp(-0.5 * r2)
-    contour_levels = np.sort(
-        np.concatenate([density_levels[::-1], np.array([density_peak])])
-    )
+    contour_levels = np.sort(np.concatenate([density_levels[::-1], np.array([density_peak])]))
 
     cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
     if isinstance(cmap_obj, ListedColormap):
@@ -446,10 +423,10 @@ def add_sigma_alpha_prior_density(
 
 
 def _check_peak_vector(
-    values: Optional[np.ndarray],
+    values: np.ndarray | None,
     name: str,
     n_peak: int,
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     """Validate an optional per-peak vector argument."""
     if values is None:
         return None
@@ -496,9 +473,9 @@ def _merge_limits(
 
 
 def _resolve_prior_colormap(
-    prior_cmap: "str | Colormap" = "viridis",
-    prior_colors: Optional[list[str]] = None,
-) -> "tuple[Colormap, int]":
+    prior_cmap: str | Colormap = "viridis",
+    prior_colors: list[str] | None = None,
+) -> tuple[Colormap, int]:
     """Return (Colormap, n_levels) from either a colormap name or explicit color list."""
     if prior_colors is not None:
         if len(prior_colors) < 2:
@@ -601,19 +578,19 @@ def plot_prior_traces(
     baseline_slope: np.ndarray,
     baseline_intercept_scale: np.ndarray,
     baseline_slope_scale: np.ndarray,
-    apex_loc: Optional[np.ndarray] = None,
-    apex_scale: Optional[np.ndarray] = None,
-    approx_apex_trace: Optional[np.ndarray] = None,
-    approx_height_trace: Optional[np.ndarray] = None,
-    approx_sigma_trace: Optional[np.ndarray] = None,
-    approx_valid_trace: Optional[np.ndarray] = None,
-    approx_fallback_trace: Optional[np.ndarray] = None,
+    apex_loc: np.ndarray | None = None,
+    apex_scale: np.ndarray | None = None,
+    approx_apex_trace: np.ndarray | None = None,
+    approx_height_trace: np.ndarray | None = None,
+    approx_sigma_trace: np.ndarray | None = None,
+    approx_valid_trace: np.ndarray | None = None,
+    approx_fallback_trace: np.ndarray | None = None,
     *,
     show_baseline: bool = True,
     show_apex_prior: bool = True,
     show_gaussian_prior_peak: bool = True,
     show_peak_bounds: bool = True,
-    figsize: Optional[tuple[float, float]] = None,
+    figsize: tuple[float, float] | None = None,
     cmap: str = "viridis",
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot prior traces: subplots[trace, peak_window].
@@ -680,7 +657,7 @@ def plot_prior_traces(
     time_arr = np.asarray(time, dtype=float)
     signal_arr = np.asarray(signal, dtype=float)
 
-    n_trace, n_time = time_arr.shape
+    n_trace, _n_time = time_arr.shape
     n_peak = len(peaks)
 
     # Default figsize: scale by grid size
@@ -703,44 +680,20 @@ def plot_prior_traces(
     b_slope_scale = np.asarray(baseline_slope_scale, dtype=float)
     apex_loc_arr = None if apex_loc is None else np.asarray(apex_loc, dtype=float)
     apex_scale_arr = None if apex_scale is None else np.asarray(apex_scale, dtype=float)
-    approx_apex_arr = (
-        None
-        if approx_apex_trace is None
-        else np.asarray(approx_apex_trace, dtype=float)
-    )
-    approx_height_arr = (
-        None
-        if approx_height_trace is None
-        else np.asarray(approx_height_trace, dtype=float)
-    )
-    approx_sigma_arr = (
-        None
-        if approx_sigma_trace is None
-        else np.asarray(approx_sigma_trace, dtype=float)
-    )
-    approx_valid_arr = (
-        None
-        if approx_valid_trace is None
-        else np.asarray(approx_valid_trace, dtype=bool)
-    )
+    approx_apex_arr = None if approx_apex_trace is None else np.asarray(approx_apex_trace, dtype=float)
+    approx_height_arr = None if approx_height_trace is None else np.asarray(approx_height_trace, dtype=float)
+    approx_sigma_arr = None if approx_sigma_trace is None else np.asarray(approx_sigma_trace, dtype=float)
+    approx_valid_arr = None if approx_valid_trace is None else np.asarray(approx_valid_trace, dtype=bool)
     approx_fallback_arr = (
-        None
-        if approx_fallback_trace is None
-        else np.asarray(approx_fallback_trace, dtype=bool)
+        None if approx_fallback_trace is None else np.asarray(approx_fallback_trace, dtype=bool)
     )
 
     if (apex_loc_arr is None) != (apex_scale_arr is None):
-        raise ValueError(
-            "apex_loc and apex_scale must either both be provided or both be omitted."
-        )
+        raise ValueError("apex_loc and apex_scale must either both be provided or both be omitted.")
     if apex_loc_arr is not None and apex_loc_arr.shape[0] != n_peak:
-        raise ValueError(
-            f"apex_loc must have length {n_peak}, got shape {apex_loc_arr.shape}."
-        )
+        raise ValueError(f"apex_loc must have length {n_peak}, got shape {apex_loc_arr.shape}.")
     if apex_scale_arr is not None and apex_scale_arr.shape[0] != n_peak:
-        raise ValueError(
-            f"apex_scale must have length {n_peak}, got shape {apex_scale_arr.shape}."
-        )
+        raise ValueError(f"apex_scale must have length {n_peak}, got shape {apex_scale_arr.shape}.")
     gaussian_inputs = [
         approx_apex_arr,
         approx_height_arr,
@@ -764,9 +717,7 @@ def plot_prior_traces(
             ("approx_fallback_trace", approx_fallback_arr),
         ):
             if arr is not None and arr.shape != expected_shape:
-                raise ValueError(
-                    f"{name} must have shape {expected_shape}, got {arr.shape}."
-                )
+                raise ValueError(f"{name} must have shape {expected_shape}, got {arr.shape}.")
 
     # Plot each (trace, peak) subplot
     for t in range(n_trace):
@@ -847,18 +798,12 @@ def plot_prior_traces(
                                 "Fallback Gaussian prior peak"
                                 if (is_fallback and t == 0 and p == 0)
                                 else (
-                                    "Gaussian prior peak"
-                                    if ((not is_fallback) and t == 0 and p == 0)
-                                    else ""
+                                    "Gaussian prior peak" if ((not is_fallback) and t == 0 and p == 0) else ""
                                 )
                             ),
                         )
 
-            if (
-                show_apex_prior
-                and apex_loc_arr is not None
-                and apex_scale_arr is not None
-            ):
+            if show_apex_prior and apex_loc_arr is not None and apex_scale_arr is not None:
                 add_vertical_prior_band(
                     ax,
                     apex_loc_arr[p],
@@ -889,7 +834,7 @@ def plot_prior_traces(
         axes[0, 0].legend(fontsize=8, loc="best")
 
     fig.suptitle(
-        f"Prior Traces: {n_trace} traces × {n_peak} peak windows",
+        f"Prior Traces: {n_trace} traces x {n_peak} peak windows",
         fontsize=12,
         fontweight="bold",
     )
@@ -909,18 +854,18 @@ def plot_sigma_alpha_scatter(
     alpha_trace: np.ndarray,
     valid_trace: np.ndarray,
     *,
-    apex_height_trace: Optional[np.ndarray] = None,
-    sigma_loc: Optional[np.ndarray] = None,
-    sigma_scale: Optional[np.ndarray] = None,
-    alpha_loc: Optional[np.ndarray] = None,
-    alpha_scale: Optional[np.ndarray] = None,
-    figsize: Optional[tuple[float, float]] = None,
+    apex_height_trace: np.ndarray | None = None,
+    sigma_loc: np.ndarray | None = None,
+    sigma_scale: np.ndarray | None = None,
+    alpha_loc: np.ndarray | None = None,
+    alpha_scale: np.ndarray | None = None,
+    figsize: tuple[float, float] | None = None,
     cmap: str = "viridis",
-    prior_colors: Optional[list[str]] = None,
+    prior_colors: list[str] | None = None,
     prior_linecolor: str = "white",
     colorize_by: Literal[None, "sample_id", "subset"] = None,
-    sample_ids: Optional[list[str]] = None,
-    subset_ids: Optional[list[str]] = None,
+    sample_ids: list[str] | None = None,
+    subset_ids: list[str] | None = None,
     label_fontsize: float = 9,
     title_fontsize: float = 10,
     tick_fontsize: float = 8,
@@ -950,27 +895,21 @@ def plot_sigma_alpha_scatter(
 
     n_trace, n_peak = sigma_arr.shape
     if len(peaks) != n_peak:
-        raise ValueError(
-            f"peaks length must match n_peak={n_peak}, got {len(peaks)} peaks."
-        )
+        raise ValueError(f"peaks length must match n_peak={n_peak}, got {len(peaks)} peaks.")
 
     if colorize_by == "sample_id":
         if sample_ids is None or len(sample_ids) != n_trace:
-            raise ValueError(
-                f"sample_ids must have length n_trace={n_trace} when colorize_by='sample_id'."
-            )
+            raise ValueError(f"sample_ids must have length n_trace={n_trace} when colorize_by='sample_id'.")
         labels_for_color = sample_ids
     elif colorize_by == "subset":
         if subset_ids is None or len(subset_ids) != n_trace:
-            raise ValueError(
-                f"subset_ids must have length n_trace={n_trace} when colorize_by='subset'."
-            )
+            raise ValueError(f"subset_ids must have length n_trace={n_trace} when colorize_by='subset'.")
         labels_for_color = subset_ids
     else:
         labels_for_color = None
 
     # Map unique label -> turbo color when coloring
-    label_to_color: Optional[dict[str, tuple[float, float, float, float]]] = None
+    label_to_color: dict[str, tuple[float, float, float, float]] | None = None
     if labels_for_color is not None:
         unique_labels = list(dict.fromkeys(str(lab) for lab in labels_for_color))
         n_unique = len(unique_labels)
@@ -982,9 +921,7 @@ def plot_sigma_alpha_scatter(
     if apex_height_trace is not None:
         apex_height_arr = np.asarray(apex_height_trace, dtype=float)
         if apex_height_arr.shape != sigma_arr.shape:
-            raise ValueError(
-                "apex_height_trace must share shape with sigma_trace if provided."
-            )
+            raise ValueError("apex_height_trace must share shape with sigma_trace if provided.")
 
     sigma_loc_arr = _check_peak_vector(sigma_loc, "sigma_loc", n_peak)
     sigma_scale_arr = _check_peak_vector(sigma_scale, "sigma_scale", n_peak)
@@ -1009,9 +946,7 @@ def plot_sigma_alpha_scatter(
 
     for peak_idx in range(n_peak):
         valid_peak = (
-            valid_arr[:, peak_idx]
-            & np.isfinite(sigma_arr[:, peak_idx])
-            & np.isfinite(alpha_arr[:, peak_idx])
+            valid_arr[:, peak_idx] & np.isfinite(sigma_arr[:, peak_idx]) & np.isfinite(alpha_arr[:, peak_idx])
         )
         alpha_peak = alpha_arr[valid_peak, peak_idx]
         sigma_peak = sigma_arr[valid_peak, peak_idx]
@@ -1098,12 +1033,8 @@ def plot_sigma_alpha_scatter(
             alpha_scatter = 0.2
             trace_indices = np.where(valid_peak)[0]
             if label_to_color is not None and labels_for_color is not None:
-                edge_colors = [
-                    label_to_color[str(labels_for_color[t])] for t in trace_indices
-                ]
-                face_colors = [
-                    (*edge_colors[i][:3], 0.35) for i in range(len(edge_colors))
-                ]
+                edge_colors = [label_to_color[str(labels_for_color[t])] for t in trace_indices]
+                face_colors = [(*edge_colors[i][:3], 0.35) for i in range(len(edge_colors))]
             else:
                 edge_colors = (0.15, 0.15, 0.15, 0.9)
                 face_colors = (1, 1, 1, alpha_scatter)
@@ -1111,9 +1042,7 @@ def plot_sigma_alpha_scatter(
             if apex_height_arr is not None:
                 heights_peak = apex_height_arr[valid_peak, peak_idx]
                 # Scale height-derived sizes proportionally to marker_size baseline
-                sizes_peak = _marker_sizes_from_values(heights_peak) * (
-                    marker_size / 40
-                )
+                sizes_peak = _marker_sizes_from_values(heights_peak) * (marker_size / 40)
                 ax.scatter(
                     alpha_peak,
                     sigma_peak,
@@ -1148,7 +1077,7 @@ def plot_sigma_alpha_scatter(
             )
 
         ax.set_title(peak.molecule_id, fontsize=title_fontsize)
-        ax.set_xlabel(r"$\alpha$ [–]", fontsize=label_fontsize)
+        ax.set_xlabel(r"$\alpha$ [-]", fontsize=label_fontsize)
         if peak_idx == 0:
             ax.set_ylabel(r"$\sigma$ [min]", fontsize=label_fontsize)
         ax.grid(True, alpha=0.3, linestyle="--")
@@ -1269,12 +1198,7 @@ def add_hdi_band(
     hdi_high = np.percentile(samples_arr, 97.5, axis=0)
 
     # Filter finite values
-    finite_mask = (
-        np.isfinite(x_arr)
-        & np.isfinite(median)
-        & np.isfinite(hdi_low)
-        & np.isfinite(hdi_high)
-    )
+    finite_mask = np.isfinite(x_arr) & np.isfinite(median) & np.isfinite(hdi_low) & np.isfinite(hdi_high)
     x_fin = x_arr[finite_mask]
     median_fin = median[finite_mask]
     hdi_low_fin = hdi_low[finite_mask]
@@ -1303,14 +1227,14 @@ def plot_fit(
     time: np.ndarray,
     signal: np.ndarray,
     peaks: list[PeakAnnotation],
-    curves: "PosteriorCurves | None",
+    curves: PosteriorCurves | None,
     *,
-    fitted_rows: Optional[np.ndarray] = None,
-    baselines: Optional[list[BaselineAnnotation]] = None,
-    chromatogram_ids: Optional[list[str]] = None,
+    fitted_rows: np.ndarray | None = None,
+    baselines: list[BaselineAnnotation] | None = None,
+    chromatogram_ids: list[str] | None = None,
     hdi_prob: float = 0.95,
-    figsize: Optional[tuple[float, float]] = None,
-    colors: Optional[list[str]] = None,
+    figsize: tuple[float, float] | None = None,
+    colors: list[str] | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot raw data and posterior fit curves.
 
@@ -1373,8 +1297,7 @@ def plot_fit(
 
     if chromatogram_ids is not None and len(chromatogram_ids) != n_display:
         raise ValueError(
-            f"chromatogram_ids must have length n_display={n_display}, "
-            f"got {len(chromatogram_ids)}."
+            f"chromatogram_ids must have length n_display={n_display}, got {len(chromatogram_ids)}."
         )
 
     # Resolve fitted_rows
@@ -1615,11 +1538,11 @@ def plot_posterior_predictive(
     peaks: list[PeakAnnotation],
     posterior: object,
     *,
-    x_posterior: Optional[np.ndarray] = None,
-    y_posterior: Optional[np.ndarray] = None,
-    chromatogram_ids: Optional[list[str]] = None,
-    figsize: Optional[tuple[float, float]] = None,
-    baselines: Optional[list] = None,
+    x_posterior: np.ndarray | None = None,
+    y_posterior: np.ndarray | None = None,
+    chromatogram_ids: list[str] | None = None,
+    figsize: tuple[float, float] | None = None,
+    baselines: list | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Deprecated — use :meth:`~BetterFitter.plot_fit` instead.
 
@@ -1641,7 +1564,6 @@ def plot_posterior_predictive(
     # Minimal fallback: scatter-only plot (no posterior overlay)
     time_arr = np.asarray(time, dtype=float)
     signal_arr = np.asarray(signal, dtype=float)
-    n_trace = time_arr.shape[0]
     return plot_fit(
         time_arr,
         signal_arr,
@@ -1661,7 +1583,7 @@ def plot_posterior_predictive(
 def plot_trace(
     posterior: object,
     var_names: list[str] | None = None,
-    figsize: Optional[tuple[float, float]] = None,
+    figsize: tuple[float, float] | None = None,
 ) -> plt.Figure:
     """Plot MCMC trace for all sampled parameters.
 
@@ -1699,8 +1621,7 @@ def plot_trace(
         missing = [name for name in requested if name not in available_vars]
         if missing:
             warnings.warn(
-                "Ignoring unavailable posterior variables in plot_trace: "
-                + ", ".join(missing),
+                "Ignoring unavailable posterior variables in plot_trace: " + ", ".join(missing),
                 stacklevel=2,
             )
         if not var_names:
@@ -1739,12 +1660,8 @@ if __name__ == "__main__":
     import jax.numpy as jnp
 
     # Load test data
-    arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(
-        -1, 3000
-    )[:5, :1000]
-    time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[
-        :5, :1000
-    ]
+    arr = jnp.load("/Users/max/code/sahh-kinetics-hplc/chromatograms.npy").reshape(-1, 3000)[:5, :1000]
+    time = jnp.load("/Users/max/code/sahh-kinetics-hplc/times.npy").reshape(-1, 3000)[:5, :1000]
 
     # Define peaks and baselines
     from chromhandler.annotations import BaselineAnnotation

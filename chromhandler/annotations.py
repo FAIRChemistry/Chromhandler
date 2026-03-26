@@ -1,9 +1,9 @@
-"""Handler-level peak and baseline annotation models.
+"""Handler-level peak and baseline window models.
 
 Distinct from :mod:`chromhandler.fitting.data` which holds MCMC fitting
-helpers. This module defines the window annotations a user places on a
-:class:`~chromhandler.handler.Handler`, and are the *single* annotation types
-passed through to :class:`~chromhandler.fitting.better_fitter.BetterFitter`.
+helpers. This module defines the retention-time windows users place on a
+:class:`~chromhandler.handler.Handler` as well as the fitter-facing
+``PeakAnnotation`` type used by the current Bayesian fitting pipeline.
 """
 
 from __future__ import annotations
@@ -15,6 +15,35 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # Vocabulary aligned with the fitting module internals.
 PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
 ArtefactSide = Literal["left", "right"]
+
+
+class PeakWindow(BaseModel):
+    """A handler-level retention-time window for one molecule.
+
+    Attributes:
+        molecule_id: ID of the molecule this window belongs to.
+        rt_min: Lower retention-time bound (minutes, inclusive).
+        rt_max: Upper retention-time bound (minutes, inclusive).
+        wavelength: When set, :meth:`~chromhandler.handler.Handler.assign_molecules`
+            only considers chromatograms at this wavelength (nm). When ``None``,
+            every chromatogram in the sample is considered (e.g. time-course
+            traces at one wavelength).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    molecule_id: str
+    rt_min: float
+    rt_max: float
+    wavelength: float | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> PeakWindow:
+        if self.rt_max <= self.rt_min:
+            raise ValueError(
+                f"rt_max ({self.rt_max}) must be greater than rt_min ({self.rt_min})."
+            )
+        return self
 
 
 class PeakAnnotation(BaseModel):

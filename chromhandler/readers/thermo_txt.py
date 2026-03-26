@@ -102,7 +102,7 @@ def _convert_value(value: str) -> float:
 
 def _read_peaks_from_csv(path: str) -> list[Peak]:
     peaks: list[Peak] = []
-    with open(path, mode="r", encoding="shift_jis") as file:
+    with open(path, encoding="shift_jis") as file:
         lines = file.readlines()
 
         # Find the start of peak data
@@ -171,7 +171,7 @@ def _extract_value(parts: list[str], key: str) -> str | None:
 
 def _read_metadata(path: str) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    with open(path, mode="r", encoding="shift_jis") as file:
+    with open(path, encoding="shift_jis") as file:
         lines = file.readlines()
 
         for line in lines:

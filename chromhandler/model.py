@@ -1,72 +1,39 @@
-"""
-This file contains Pydantic model definitions for data validation.
-
-Pydantic is a data validation library that uses Python type annotations.
-It allows you to define data models with type hints that are validated
-at runtime while providing static type checking.
-
-Usage example:
-```python
-from my_model import MyModel
-
-# Validates data at runtime
-my_model = MyModel(name="John", age=30)
-
-# Type-safe - my_model has correct type hints
-print(my_model.name)
-
-# Will raise error if validation fails
-try:
-    MyModel(name="", age=30)
-except ValidationError as e:
-    print(e)
-```
-
-For more information see:
-https://docs.pydantic.dev/
-
-WARNING: This is an auto-generated file.
-Do not edit directly - any changes will be overwritten.
-"""
-
-
-## This is a generated file. Do not modify it manually!
-
 from __future__ import annotations
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Generic, TypeVar, Union
-from enum import Enum
-from uuid import uuid4
-from datetime import date, datetime
-from mdmodels.units.annotation import UnitDefinitionAnnot
 
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from uuid import uuid4
+
+from mdmodels.units.annotation import UnitDefinitionAnnot  # type: ignore[import-untyped]
+from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    pass
 # Filter Wrapper definition used to filter a list of objects
 # based on their attributes
 Cls = TypeVar("Cls")
 
+
 class FilterWrapper(Generic[Cls]):
     """Wrapper class to filter a list of objects based on their attributes"""
 
-    def __init__(self, collection: list[Cls], **kwargs):
+    def __init__(self, collection: list[Cls], **kwargs: Any) -> None:
         self.collection = collection
         self.kwargs = kwargs
 
     def filter(self) -> list[Cls]:
         for key, value in self.kwargs.items():
-            self.collection = [
-                item for item in self.collection if self._fetch_attr(key, item) == value
-            ]
+            self.collection = [item for item in self.collection if self._fetch_attr(key, item) == value]
         return self.collection
 
-    def _fetch_attr(self, name: str, item: Cls):
+    def _fetch_attr(self, name: str, item: Cls) -> Any:
         try:
             return getattr(item, name)
-        except AttributeError:
-            raise AttributeError(f"{item} does not have attribute {name}")
+        except AttributeError as err:
+            raise AttributeError(f"{item} does not have attribute {name}") from err
 
 
 # JSON-LD Helper Functions
-def add_namespace(obj, prefix: str | None, iri: str | None):
+def add_namespace(obj: Any, prefix: str | None, iri: str | None) -> None:
     """Adds a namespace to the JSON-LD context
 
     Args:
@@ -80,9 +47,10 @@ def add_namespace(obj, prefix: str | None, iri: str | None):
     elif iri and prefix is None:
         raise ValueError("If iri is provided, prefix must also be provided")
 
-    obj.ld_context[prefix] = iri # type: ignore
+    obj.ld_context[prefix] = iri  # type: ignore[index]
 
-def validate_prefix(term: str | dict, prefix: str):
+
+def validate_prefix(term: str | dict[str, str], prefix: str) -> None:
     """Validates that a term is prefixed with a given prefix
 
     Args:
@@ -98,57 +66,57 @@ def validate_prefix(term: str | dict, prefix: str):
     elif isinstance(term, str) and not term.startswith(prefix + ":"):
         raise ValueError(f"Term {term} is not prefixed with {prefix}")
 
+
 # Model Definitions
 
-class Sample(BaseModel):
 
-    model_config: ConfigDict = ConfigDict( # type: ignore
-        validate_assignment = True,
-    ) # type: ignore
+class Sample(BaseModel):
+    model_config: ConfigDict = ConfigDict(  # type: ignore
+        validate_assignment=True,
+    )  # type: ignore
 
     id: str = Field(
         default=...,
         description="""Unique identifier of the sample.""",
     )
     chromatograms: list[Chromatogram] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="""Measured chromatogram and peaks.""",
     )
     initial_conditions: list[InitialCondition] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="""Initial conditions of the sample.""",
     )
-    timestamp: Optional[str] = Field(
+    timestamp: str | None = Field(
         default=None,
         description="""Timestamp of sample injection into the column.""",
     )
-    injection_volume: Optional[float] = Field(
+    injection_volume: float | None = Field(
         default=None,
         description="""Injection volume.""",
     )
-    dilution_factor: Optional[float] = Field(
-        default= 1,
+    dilution_factor: float | None = Field(
+        default=1,
         description="""Dilution factor.""",
     )
-    injection_volume_unit: Optional[UnitDefinitionAnnot] = Field(
+    injection_volume_unit: str | UnitDefinitionAnnot | None = Field(
         default=None,
         description="""Unit of injection volume.""",
     )
 
     # JSON-LD fields
     ld_id: str = Field(
-        serialization_alias="@id",
-        default_factory=lambda: "chromhander:Sample/" + str(uuid4())
+        serialization_alias="@id", default_factory=lambda: "chromhander:Sample/" + str(uuid4())
     )
     ld_type: list[str] = Field(
         serialization_alias="@type",
-        default_factory = lambda: [
+        default_factory=lambda: [
             "chromhander:Sample",
         ],
     )
-    ld_context: dict[str, str | dict] = Field(
+    ld_context: dict[str, str | dict[str, str]] = Field(
         serialization_alias="@context",
-        default_factory = lambda: {
+        default_factory=lambda: {
             "chromhander": "https://github.com/FAIRChemistry/chromhandler",
             "om": "http://www.ontology-of-units-of-measure.org/resource/om-2/",
             "qudt": "http://qudt.org/schema/qudt#/",
@@ -158,10 +126,10 @@ class Sample(BaseModel):
             "xsd": "http://www.w3.org/2001/XMLSchema#/",
             "Chromatogram": "https://github.com/FAIRChemistry/chromhandler#Chromatogram/",
             "InitialCondition": "https://github.com/FAIRChemistry/chromhandler#InitialCondition/",
-        }
+        },
     )
 
-    def filter_chromatograms(self, **kwargs) -> list[Chromatogram]:
+    def filter_chromatograms(self, **kwargs: Any) -> list[Chromatogram]:
         """Filters the chromatograms attribute based on the given kwargs
 
         Args:
@@ -173,7 +141,7 @@ class Sample(BaseModel):
 
         return FilterWrapper[Chromatogram](self.chromatograms, **kwargs).filter()
 
-    def filter_initial_conditions(self, **kwargs) -> list[InitialCondition]:
+    def filter_initial_conditions(self, **kwargs: Any) -> list[InitialCondition]:
         """Filters the initial_conditions attribute based on the given kwargs
 
         Args:
@@ -185,14 +153,9 @@ class Sample(BaseModel):
 
         return FilterWrapper[InitialCondition](self.initial_conditions, **kwargs).filter()
 
-
     def set_attr_term(
-        self,
-        attr: str,
-        term: str | dict,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+        self, attr: str, term: str | dict[str, str], prefix: str | None = None, iri: str | None = None
+    ) -> None:
         """Sets the term for a given attribute in the JSON-LD object
 
         Example:
@@ -213,7 +176,7 @@ class Sample(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
+        assert attr in self.__class__.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -221,12 +184,7 @@ class Sample(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_context[attr] = term
 
-    def add_type_term(
-        self,
-        term: str,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+    def add_type_term(self, term: str, prefix: str | None = None, iri: str | None = None) -> None:
         """Adds a term to the @type field of the JSON-LD object
 
         Example:
@@ -252,20 +210,19 @@ class Sample(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_type.append(term)
 
-
     def add_to_chromatograms(
         self,
         id: str,
         sample_id: str,
-        signal: list[float]= [],
-        time: list[float]= [],
-        peaks: list[Peak]= [],
-        wavelength: Optional[float]= None,
-        reaction_time: Optional[float]= None,
-        reaction_time_unit: Optional[UnitDefinitionAnnot]= None,
-        **kwargs,
-    ):
-        params = {
+        signal: list[float] = Field(default_factory=lambda: []),
+        time: list[float] = Field(default_factory=lambda: []),
+        peaks: list[Peak] = Field(default_factory=lambda: []),
+        wavelength: float | None = None,
+        reaction_time: float | None = None,
+        reaction_time_unit: str | UnitDefinitionAnnot | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        params: dict[str, Any] = {
             "id": id,
             "sample_id": sample_id,
             "signal": signal,
@@ -273,47 +230,37 @@ class Sample(BaseModel):
             "peaks": peaks,
             "wavelength": wavelength,
             "reaction_time": reaction_time,
-            "reaction_time_unit": reaction_time_unit
+            "reaction_time_unit": reaction_time_unit,
         }
 
         if "id" in kwargs:
             params["id"] = kwargs["id"]
 
-        self.chromatograms.append(
-            Chromatogram(**params)
-        )
+        self.chromatograms.append(Chromatogram(**params))
 
         return self.chromatograms[-1]
-
 
     def add_to_initial_conditions(
         self,
         molecule_id: str,
         init_conc: float,
-        conc_unit: UnitDefinitionAnnot,
-        **kwargs,
-    ):
-        params = {
-            "molecule_id": molecule_id,
-            "init_conc": init_conc,
-            "conc_unit": conc_unit
-        }
+        conc_unit: str | UnitDefinitionAnnot,
+        **kwargs: Any,
+    ) -> Any:
+        params: dict[str, Any] = {"molecule_id": molecule_id, "init_conc": init_conc, "conc_unit": conc_unit}
 
         if "id" in kwargs:
             params["id"] = kwargs["id"]
 
-        self.initial_conditions.append(
-            InitialCondition(**params)
-        )
+        self.initial_conditions.append(InitialCondition(**params))
 
         return self.initial_conditions[-1]
 
 
 class Chromatogram(BaseModel):
-
-    model_config: ConfigDict = ConfigDict( # type: ignore
-        validate_assignment = True,
-    ) # type: ignore
+    model_config: ConfigDict = ConfigDict(  # type: ignore
+        validate_assignment=True,
+    )  # type: ignore
 
     id: str = Field(
         default=...,
@@ -325,44 +272,43 @@ class Chromatogram(BaseModel):
         part of.""",
     )
     signal: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="""Signal values.""",
     )
     time: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="""Time values of the signal in minutes.""",
     )
     peaks: list[Peak] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="""Peaks in the signal.""",
     )
-    wavelength: Optional[float] = Field(
+    wavelength: float | None = Field(
         default=None,
         description="""Wavelength of the signal in nm.""",
     )
-    reaction_time: Optional[float] = Field(
+    reaction_time: float | None = Field(
         default=None,
         description="""Time relative to reaction start""",
     )
-    reaction_time_unit: Optional[UnitDefinitionAnnot] = Field(
+    reaction_time_unit: str | UnitDefinitionAnnot | None = Field(
         default=None,
         description="""Unit of reaction time""",
     )
 
     # JSON-LD fields
     ld_id: str = Field(
-        serialization_alias="@id",
-        default_factory=lambda: "chromhander:Chromatogram/" + str(uuid4())
+        serialization_alias="@id", default_factory=lambda: "chromhander:Chromatogram/" + str(uuid4())
     )
     ld_type: list[str] = Field(
         serialization_alias="@type",
-        default_factory = lambda: [
+        default_factory=lambda: [
             "chromhander:Chromatogram",
         ],
     )
-    ld_context: dict[str, str | dict] = Field(
+    ld_context: dict[str, str | dict[str, str]] = Field(
         serialization_alias="@context",
-        default_factory = lambda: {
+        default_factory=lambda: {
             "chromhander": "https://github.com/FAIRChemistry/chromhandler",
             "om": "http://www.ontology-of-units-of-measure.org/resource/om-2/",
             "qudt": "http://qudt.org/schema/qudt#/",
@@ -371,10 +317,10 @@ class Chromatogram(BaseModel):
             "unit": "http://qudt.org/vocab/unit#/",
             "xsd": "http://www.w3.org/2001/XMLSchema#/",
             "Peak": "https://github.com/FAIRChemistry/chromhandler#Peak/",
-        }
+        },
     )
 
-    def filter_peaks(self, **kwargs) -> list[Peak]:
+    def filter_peaks(self, **kwargs: Any) -> list[Peak]:
         """Filters the peaks attribute based on the given kwargs
 
         Args:
@@ -386,14 +332,9 @@ class Chromatogram(BaseModel):
 
         return FilterWrapper[Peak](self.peaks, **kwargs).filter()
 
-
     def set_attr_term(
-        self,
-        attr: str,
-        term: str | dict,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+        self, attr: str, term: str | dict[str, str], prefix: str | None = None, iri: str | None = None
+    ) -> None:
         """Sets the term for a given attribute in the JSON-LD object
 
         Example:
@@ -414,7 +355,7 @@ class Chromatogram(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
+        assert attr in self.__class__.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -422,12 +363,7 @@ class Chromatogram(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_context[attr] = term
 
-    def add_type_term(
-        self,
-        term: str,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+    def add_type_term(self, term: str, prefix: str | None = None, iri: str | None = None) -> None:
         """Adds a term to the @type field of the JSON-LD object
 
         Example:
@@ -453,26 +389,25 @@ class Chromatogram(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_type.append(term)
 
-
     def add_to_peaks(
         self,
         chromatogram_id: str,
         location: Estimate,
         area: Estimate,
-        skew: Optional[Estimate]= None,
-        width: Optional[Estimate]= None,
-        molecule_id: Optional[str]= None,
-        type: Optional[str]= None,
-        amplitude: Optional[float]= None,
-        max_signal: Optional[float]= None,
-        percent_area: Optional[float]= None,
-        tailing_factor: Optional[float]= None,
-        separation_factor: Optional[float]= None,
-        peak_start: Optional[float]= None,
-        peak_end: Optional[float]= None,
-        **kwargs,
-    ):
-        params = {
+        skew: Estimate | None = None,
+        width: Estimate | None = None,
+        molecule_id: str | None = None,
+        type: str | None = None,
+        amplitude: float | None = None,
+        max_signal: float | None = None,
+        percent_area: float | None = None,
+        tailing_factor: float | None = None,
+        separation_factor: float | None = None,
+        peak_start: float | None = None,
+        peak_end: float | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        params: dict[str, Any] = {
             "chromatogram_id": chromatogram_id,
             "location": location,
             "area": area,
@@ -486,64 +421,60 @@ class Chromatogram(BaseModel):
             "tailing_factor": tailing_factor,
             "separation_factor": separation_factor,
             "peak_start": peak_start,
-            "peak_end": peak_end
+            "peak_end": peak_end,
         }
 
         if "id" in kwargs:
             params["id"] = kwargs["id"]
 
-        self.peaks.append(
-            Peak(**params)
-        )
+        self.peaks.append(Peak(**params))
 
         return self.peaks[-1]
 
 
 class Estimate(BaseModel):
-
-    model_config: ConfigDict = ConfigDict( # type: ignore
-        validate_assignment = True,
-    ) # type: ignore
+    model_config: ConfigDict = ConfigDict(  # type: ignore
+        validate_assignment=True,
+    )  # type: ignore
 
     mean: float = Field(
         default=...,
         description="""Mean value of the estimate.""",
     )
-    median: Optional[float] = Field(
+    median: float | None = Field(
         default=None,
         description="""Median of the estimate.""",
     )
-    std: Optional[float] = Field(
+    std: float | None = Field(
         default=None,
         description="""One sigma standard deviation of the estimate.""",
     )
-    q05: Optional[float] = Field(
+    q05: float | None = Field(
         default=None,
         description="""5th percentile of the estimate.""",
     )
-    q95: Optional[float] = Field(
+    q95: float | None = Field(
         default=None,
         description="""95th percentile of the estimate.""",
     )
     samples: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="""Samples from the posterior distribution.""",
     )
 
     # JSON-LD fields
     ld_id: str = Field(
-        serialization_alias="@id",
-        default_factory=lambda: "chromhander:Estimate/" + str(uuid4())
+        serialization_alias="@id", default_factory=lambda: "chromhander:Estimate/" + str(uuid4())
     )
     ld_type: list[str] = Field(
         serialization_alias="@type",
-        default_factory = lambda: [
+        default_factory=lambda: [
             "chromhander:Estimate",
         ],
     )
-    ld_context: dict[str, str | dict] = Field(
+    ld_context: dict[str, str | dict[str, str]] = Field(
         serialization_alias="@context",
-        default_factory = lambda: {
+        default_factory=lambda: {
             "chromhander": "https://github.com/FAIRChemistry/chromhandler",
             "om": "http://www.ontology-of-units-of-measure.org/resource/om-2/",
             "qudt": "http://qudt.org/schema/qudt#/",
@@ -551,17 +482,12 @@ class Estimate(BaseModel):
             "schema": "http://schema.org/",
             "unit": "http://qudt.org/vocab/unit#/",
             "xsd": "http://www.w3.org/2001/XMLSchema#/",
-        }
+        },
     )
 
-
     def set_attr_term(
-        self,
-        attr: str,
-        term: str | dict,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+        self, attr: str, term: str | dict[str, str], prefix: str | None = None, iri: str | None = None
+    ) -> None:
         """Sets the term for a given attribute in the JSON-LD object
 
         Example:
@@ -582,7 +508,7 @@ class Estimate(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
+        assert attr in self.__class__.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -590,12 +516,7 @@ class Estimate(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_context[attr] = term
 
-    def add_type_term(
-        self,
-        term: str,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+    def add_type_term(self, term: str, prefix: str | None = None, iri: str | None = None) -> None:
         """Adds a term to the @type field of the JSON-LD object
 
         Example:
@@ -623,10 +544,9 @@ class Estimate(BaseModel):
 
 
 class Peak(BaseModel):
-
-    model_config: ConfigDict = ConfigDict( # type: ignore
-        validate_assignment = True,
-    ) # type: ignore
+    model_config: ConfigDict = ConfigDict(  # type: ignore
+        validate_assignment=True,
+    )  # type: ignore
 
     chromatogram_id: str = Field(
         default=...,
@@ -641,66 +561,63 @@ class Peak(BaseModel):
         default=...,
         description="""Area of the peak.""",
     )
-    skew: Optional[Estimate] = Field(
+    skew: Estimate | None = Field(
         default=None,
         description="""Skew of the peak.""",
     )
-    width: Optional[Estimate] = Field(
+    width: Estimate | None = Field(
         default=None,
         description="""Width of the peak.""",
     )
-    molecule_id: Optional[str] = Field(
+    molecule_id: str | None = Field(
         default=None,
         description="""Identifier of the molecule.""",
     )
-    type: Optional[str] = Field(
+    type: str | None = Field(
         default=None,
         description="""Type of peak (baseline-baseline / baseline-
         valley / ...)""",
     )
-    amplitude: Optional[float] = Field(
+    amplitude: float | None = Field(
         default=None,
         description="""Amplitude of the peak.""",
     )
-    max_signal: Optional[float] = Field(
+    max_signal: float | None = Field(
         default=None,
         description="""Maximum signal of the peak.""",
     )
-    percent_area: Optional[float] = Field(
+    percent_area: float | None = Field(
         default=None,
         description="""Percent area of the peak.""",
     )
-    tailing_factor: Optional[float] = Field(
+    tailing_factor: float | None = Field(
         default=None,
         description="""Tailing factor of the peak.""",
     )
-    separation_factor: Optional[float] = Field(
+    separation_factor: float | None = Field(
         default=None,
         description="""Separation factor of the peak.""",
     )
-    peak_start: Optional[float] = Field(
+    peak_start: float | None = Field(
         default=None,
         description="""Start time of the peak.""",
     )
-    peak_end: Optional[float] = Field(
+    peak_end: float | None = Field(
         default=None,
         description="""End time of the peak.""",
     )
 
     # JSON-LD fields
-    ld_id: str = Field(
-        serialization_alias="@id",
-        default_factory=lambda: "chromhander:Peak/" + str(uuid4())
-    )
+    ld_id: str = Field(serialization_alias="@id", default_factory=lambda: "chromhander:Peak/" + str(uuid4()))
     ld_type: list[str] = Field(
         serialization_alias="@type",
-        default_factory = lambda: [
+        default_factory=lambda: [
             "chromhander:Peak",
         ],
     )
-    ld_context: dict[str, str | dict] = Field(
+    ld_context: dict[str, str | dict[str, str]] = Field(
         serialization_alias="@context",
-        default_factory = lambda: {
+        default_factory=lambda: {
             "chromhander": "https://github.com/FAIRChemistry/chromhandler",
             "om": "http://www.ontology-of-units-of-measure.org/resource/om-2/",
             "qudt": "http://qudt.org/schema/qudt#/",
@@ -709,20 +626,12 @@ class Peak(BaseModel):
             "unit": "http://qudt.org/vocab/unit#/",
             "xsd": "http://www.w3.org/2001/XMLSchema#/",
             "Estimate": "https://github.com/FAIRChemistry/chromhandler#Estimate/",
-            "Estimate": "https://github.com/FAIRChemistry/chromhandler#Estimate/",
-            "Estimate": "https://github.com/FAIRChemistry/chromhandler#Estimate/",
-            "Estimate": "https://github.com/FAIRChemistry/chromhandler#Estimate/",
-        }
+        },
     )
 
-
     def set_attr_term(
-        self,
-        attr: str,
-        term: str | dict,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+        self, attr: str, term: str | dict[str, str], prefix: str | None = None, iri: str | None = None
+    ) -> None:
         """Sets the term for a given attribute in the JSON-LD object
 
         Example:
@@ -743,7 +652,7 @@ class Peak(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
+        assert attr in self.__class__.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -751,12 +660,7 @@ class Peak(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_context[attr] = term
 
-    def add_type_term(
-        self,
-        term: str,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+    def add_type_term(self, term: str, prefix: str | None = None, iri: str | None = None) -> None:
         """Adds a term to the @type field of the JSON-LD object
 
         Example:
@@ -784,10 +688,9 @@ class Peak(BaseModel):
 
 
 class InitialCondition(BaseModel):
-
-    model_config: ConfigDict = ConfigDict( # type: ignore
-        validate_assignment = True,
-    ) # type: ignore
+    model_config: ConfigDict = ConfigDict(  # type: ignore
+        validate_assignment=True,
+    )  # type: ignore
 
     molecule_id: str = Field(
         default=...,
@@ -797,25 +700,24 @@ class InitialCondition(BaseModel):
         default=...,
         description="""Initial concentration of the molecule.""",
     )
-    conc_unit: UnitDefinitionAnnot = Field(
+    conc_unit: str | UnitDefinitionAnnot = Field(
         default=...,
         description="""Unit of the concentration.""",
     )
 
     # JSON-LD fields
     ld_id: str = Field(
-        serialization_alias="@id",
-        default_factory=lambda: "chromhander:InitialCondition/" + str(uuid4())
+        serialization_alias="@id", default_factory=lambda: "chromhander:InitialCondition/" + str(uuid4())
     )
     ld_type: list[str] = Field(
         serialization_alias="@type",
-        default_factory = lambda: [
+        default_factory=lambda: [
             "chromhander:InitialCondition",
         ],
     )
-    ld_context: dict[str, str | dict] = Field(
+    ld_context: dict[str, str | dict[str, str]] = Field(
         serialization_alias="@context",
-        default_factory = lambda: {
+        default_factory=lambda: {
             "chromhander": "https://github.com/FAIRChemistry/chromhandler",
             "om": "http://www.ontology-of-units-of-measure.org/resource/om-2/",
             "qudt": "http://qudt.org/schema/qudt#/",
@@ -823,17 +725,12 @@ class InitialCondition(BaseModel):
             "schema": "http://schema.org/",
             "unit": "http://qudt.org/vocab/unit#/",
             "xsd": "http://www.w3.org/2001/XMLSchema#/",
-        }
+        },
     )
 
-
     def set_attr_term(
-        self,
-        attr: str,
-        term: str | dict,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+        self, attr: str, term: str | dict[str, str], prefix: str | None = None, iri: str | None = None
+    ) -> None:
         """Sets the term for a given attribute in the JSON-LD object
 
         Example:
@@ -854,7 +751,7 @@ class InitialCondition(BaseModel):
             AssertionError: If the attribute is not found in the model
         """
 
-        assert attr in self.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
+        assert attr in self.__class__.model_fields, f"Attribute {attr} not found in {self.__class__.__name__}"
 
         if prefix:
             validate_prefix(term, prefix)
@@ -862,12 +759,7 @@ class InitialCondition(BaseModel):
         add_namespace(self, prefix, iri)
         self.ld_context[attr] = term
 
-    def add_type_term(
-        self,
-        term: str,
-        prefix: str | None = None,
-        iri: str | None = None
-    ):
+    def add_type_term(self, term: str, prefix: str | None = None, iri: str | None = None) -> None:
         """Adds a term to the @type field of the JSON-LD object
 
         Example:

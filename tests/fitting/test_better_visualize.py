@@ -1,10 +1,11 @@
 """Tests for better_visualize module."""
-import pytest
+
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 
-from chromhandler.fitting.better_visualize import _validate_hex_colors, plot_fit
 from chromhandler.fitting.better_fitter import PosteriorCurves
+from chromhandler.fitting.better_visualize import _validate_hex_colors, plot_fit
 
 
 def test_validate_hex_colors_valid():
@@ -92,10 +93,7 @@ def test_plot_fit_with_custom_colors(sample_posterior_curves):
     time, signal, peaks, curves = sample_posterior_curves
 
     # Should not raise with valid colors
-    fig, axes = plot_fit(
-        time, signal, peaks, curves,
-        colors=["#FF5733", "#33FF57"]
-    )
+    fig, axes = plot_fit(time, signal, peaks, curves, colors=["#FF5733", "#33FF57"])
     assert fig is not None
     plt.close(fig)
 
@@ -103,12 +101,14 @@ def test_plot_fit_with_custom_colors(sample_posterior_curves):
 def test_plot_fit_colors_wrong_length(sample_posterior_curves):
     """Test that plot_fit raises ValueError for mismatched colors length."""
     time, signal, peaks, curves = sample_posterior_curves
-    n_peak = len(peaks)
 
     with pytest.raises(ValueError, match="colors must have length"):
         plot_fit(
-            time, signal, peaks, curves,
-            colors=["#FF5733"]  # Wrong length
+            time,
+            signal,
+            peaks,
+            curves,
+            colors=["#FF5733"],  # Wrong length
         )
 
 
@@ -118,10 +118,7 @@ def test_plot_fit_custom_colors_rendering(sample_posterior_curves):
     n_peak = len(peaks)
     colors = ["#FF0000", "#00FF00", "#0000FF"][:n_peak]
 
-    fig, axes = plot_fit(
-        time, signal, peaks, curves,
-        colors=colors
-    )
+    fig, axes = plot_fit(time, signal, peaks, curves, colors=colors)
 
     # Check that figure was created
     assert fig is not None

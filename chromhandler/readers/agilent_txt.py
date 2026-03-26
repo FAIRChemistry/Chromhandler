@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from loguru import logger
 from mdmodels.units.annotation import UnitDefinition
@@ -33,7 +33,7 @@ class AgilentTXTReader(AbstractReader):
         'Report.TXT' files {len(self.file_paths)}.
         """
         measurements = []
-        for file, reaction_time in zip(self.file_paths, self.values):
+        for file, reaction_time in zip(self.file_paths, self.values, strict=False):
             file_content = self._read_file(file)
             measurement = self._parse_measurement(
                 file_content, reaction_time, self.unit, file
@@ -155,7 +155,7 @@ class AgilentTXTReader(AbstractReader):
 
         return signal
 
-    def _extract_peak(self, line: str) -> Dict[str, Any]:
+    def _extract_peak(self, line: str) -> dict[str, Any]:
         """Extracts peak information from a line of text."""
 
         columns = line.split()
@@ -181,7 +181,7 @@ class AgilentTXTReader(AbstractReader):
                 "area_percent": float(columns[6]),
             }
 
-    def _extract_peak_units(self, line: str) -> Dict[str, Any]:
+    def _extract_peak_units(self, line: str) -> dict[str, Any]:
         """Extracts the units of the peak data."""
         unit_slice_dict = {
             "retention_time_unit": slice(5, 12),

@@ -1,7 +1,7 @@
 import re
 from io import StringIO
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar
 
 import pandas as pd
 
@@ -15,8 +15,8 @@ class ShimadzuReader(AbstractReader):
     def model_post_init(self, __context: Any) -> None:
         if not self.file_paths:
             self._get_file_paths()
-        self._detector_id: Optional[str] = None
-        self._channel_ids: List[str] = []
+        self._detector_id: str | None = None
+        self._channel_ids: list[str] = []
 
     def read(self) -> list[Measurement]:
         """Reads the chromatographic data from the specified file.
@@ -135,7 +135,7 @@ class ShimadzuReader(AbstractReader):
         try:
             return Path(path).read_text(encoding="ISO-8859-1")
         except UnicodeDecodeError:
-            raise IOError(f"Could not read file {path}")
+            raise OSError(f"Could not read file {path}")
 
     def create_sections(self, file_content: str) -> dict:
         """Parse a Shimadzu ASCII-export file into sections."""
@@ -143,12 +143,12 @@ class ShimadzuReader(AbstractReader):
         # Split file into sections using section header pattern
         section_splits = re.split(self.SECTION_PATTERN, file_content)
         if len(section_splits[0]) != 0:
-            raise IOError("The file should start with a section header")
+            raise OSError("The file should start with a section header")
 
         section_names = section_splits[1::2]
         section_contents = [content for content in section_splits[2::2]]
 
-        return dict(zip(section_names, section_contents))
+        return dict(zip(section_names, section_contents, strict=False))
 
     def get_section_dict(self, section: str, nrows: int | None = None) -> dict:
         """Parse the metadata in a section as keys-values."""
@@ -243,7 +243,7 @@ class ShimadzuReader(AbstractReader):
 
         return peaks
 
-    def _get_available_detectors(self, sections: Dict[str, str]) -> None:
+    def _get_available_detectors(self, sections: dict[str, str]) -> None:
         configuration = sections.get("Configuration")
         assert configuration, "No configuration section found."
 

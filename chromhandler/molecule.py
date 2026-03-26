@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
-from calipytion.model import Calibration
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
@@ -28,7 +27,7 @@ class LinearCalibration(BaseModel):
 
     The regression direction is::
 
-        area = slope × conc (+ intercept)
+        area = slope * conc (+ intercept)
 
     so the inverse (area → concentration) is::
 
@@ -84,11 +83,11 @@ class LinearCalibration(BaseModel):
 
     # --- Posterior regression distributions ---
     slope_samples: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="Per-draw OLS slopes (non-empty when posterior regression was performed).",
     )
     intercept_samples: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="Per-draw OLS intercepts, parallel to slope_samples.",
     )
 
@@ -101,11 +100,11 @@ class LinearCalibration(BaseModel):
 
     # --- Raw data (useful for plotting the calibration curve) ---
     concentrations: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="Known concentrations used for calibration.",
     )
     areas_mean: list[float] = Field(
-        default_factory=list,
+        default_factory=lambda: [],
         description="Mean areas per standard, in the same order as concentrations.",
     )
 
@@ -114,7 +113,7 @@ class LinearCalibration(BaseModel):
         area: float,
         extrapolate: bool = False,
         n_samples: int | None = None,
-    ) -> "Estimate":
+    ) -> Estimate:
         """Convert a peak area to a concentration :class:`~chromhandler.model.Estimate`.
 
         When posterior regression distributions are available
@@ -187,19 +186,22 @@ class Molecule(BaseModel):
     name: str = Field(
         description="Name of the molecule",
     )
-    standard: Optional[Calibration] = Field(
+    standard: LinearCalibration | None = Field(
         description="Standard associated with the molecule",
         default=None,
     )
     constant: bool = Field(
-        description="Boolean indicating whether the molecule concentration is constant throughout the experiment",
+        description=(
+            "Boolean indicating whether the molecule concentration is constant "
+            "throughout the experiment"
+        ),
         default=False,
     )
     internal_standard: bool = Field(
         description="Boolean indicating whether the molecule is an internal standard",
         default=False,
     )
-    calibration: Optional[LinearCalibration] = Field(
+    calibration: LinearCalibration | None = Field(
         default=None,
         description="Linear calibration model fitted from t=0 calibration standards.",
     )
@@ -215,7 +217,7 @@ class Molecule(BaseModel):
             Molecule: The created Molecule instance.
         """
 
-        with open(path, "r") as f:
+        with open(path) as f:
             data = json.load(f)
 
         return cls(**data)

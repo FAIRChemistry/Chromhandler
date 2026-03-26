@@ -32,7 +32,7 @@ from jax.scipy.special import expit, log_ndtr
 
 numpyro.set_host_device_count(8)
 
-# Mode → location shift: delta × sqrt(2/π), delta = alpha / sqrt(1 + alpha²)
+# Mode → location shift: delta x sqrt(2/π), delta = alpha / sqrt(1 + alpha²)
 _SQRT_2_OVER_PI: float = float(jnp.sqrt(2.0 / jnp.pi))
 _ALPHA_MAX: float = 2.5  # canonical hard bound via tanh transform
 _ALPHA_BOUND_EPS: float = 1e-4
@@ -45,12 +45,10 @@ _AREA_LOG_SIGMA: float = 0.4
 _SH_AREA_LOG_SIGMA: float = 0.3
 
 # Free-doublet separation: sigmoid-bounded hierarchy
-_FREE_SEP_MIN_SIGMA_MULT: float = 0.5  # sep_min = mult × sigma_loc
-_FREE_SEP_TYPICAL_SIGMA_MULT: float = 1.5  # target typical = mult × sigma_loc
-_FREE_SEP_MAX_WINDOW_FRAC: float = 0.5  # sep_max = frac × window_width
-_FREE_SEP_TRACE_SCALE_PRIOR: float = (
-    0.5  # HalfNormal scale for per-peak trace variation
-)
+_FREE_SEP_MIN_SIGMA_MULT: float = 0.5  # sep_min = mult x sigma_loc
+_FREE_SEP_TYPICAL_SIGMA_MULT: float = 1.5  # target typical = mult x sigma_loc
+_FREE_SEP_MAX_WINDOW_FRAC: float = 0.5  # sep_max = frac x window_width
+_FREE_SEP_TRACE_SCALE_PRIOR: float = 0.5  # HalfNormal scale for per-peak trace variation
 
 # Artefact area hierarchy
 _ARTEFACT_AREA_TRACE_LOG_SCALE: float = 0.15  # ~15% CV per-trace variation
@@ -69,9 +67,9 @@ def log_skew_normal_pdf(
 ) -> jnp.ndarray:
     """Numerically stable log skew-normal density.
 
-    Parameters ``xi`` must be the skew-normal **location parameter ξ**, not the
+    Parameters ``xi`` must be the skew-normal **location parameter xi**, not the
     component modes. The model converts sampled component modes internally via
-    ``ξ = mode − σ·δ·√(2/π)`` before calling this density.
+    ``xi = mode - sigma*delta*sqrt(2/pi)`` before calling this density.
 
     Returns
     -------
@@ -171,24 +169,9 @@ def _bounded_separation_prior_to_raw(
     )
     raw_loc = jnp.log(frac) - jnp.log1p(-frac)  # logit
     derivative = sep_range * frac * (1.0 - frac)  # delta method
-    raw_scale = jnp.asarray(target_scale, dtype=jnp.float32) / jnp.maximum(
-        derivative, scale_floor
-    )
+    raw_scale = jnp.asarray(target_scale, dtype=jnp.float32) / jnp.maximum(derivative, scale_floor)
     raw_scale = jnp.maximum(raw_scale, scale_floor)
     return raw_loc, raw_scale
-
-
-def _lognormal_params_from_linear(
-    loc: jnp.ndarray,
-    scale: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Map linear-space location/scale summaries to LogNormal parameters."""
-    loc_safe = jnp.maximum(jnp.asarray(loc, dtype=jnp.float32), 1e-6)
-    scale_safe = jnp.maximum(jnp.asarray(scale, dtype=jnp.float32), 1e-6)
-    log_var = jnp.log1p((scale_safe / loc_safe) ** 2)
-    log_scale = jnp.maximum(jnp.sqrt(log_var), 1e-4)
-    log_loc = jnp.log(loc_safe) - 0.5 * log_var
-    return log_loc, log_scale
 
 
 def _broadcast_peak_to_traces(
@@ -236,8 +219,8 @@ def model(
     artefact_peak_index: jnp.ndarray,  # [n_artefact]  indices into peaks
     free_peak_index: jnp.ndarray,  # [n_free]  indices into peaks
     nonfree_peak_index: jnp.ndarray,  # [n_nonfree] indices into peaks
-    free_fixed_local_index: jnp.ndarray,  # [n_free_fixed]  positions within n_free axis, vary_separation=False
-    free_vary_local_index: jnp.ndarray,  # [n_free_vary]   positions within n_free axis, vary_separation=True
+    free_fixed_local_index: jnp.ndarray,  # [n_free_fixed]  local indices, vary_separation=False
+    free_vary_local_index: jnp.ndarray,  # [n_free_vary]   local indices, vary_separation=True
     # --- peak priors (from geometric_priors_to_arrays) ---
     apex_loc: jnp.ndarray,  # [n_peak]
     apex_scale: jnp.ndarray,  # [n_peak]
@@ -275,9 +258,7 @@ def model(
     nonfree_idx = jnp.asarray(nonfree_peak_index, dtype=jnp.int32)
     free_vary_local = jnp.asarray(free_vary_local_index, dtype=jnp.int32)
     free_mask = mode_code == _MODE_FREE_DOUBLET
-    nonfree_position = (
-        jnp.cumsum((mode_code != _MODE_FREE_DOUBLET).astype(jnp.int32)) - 1
-    )
+    nonfree_position = jnp.cumsum((mode_code != _MODE_FREE_DOUBLET).astype(jnp.int32)) - 1
     apex_loc_arr = jnp.asarray(apex_loc, dtype=jnp.float32)
     apex_scale_safe = jnp.maximum(jnp.asarray(apex_scale, dtype=jnp.float32), 1e-6)
     trace_shift_scale_safe = jnp.maximum(
@@ -294,9 +275,7 @@ def model(
     # Hard bounds prevent sigma from escaping to implausible values under VI.
     log_sigma_lo = jnp.log(0.5 * sigma_prior_loc)
     log_sigma_hi = jnp.log(2.0 * sigma_prior_loc)
-    log_sigma_base = numpyro.sample(
-        "log_sigma_base", dist.Uniform(log_sigma_lo, log_sigma_hi)
-    )  # [n_peak]
+    log_sigma_base = numpyro.sample("log_sigma_base", dist.Uniform(log_sigma_lo, log_sigma_hi))  # [n_peak]
     sigma_base = numpyro.deterministic("sigma_base", jnp.exp(log_sigma_base))
     if n_artefact > 0:
         # LogUniform bounded by the same reference as the dominant sigma for that peak.
@@ -326,12 +305,8 @@ def model(
         alpha_loc,
         jnp.maximum(jnp.asarray(alpha_scale, dtype=jnp.float32), 1e-6),
     )
-    alpha_raw_base = numpyro.sample(
-        "alpha_raw_base", dist.Normal(alpha_raw_loc, alpha_raw_scale)
-    )  # [n_peak]
-    alpha_base = numpyro.deterministic(
-        "alpha_base", _ALPHA_MAX * jnp.tanh(alpha_raw_base)
-    )  # [n_peak]
+    alpha_raw_base = numpyro.sample("alpha_raw_base", dist.Normal(alpha_raw_loc, alpha_raw_scale))  # [n_peak]
+    alpha_base = numpyro.deterministic("alpha_base", _ALPHA_MAX * jnp.tanh(alpha_raw_base))  # [n_peak]
     if n_free > 0:
         alpha_raw_r_free = numpyro.sample(
             "alpha_raw_r_free",
@@ -361,7 +336,7 @@ def model(
     )
     apex = numpyro.deterministic(
         "apex",
-        apex_loc_arr[None, :] + trace_shift[:, None] + apex_residual,
+        apex_loc_arr[None, :] + trace_shift[:, None] + apex_residual,  # type: ignore[reportIndexIssue]
     )
 
     if n_nonfree > 0:
@@ -446,12 +421,8 @@ def model(
                 sep_typical_raw[None, free_vary_local]
                 + sep_trace_scale[None, :] * separation_free_trace_offset
             )
-            sep_vary = sep_min[None, free_vary_local] + sep_range[
-                None, free_vary_local
-            ] * expit(sep_raw_vary)
-            separation_free_arr = separation_free_arr.at[:, free_vary_local].set(
-                sep_vary
-            )
+            sep_vary = sep_min[None, free_vary_local] + sep_range[None, free_vary_local] * expit(sep_raw_vary)
+            separation_free_arr = separation_free_arr.at[:, free_vary_local].set(sep_vary)
 
         separation_free = numpyro.deterministic("separation_free", separation_free_arr)
 
@@ -571,15 +542,15 @@ def model(
     # baseline level *within the observed region* rather than an extrapolation
     # to x = 0.  Without centring, intercept and slope share a near-perfect
     # anti-correlation ridge (a change of Δb₁ in slope requires
-    # Δb₀ ≈ −x_mid·Δb₁ ≈ −3·Δb₁ to keep the baseline constant), making both
+    # Δb₀ ≈ -x_mid*Δb₁ ≈ -3*Δb₁ to keep the baseline constant), making both
     # parameters essentially unidentifiable from windowed data.
     x_mid = 0.5 * (jnp.min(window_lo) + jnp.max(window_hi))  # scalar
 
     # Transform the caller's x = 0 prior to the x = x_mid basis:
     #   E[b₀ + b₁·x_mid]   = b₀_loc + b₁_loc·x_mid
     #   Var[b₀ + b₁·x_mid] ≈ Var(b₀) + x_mid²·Var(b₁)
-    # (conservative: ignores the negative b₀–b₁ covariance in the linear fit,
-    # so the prior is slightly wider than optimal — harmless, the likelihood
+    # (conservative: ignores the negative b0-b1 covariance in the linear fit,
+    # so the prior is slightly wider than optimal - harmless, the likelihood
     # tightens it).
     baseline_mid_loc = baseline_intercept_loc + baseline_slope_loc * x_mid
     baseline_mid_scale = jnp.sqrt(

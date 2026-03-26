@@ -31,12 +31,10 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
-from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # Result dataclass
@@ -108,7 +106,7 @@ shift_signal_vmap: jnp.ndarray = jax.vmap(
 
 def _compute_template(
     shifted_signal: jnp.ndarray,   # [C, N]
-    mask: Optional[jnp.ndarray],   # [C, N] bool or None
+    mask: jnp.ndarray | None,   # [C, N] bool or None
 ) -> jnp.ndarray:                   # [N]
     """Per-timepoint template from aligned traces, optionally masked."""
     if mask is None:
@@ -191,7 +189,7 @@ def _coarse_shift_init(
 def alignment_loss(
     shifts_samples: jnp.ndarray,   # [C]
     signal: jnp.ndarray,           # [C, N]
-    mask: Optional[jnp.ndarray] = None,
+    mask: jnp.ndarray | None = None,
     center_weight: float = 1e3,
 ) -> jnp.ndarray:
     """MSE alignment loss for shift parameters.
@@ -232,7 +230,7 @@ def alignment_loss(
 def _adam_scan(
     initial_params: jnp.ndarray,   # [C]
     signal: jnp.ndarray,            # [C, N]
-    mask: Optional[jnp.ndarray],   # [C, N] bool or None
+    mask: jnp.ndarray | None,   # [C, N] bool or None
     *,
     lr: float,
     n_steps: int,
@@ -284,7 +282,7 @@ def _adam_scan(
 def _multistart_optimize(
     coarse_init: jnp.ndarray,       # [C]
     signal: jnp.ndarray,             # [C, N]
-    mask: Optional[jnp.ndarray],    # [C, N] bool or None
+    mask: jnp.ndarray | None,    # [C, N] bool or None
     *,
     n_starts: int,
     sigma_perturb: float,
@@ -311,13 +309,13 @@ def _multistart_optimize(
     if max_shift_samples is not None:
         all_inits = jnp.clip(all_inits, -max_shift_samples, max_shift_samples)
 
-    adam_kwargs = dict(
-        lr=lr,
-        n_steps=n_steps,
-        center_weight=center_weight,
-        max_shift_samples=max_shift_samples,
-        enforce_zero_mean=enforce_zero_mean,
-    )
+    adam_kwargs = {
+        "lr": lr,
+        "n_steps": n_steps,
+        "center_weight": center_weight,
+        "max_shift_samples": max_shift_samples,
+        "enforce_zero_mean": enforce_zero_mean,
+    }
 
     run_one = functools.partial(_adam_scan, signal=signal, mask=mask, **adam_kwargs)
 
@@ -333,12 +331,12 @@ def _multistart_optimize(
 
 def align_chromatograms(
     signal: jnp.ndarray,
-    mask: Optional[jnp.ndarray] = None,
+    mask: jnp.ndarray | None = None,
     *,
     lr: float = 1e-2,
     n_steps: int = 500,
     center_weight: float = 1e3,
-    max_shift_samples: Optional[float] = None,
+    max_shift_samples: float | None = None,
     enforce_zero_mean: bool = True,
     n_starts: int = 16,
     sigma_perturb: float = 3.0,
@@ -349,7 +347,7 @@ def align_chromatograms(
     Parameters
     ----------
     signal : [C, N]
-        Signal matrix (chromatograms × timepoints).
+        Signal matrix (chromatograms x timepoints).
     mask : [C, N] bool or None
         Restrict alignment to these timepoints (e.g. peak windows + baseline
         regions).  None = use all finite points.
@@ -387,7 +385,7 @@ def align_chromatograms(
     signal_clean = jnp.where(finite, signal, jnp.float32(0.0))
 
     if mask is None:
-        mask_clean: Optional[jnp.ndarray] = finite
+        mask_clean: jnp.ndarray | None = finite
     else:
         mask_arr = jnp.asarray(mask, dtype=bool)
         if mask_arr.shape != signal.shape:
@@ -412,13 +410,13 @@ def align_chromatograms(
         alignment_loss(coarse_init_jax, signal_clean, mask=mask_clean, center_weight=center_weight)
     )
 
-    adam_kwargs = dict(
-        lr=lr,
-        n_steps=n_steps,
-        center_weight=center_weight,
-        max_shift_samples=max_shift_samples,
-        enforce_zero_mean=enforce_zero_mean,
-    )
+    adam_kwargs = {
+        "lr": lr,
+        "n_steps": n_steps,
+        "center_weight": center_weight,
+        "max_shift_samples": max_shift_samples,
+        "enforce_zero_mean": enforce_zero_mean,
+    }
 
     if n_starts == 1:
         best_shifts, _ = _adam_scan(coarse_init_jax, signal_clean, mask_clean, **adam_kwargs)
