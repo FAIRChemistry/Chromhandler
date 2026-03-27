@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+from pathlib import Path  # noqa: TC003 - used at runtime for path.read_text()
+from typing import Any, cast
 
 from loguru import logger
 
@@ -76,7 +76,7 @@ class ASMReader:
             )
 
         try:
-            meas_document = doc[0]["measurement document"]
+            meas_document: Any = doc[0]["measurement document"]
         except KeyError:
             meas_document = doc[0]["measurement aggregate document"][
                 "measurement document"
@@ -85,6 +85,7 @@ class ASMReader:
         if isinstance(meas_document, list):
             meas_document = meas_document[0]
 
+        meas_document = cast("dict[str, Any]", meas_document)
         signal, time = self._extract_signal_time(meas_document, path)
         peaks = self._extract_lc_peaks(doc[0], meas_document, path, chromatogram_id)
 
@@ -109,10 +110,11 @@ class ASMReader:
                 f"More than one chromatogram found in '{path}'. Using the first one."
             )
 
-        meas_document = doc[0]["measurement aggregate document"]["measurement document"]
+        meas_document: Any = doc[0]["measurement aggregate document"]["measurement document"]
         if isinstance(meas_document, list):
             meas_document = meas_document[0]
 
+        meas_document = cast("dict[str, Any]", meas_document)
         signal, time = self._extract_signal_time(meas_document, path)
         peaks = self._extract_gc_peaks(meas_document, path, chromatogram_id)
 
@@ -170,7 +172,7 @@ class ASMReader:
         for p in raw_peaks:
             try:
                 peaks.append(self._map_peak(p, chromatogram_id))
-            except (KeyError, TypeError):
+            except (KeyError, TypeError):  # noqa: PERF203 - expected to skip malformed peaks
                 logger.debug(f"Skipping malformed peak in '{path}'")
                 continue
         return peaks
