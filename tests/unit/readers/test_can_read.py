@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 FIXTURE_ROOT = Path(__file__).parent.parent.parent / "fixtures"
 
 
