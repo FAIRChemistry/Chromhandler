@@ -45,9 +45,8 @@ class KnauerTXTReader:
             if len(lines) < 5:
                 return False
             return all(
-                lines[i].split()[0] == word
+                bool(lines[i].split()) and lines[i].split()[0] == word
                 for i, word in enumerate(_KNAUER_HEADER_WORDS)
-                if lines[i].split()
             )
         except OSError:
             return False

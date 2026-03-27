@@ -51,3 +51,8 @@ class TestKnauerCanRead:
         from chromhandler.readers.knauer_txt import KnauerTXTReader
         (tmp_path / "data.json").touch()
         assert KnauerTXTReader.can_read(tmp_path) is False
+
+    def test_rejects_blank_header_lines(self, tmp_path: Path) -> None:
+        from chromhandler.readers.knauer_txt import KnauerTXTReader
+        (tmp_path / "data.txt").write_text("\n\n\n\n\n")
+        assert KnauerTXTReader.can_read(tmp_path) is False
