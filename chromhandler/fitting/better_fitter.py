@@ -37,7 +37,10 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from chromhandler.model import Peak
 
 import jax
 import jax.numpy as jnp
@@ -2350,7 +2353,7 @@ class BetterFitter:
         *,
         quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
         n_samples: int | None = None,
-    ) -> list:
+    ) -> list[Peak]:
         """Convert posterior samples into Peak objects with Estimate area/location.
 
         One Peak is produced per (trace, annotation-peak) pair, aggregated

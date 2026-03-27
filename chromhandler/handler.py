@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -18,6 +17,7 @@ from .enzymeml import handler_to_enzymeml_document
 from .model import Chromatogram, InitialCondition, Peak, Sample
 from .molecule import CalibrationMethod, LinearCalibration, Molecule
 from .protein import Protein
+from .readers.utils import parse_reaction_time
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -27,10 +27,6 @@ if TYPE_CHECKING:
 
     from .fitting.better_fitter import BetterFitter
     from .readers.abstractreader import AbstractReader
-
-# Matches numeric value + unit at the end (or anywhere) of a filename stem,
-# e.g. "CV10_120min", "sample_30sec", "run_2h".
-_TIME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(min|sec|h)\b", re.IGNORECASE)
 
 
 def _coerce_molecule_registry(v: object) -> PreserveKeysDottedDict:
@@ -121,41 +117,6 @@ def _fit_linear(
     return slope, 0.0
 
 
-def _parse_reaction_time(stem: str) -> float:
-    """Extract a reaction time (in minutes) from a filename stem.
-
-    Supported units: ``min`` → as-is, ``sec`` → /60, ``h`` → x60.
-    The *last* match in the stem is used so that prefixes like ``CV10_`` are
-    ignored when the time is at the end.
-
-    Args:
-        stem: Filename without extension, e.g. ``"CV10_120min"``.
-
-    Returns:
-        Reaction time in minutes.
-
-    Raises:
-        ValueError: If no time pattern is found in *stem*.
-    """
-    matches = _TIME_RE.findall(stem)
-    if not matches:
-        raise ValueError(
-            f"Cannot extract reaction time from filename stem '{stem}'. "
-            "Expected a pattern like '30min', '120sec', or '2h'."
-        )
-    value_str, unit = matches[-1]
-    value = float(value_str)
-    match unit.lower():
-        case "min":
-            return value
-        case "sec":
-            return value / 60.0
-        case "h":
-            return value * 60.0
-        case _:
-            raise ValueError(f"Unrecognised time unit '{unit}' in stem '{stem}'.")
-
-
 class Handler(BaseModel):
     """Entry point for chromatographic data loading and analysis.
 
@@ -195,7 +156,7 @@ class Handler(BaseModel):
         sample_id: str,
         chromatogram_id: str,
         file_path: Path | str,
-        reaction_time: float,
+        reaction_time: float | None,
         reader: AbstractReader,
     ) -> Chromatogram:
         """Parse one chromatogram file and attach it to the appropriate sample.
@@ -207,21 +168,16 @@ class Handler(BaseModel):
             sample_id: Identifier of the parent sample (e.g. ``"CV10"``).
             chromatogram_id: Identifier for this chromatogram (e.g. ``"CV10_0min"``).
             file_path: Path to the instrument data file.
-            reaction_time: Time since reaction start, **in minutes**.
+            reaction_time: Time since reaction start in minutes, or ``None``.
             reader: Any object implementing :class:`~chromhandler.readers.abstractreader.AbstractReader`.
 
         Returns:
             The newly created :class:`~chromhandler.model.Chromatogram`.
         """
-        data = reader.read_file(Path(file_path), chromatogram_id=chromatogram_id)
-
-        chromatogram = Chromatogram(
-            id=chromatogram_id,
+        chromatogram = reader.read_file(
+            Path(file_path),
+            chromatogram_id=chromatogram_id,
             sample_id=sample_id,
-            signal=data.signal,
-            time=data.time,
-            peaks=data.peaks,
-            wavelength=data.wavelength,
             reaction_time=reaction_time,
         )
 
@@ -238,10 +194,15 @@ class Handler(BaseModel):
     def read_asm(
         cls,
         path: Path | str,
+        *,
+        mode: Literal["timecourse", "endpoint"] = "timecourse",
     ) -> Handler:
         """Read a directory (or directory-of-directories) of ASM JSON files.
 
-        **Dir-of-dirs** layout (one sample per sub-directory)::
+        **Timecourse mode** (default) — reaction time extracted from each
+        filename stem (e.g. ``"CV10_120min"`` → ``120.0 min``):
+
+        *Dir-of-dirs* (one sample per sub-directory)::
 
             asm/
             ├── CV10/
@@ -250,19 +211,23 @@ class Handler(BaseModel):
             └── CV11/
                 └── CV11_0min.json
 
-        **Flat** layout (single sample, files directly in *path*)::
+        *Flat* (all files are chromatograms of a single sample named after the
+        directory)::
 
             asm/
             ├── CV10_0min.json
             └── CV10_30min.json
 
-        In the flat case *path.name* is used as the sample ID.
+        **Endpoint mode** — each file in *path* becomes its own sample
+        (``sample_id = file.stem``); no reaction time is extracted::
 
-        Reaction times are extracted from each filename stem via
-        :func:`_parse_reaction_time` (e.g. ``"CV10_120min"`` → ``120.0``).
+            asm/
+            ├── condition_A.json   → sample "condition_A"
+            └── condition_B.json   → sample "condition_B"
 
         Args:
             path: Root directory containing ASM JSON files or sub-directories.
+            mode: ``"timecourse"`` (default) or ``"endpoint"``.
 
         Returns:
             A fully populated :class:`Handler`.
@@ -276,6 +241,19 @@ class Handler(BaseModel):
         handler = cls()
         reader = ASMReader()
 
+        if mode == "endpoint":
+            json_files = sorted(
+                p
+                for p in root.iterdir()
+                if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
+            )
+            if not json_files:
+                raise FileNotFoundError(f"No ASM JSON files found under '{root}'.")
+            for file in json_files:
+                handler.read_chromatogram(file.stem, file.stem, file, None, reader)
+            return handler
+
+        # timecourse mode
         subdirs = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
         json_files = sorted(
             p for p in root.iterdir() if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
@@ -290,16 +268,192 @@ class Handler(BaseModel):
                     for p in sample_dir.iterdir()
                     if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
                 ):
-                    reaction_time = _parse_reaction_time(file.stem)
+                    reaction_time = parse_reaction_time(file.stem)
                     handler.read_chromatogram(sample_id, file.stem, file, reaction_time, reader)
         elif json_files:
             # Flat layout: all files belong to one sample named after the directory.
             sample_id = root.name
             for file in json_files:
-                reaction_time = _parse_reaction_time(file.stem)
+                reaction_time = parse_reaction_time(file.stem)
                 handler.read_chromatogram(sample_id, file.stem, file, reaction_time, reader)
         else:
             raise FileNotFoundError(f"No ASM JSON files found under '{root}'.")
+
+        for sample in handler.samples:
+            sample.chromatograms.sort(key=lambda c: (c.reaction_time is None, c.reaction_time or 0))
+
+        return handler
+
+    @classmethod
+    def read_knauer(
+        cls,
+        path: Path | str,
+        *,
+        mode: Literal["timecourse", "endpoint"] = "timecourse",
+    ) -> Handler:
+        """Read a directory of ClarityChrom (Knauer HPLC) TXT files.
+
+        **Timecourse mode** (default) — reaction time extracted from each
+        filename stem (e.g. ``"knauer_30_min"`` → ``30.0 min``):
+
+        *Dir-of-dirs* (one sample per sub-directory)::
+
+            data/
+            ├── CV10/
+            │   ├── knauer_0_min.txt
+            │   └── knauer_30_min.txt
+            └── CV11/
+                └── knauer_0_min.txt
+
+        *Flat* (all files are chromatograms of a single sample)::
+
+            data/
+            ├── knauer_0_min.txt
+            └── knauer_30_min.txt
+
+        **Endpoint mode** — each file becomes its own sample::
+
+            data/
+            ├── condition_A.txt   → sample "condition_A"
+            └── condition_B.txt   → sample "condition_B"
+
+        Args:
+            path: Root directory containing TXT files or sub-directories.
+            mode: ``"timecourse"`` (default) or ``"endpoint"``.
+
+        Returns:
+            A fully populated :class:`Handler`.
+        """
+        from .readers.knauer_txt import KnauerTXTReader
+
+        root = Path(path)
+        if not root.is_dir():
+            raise NotADirectoryError(f"'{root}' is not a directory.")
+
+        handler = cls()
+        reader = KnauerTXTReader()
+
+        if mode == "endpoint":
+            txt_files = sorted(
+                p for p in root.iterdir() if p.is_file() and p.suffix == ".txt" and not p.name.startswith(".")
+            )
+            if not txt_files:
+                raise FileNotFoundError(f"No TXT files found under '{root}'.")
+            for file in txt_files:
+                handler.read_chromatogram(file.stem, file.stem, file, None, reader)
+            return handler
+
+        # timecourse mode
+        subdirs = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        txt_files = sorted(
+            p for p in root.iterdir() if p.is_file() and p.suffix == ".txt" and not p.name.startswith(".")
+        )
+
+        if subdirs:
+            for sample_dir in subdirs:
+                sample_id = sample_dir.name
+                for file in sorted(
+                    p
+                    for p in sample_dir.iterdir()
+                    if p.is_file() and p.suffix == ".txt" and not p.name.startswith(".")
+                ):
+                    rt = parse_reaction_time(file.stem)
+                    handler.read_chromatogram(sample_id, file.stem, file, rt, reader)
+        elif txt_files:
+            sample_id = root.name
+            for file in txt_files:
+                rt = parse_reaction_time(file.stem)
+                handler.read_chromatogram(sample_id, file.stem, file, rt, reader)
+        else:
+            raise FileNotFoundError(f"No TXT files found under '{root}'.")
+
+        for sample in handler.samples:
+            sample.chromatograms.sort(key=lambda c: (c.reaction_time is None, c.reaction_time or 0))
+
+        return handler
+
+    @classmethod
+    def read_shimadzu(
+        cls,
+        path: Path | str,
+        *,
+        mode: Literal["timecourse", "endpoint"] = "timecourse",
+    ) -> Handler:
+        """Read a directory of Shimadzu LabSolutions TXT export files.
+
+        **Timecourse mode** (default) — reaction time extracted from each
+        filename stem (e.g. ``"P0-0.0_min"`` → ``0.0 min``):
+
+        *Dir-of-dirs* (one sample per sub-directory)::
+
+            data/
+            ├── sample_A/
+            │   ├── P0-0.0_min.txt
+            │   └── P1-30.0_min.txt
+            └── sample_B/
+                └── P0-0.0_min.txt
+
+        *Flat* (all files are chromatograms of a single sample)::
+
+            data/
+            ├── P0-0.0_min.txt
+            └── P1-30.0_min.txt
+
+        **Endpoint mode** — each file becomes its own sample::
+
+            data/
+            ├── condition_A.txt   → sample "condition_A"
+            └── condition_B.txt   → sample "condition_B"
+
+        Args:
+            path: Root directory containing TXT files or sub-directories.
+            mode: ``"timecourse"`` (default) or ``"endpoint"``.
+
+        Returns:
+            A fully populated :class:`Handler`.
+        """
+        from .readers.shimadzu import ShimadzuReader
+
+        root = Path(path)
+        if not root.is_dir():
+            raise NotADirectoryError(f"'{root}' is not a directory.")
+
+        handler = cls()
+        reader = ShimadzuReader()
+
+        if mode == "endpoint":
+            txt_files = sorted(
+                p for p in root.iterdir() if p.is_file() and p.suffix == ".txt" and not p.name.startswith(".")
+            )
+            if not txt_files:
+                raise FileNotFoundError(f"No TXT files found under '{root}'.")
+            for file in txt_files:
+                handler.read_chromatogram(file.stem, file.stem, file, None, reader)
+            return handler
+
+        # timecourse mode
+        subdirs = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        txt_files = sorted(
+            p for p in root.iterdir() if p.is_file() and p.suffix == ".txt" and not p.name.startswith(".")
+        )
+
+        if subdirs:
+            for sample_dir in subdirs:
+                sample_id = sample_dir.name
+                for file in sorted(
+                    p
+                    for p in sample_dir.iterdir()
+                    if p.is_file() and p.suffix == ".txt" and not p.name.startswith(".")
+                ):
+                    rt = parse_reaction_time(file.stem)
+                    handler.read_chromatogram(sample_id, file.stem, file, rt, reader)
+        elif txt_files:
+            sample_id = root.name
+            for file in txt_files:
+                rt = parse_reaction_time(file.stem)
+                handler.read_chromatogram(sample_id, file.stem, file, rt, reader)
+        else:
+            raise FileNotFoundError(f"No TXT files found under '{root}'.")
 
         for sample in handler.samples:
             sample.chromatograms.sort(key=lambda c: (c.reaction_time is None, c.reaction_time or 0))
