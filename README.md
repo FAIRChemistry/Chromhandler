@@ -3,6 +3,7 @@
 ![PyPI - Version](https://img.shields.io/pypi/v/chromhandler)
 [![Documentation](https://img.shields.io/badge/Documentation-Online-blue.svg)](https://fairchemistry.github.io/Chromhandler/)
 [![Tests](https://github.com/FAIRChemistry/Chromhandler/actions/workflows/run_tests.yaml/badge.svg)](https://github.com/FAIRChemistry/Chromhandler/actions/workflows/run_tests.yaml)
+[![Coverage](https://codecov.io/gh/FAIRChemistry/Chromhandler/branch/main/graph/badge.svg)](https://codecov.io/gh/FAIRChemistry/Chromhandler)
 
 
 ## ℹ️ Overview
