@@ -9,17 +9,18 @@ Fixtures for testing fitting module components in isolation:
 from __future__ import annotations
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 
 @pytest.fixture
-def simple_time_axis() -> np.ndarray:
+def simple_time_axis() -> npt.NDArray[np.float64]:
     """Fixture: Simple 1D time axis for fitting tests."""
     return np.linspace(0.0, 1.0, 100)
 
 
 @pytest.fixture
-def simple_signal() -> np.ndarray:
+def simple_signal() -> npt.NDArray[np.float64]:
     """Fixture: Simple 1D signal for baseline/fitting tests."""
     time = np.linspace(0.0, 1.0, 100)
     # Gentle baseline with a peak
