@@ -51,6 +51,11 @@ class AbstractReader(Protocol):
                 ...
     """
 
+    @classmethod
+    def can_read(cls, path: Path) -> bool:
+        """Return True if this reader can handle the contents of *path*."""
+        ...
+
     def read_file(
         self,
         path: Path,
