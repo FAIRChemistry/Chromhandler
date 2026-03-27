@@ -8,30 +8,21 @@ This conftest.py provides fixtures for integration tests that span multiple modu
 
 from __future__ import annotations
 
-# Import builders from parent conftest (pytest conftest loader makes parent available)
-# Using a dynamic import to avoid circular dependencies
-import importlib.util
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.conftest import (
+    _chromatogram,  # type: ignore[reportPrivateUsage]
+    _handler,  # type: ignore[reportPrivateUsage]
+    _initial_condition,  # type: ignore[reportPrivateUsage]
+    _molecule,  # type: ignore[reportPrivateUsage]
+    _peak,  # type: ignore[reportPrivateUsage]
+    _sample,  # type: ignore[reportPrivateUsage]
+)
+
 if TYPE_CHECKING:
     from chromhandler.handler import Handler
-
-_parent_conftest_path = Path(__file__).parent.parent / "conftest.py"
-spec = importlib.util.spec_from_file_location("parent_conftest", _parent_conftest_path)
-if spec is None or spec.loader is None:
-    raise RuntimeError(f"Cannot load parent conftest from {_parent_conftest_path}")
-_parent_conftest_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(_parent_conftest_module)
-
-_handler = _parent_conftest_module._handler
-_molecule = _parent_conftest_module._molecule
-_sample = _parent_conftest_module._sample
-_chromatogram = _parent_conftest_module._chromatogram
-_peak = _parent_conftest_module._peak
-_initial_condition = _parent_conftest_module._initial_condition
 
 
 @pytest.fixture
