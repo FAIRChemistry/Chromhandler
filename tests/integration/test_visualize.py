@@ -85,6 +85,7 @@ def handler_with_chromatograms() -> Handler:
     return handler
 
 
+@pytest.mark.integration
 def test_visualize_empty_chromatogram_ids_plots_all(
     handler_with_chromatograms: Handler,
 ) -> None:
@@ -102,6 +103,7 @@ def test_visualize_empty_chromatogram_ids_plots_all(
     plt.close(fig)
 
 
+@pytest.mark.integration
 def test_visualize_filters_to_selected_chromatogram(
     handler_with_chromatograms: Handler,
 ) -> None:
@@ -119,6 +121,7 @@ def test_visualize_filters_to_selected_chromatogram(
     plt.close(fig)
 
 
+@pytest.mark.integration
 def test_visualize_filter_drops_empty_samples_and_reduces_axes(
     handler_with_chromatograms: Handler,
 ) -> None:
@@ -135,6 +138,7 @@ def test_visualize_filter_drops_empty_samples_and_reduces_axes(
     plt.close(fig)
 
 
+@pytest.mark.integration
 def test_visualize_raises_for_unknown_chromatogram_ids(
     handler_with_chromatograms: Handler,
 ) -> None:
@@ -142,6 +146,7 @@ def test_visualize_raises_for_unknown_chromatogram_ids(
         handler_with_chromatograms.visualize(chromatogram_ids=["missing"])
 
 
+@pytest.mark.integration
 def test_visualize_overlay_uses_filtered_data_for_lines_and_limits(
     handler_with_chromatograms: Handler,
 ) -> None:
@@ -157,6 +162,7 @@ def test_visualize_overlay_uses_filtered_data_for_lines_and_limits(
     plt.close(fig)
 
 
+@pytest.mark.integration
 def test_visualize_assigned_only_respects_chromatogram_filter(
     handler_with_chromatograms: Handler,
 ) -> None:
@@ -175,6 +181,7 @@ def test_visualize_assigned_only_respects_chromatogram_filter(
     plt.close(fig)
 
 
+@pytest.mark.integration
 def test_visualize_uses_handler_peak_windows_when_filtering(
     handler_with_chromatograms: Handler,
 ) -> None:

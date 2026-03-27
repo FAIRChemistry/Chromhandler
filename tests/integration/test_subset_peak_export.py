@@ -66,6 +66,7 @@ def _handler_with_chromatograms(
     return Handler(samples=list(samples.values()))
 
 
+@pytest.mark.integration
 class TestSubsetPeakExport:
     def test_to_peaks_and_write_fitted_peaks_non_subset(self) -> None:
         peak = _peak_annotation("mol_a")

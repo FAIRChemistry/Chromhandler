@@ -56,7 +56,7 @@ def _handler_with_calibration_data() -> Handler:
         _cal_sample("std_low", "Ino", init_conc=100.0, area=400_000.0),
         _cal_sample("std_high", "Ino", init_conc=400.0, area=1_600_000.0),
     ]
-    return Handler(samples=samples, molecules=[mol])
+    return Handler(samples=samples, molecules={mol.id: mol})
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +64,7 @@ def _handler_with_calibration_data() -> Handler:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.integration
 def test_calibrate_molecules_returns_none() -> None:
     """calibrate_molecules must be a side-effect-only method — return value is None."""
     handler = _handler_with_calibration_data()
@@ -71,6 +72,7 @@ def test_calibrate_molecules_returns_none() -> None:
     assert result is None
 
 
+@pytest.mark.integration
 def test_calibrate_molecules_sets_calibration_on_molecule() -> None:
     """The side effect (molecule.calibration) must still be set after the call."""
     handler = _handler_with_calibration_data()
@@ -80,7 +82,8 @@ def test_calibrate_molecules_sets_calibration_on_molecule() -> None:
     assert mol.calibration.slope > 0
 
 
-def test_calibrate_molecules_verbose_false_suppresses_output(capsys: pytest.CaptureFixture) -> None:
+@pytest.mark.integration
+def test_calibrate_molecules_verbose_false_suppresses_output(capsys: pytest.CaptureFixture[str]) -> None:
     """verbose=False must produce no stdout output at all."""
     handler = _handler_with_calibration_data()
     handler.calibrate_molecules(verbose=False)
@@ -88,7 +91,8 @@ def test_calibrate_molecules_verbose_false_suppresses_output(capsys: pytest.Capt
     assert captured.out == ""
 
 
-def test_calibrate_molecules_verbose_true_prints_summary(capsys: pytest.CaptureFixture) -> None:
+@pytest.mark.integration
+def test_calibrate_molecules_verbose_true_prints_summary(capsys: pytest.CaptureFixture[str]) -> None:
     """verbose=True (default) must print a calibration summary to stdout."""
     handler = _handler_with_calibration_data()
     handler.calibrate_molecules()  # default verbose=True
@@ -97,10 +101,11 @@ def test_calibrate_molecules_verbose_true_prints_summary(capsys: pytest.CaptureF
     assert "Ino" in captured.out
 
 
-def test_calibrate_molecules_skipped_molecule_not_in_output(capsys: pytest.CaptureFixture) -> None:
+@pytest.mark.integration
+def test_calibrate_molecules_skipped_molecule_not_in_output(capsys: pytest.CaptureFixture[str]) -> None:
     """A molecule with no calibration data should still be reported (as skipped), not silently dropped."""
     mol = _mol("Ghost")
-    handler = Handler(samples=[], molecules=[mol])
+    handler = Handler(samples=[], molecules={mol.id: mol})
     handler.calibrate_molecules()
     captured = capsys.readouterr()
     # Should mention Ghost in some skipped/warning row

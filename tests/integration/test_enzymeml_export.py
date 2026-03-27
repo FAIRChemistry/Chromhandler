@@ -14,24 +14,6 @@ from chromhandler.molecule import Molecule
 from chromhandler.protein import Protein
 
 
-def _mol(mol_id: str = "Sub", *, internal_standard: bool = False) -> Molecule:
-    return Molecule(
-        id=mol_id,
-        name="Substrate",
-        pubchem_cid=6021,
-        internal_standard=internal_standard,
-    )
-
-
-def _peak(mol_id: str, area: float, chrom_id: str) -> Peak:
-    return Peak(
-        chromatogram_id=chrom_id,
-        location=Estimate(mean=5.0),
-        area=Estimate(mean=area),
-        molecule_id=mol_id,
-    )
-
-
 def _timecourse_sample(
     sample_id: str,
     mol_id: str,
@@ -59,10 +41,22 @@ def _timecourse_sample(
     return Sample(id=sample_id, chromatograms=chroms, initial_conditions=[ic])
 
 
-def _handler_basic() -> Handler:
-    mol = _mol("Sub")
-    samples = [_timecourse_sample("S1", "Sub", points=[(0.0, 100.0), (15.0, 50.0)])]
-    return Handler(samples=samples, molecules={mol.id: mol})
+def _mol(mol_id: str = "Sub", *, internal_standard: bool = False) -> Molecule:
+    return Molecule(
+        id=mol_id,
+        name="Substrate",
+        pubchem_cid=6021,
+        internal_standard=internal_standard,
+    )
+
+
+def _peak(mol_id: str, area: float, chrom_id: str) -> Peak:
+    return Peak(
+        chromatogram_id=chrom_id,
+        location=Estimate(mean=5.0),
+        area=Estimate(mean=area),
+        molecule_id=mol_id,
+    )
 
 
 def _cal_sample(sample_id: str, mol_id: str, init_conc: float, area: float) -> Sample:
@@ -82,6 +76,13 @@ def _cal_sample(sample_id: str, mol_id: str, init_conc: float, area: float) -> S
     return Sample(id=sample_id, chromatograms=[chrom], initial_conditions=[ic])
 
 
+def _handler_basic() -> Handler:
+    mol = _mol("Sub")
+    samples = [_timecourse_sample("S1", "Sub", points=[(0.0, 100.0), (15.0, 50.0)])]
+    return Handler(samples=samples, molecules={mol.id: mol})
+
+
+@pytest.mark.integration
 def test_to_enzymeml_returns_document_with_species_and_measurement() -> None:
     handler = _handler_basic()
     doc = handler.to_enzymeml(
@@ -104,6 +105,7 @@ def test_to_enzymeml_returns_document_with_species_and_measurement() -> None:
     assert mol_data.data == [100.0, 50.0]
 
 
+@pytest.mark.integration
 def test_handler_to_enzymeml_document_matches_handler_method() -> None:
     handler = _handler_basic()
     direct = handler_to_enzymeml_document(
@@ -129,6 +131,7 @@ def test_handler_to_enzymeml_document_matches_handler_method() -> None:
     assert len(direct.measurements) == len(via_handler.measurements)
 
 
+@pytest.mark.integration
 def test_sample_ids_filter_and_missing_raises() -> None:
     mol = _mol("Sub")
     samples = [
@@ -156,6 +159,7 @@ def test_sample_ids_filter_and_missing_raises() -> None:
         )
 
 
+@pytest.mark.integration
 def test_to_concentration_requires_calibration() -> None:
     handler = _handler_basic()
     with pytest.raises(ValueError, match="no calibration"):
@@ -168,6 +172,7 @@ def test_to_concentration_requires_calibration() -> None:
         )
 
 
+@pytest.mark.integration
 def test_to_concentration_after_calibrate() -> None:
     mol = _mol("Ino")
     samples = [
@@ -192,6 +197,7 @@ def test_to_concentration_after_calibrate() -> None:
     assert all(isinstance(v, float) for v in md.data)
 
 
+@pytest.mark.integration
 def test_internal_standard_excluded_from_export() -> None:
     sub = _mol("Sub")
     istd = _mol("IS", internal_standard=True)
@@ -208,6 +214,7 @@ def test_internal_standard_excluded_from_export() -> None:
     assert "IS" not in ids
 
 
+@pytest.mark.integration
 def test_protein_passed_to_measurement_data() -> None:
     mol = _mol("Sub")
     prot = Protein(
@@ -229,6 +236,7 @@ def test_protein_passed_to_measurement_data() -> None:
     assert all(sd.species_id != "E1" for sd in meas.species_data)
 
 
+@pytest.mark.integration
 def test_n_samples_duplicates_measurements() -> None:
     mol = _mol("Sub")
     cid = "S1_c"

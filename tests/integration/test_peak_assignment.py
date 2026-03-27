@@ -57,6 +57,7 @@ def _handler(*samples: Sample, molecules: list[Molecule] | None = None) -> Handl
     return Handler(samples=list(samples), molecules=mol_dict)
 
 
+@pytest.mark.integration
 def test_add_peak_window_requires_existing_molecule() -> None:
     handler = Handler()
 
@@ -64,6 +65,7 @@ def test_add_peak_window_requires_existing_molecule() -> None:
         handler.add_peak_window("unknown", 4.8, 5.2)
 
 
+@pytest.mark.integration
 def test_assign_molecules_assigns_single_matching_peak() -> None:
     peak = _peak(5.0, 500.0, amplitude=250.0, chrom_id="chrom_1")
     handler = _handler(
@@ -77,6 +79,7 @@ def test_assign_molecules_assigns_single_matching_peak() -> None:
     assert peak.molecule_id == "test_mol"
 
 
+@pytest.mark.integration
 def test_assign_molecules_reports_missing_peaks() -> None:
     peak = _peak(3.0, 500.0, amplitude=250.0, chrom_id="chrom_1")
     handler = _handler(
@@ -90,6 +93,7 @@ def test_assign_molecules_reports_missing_peaks() -> None:
     assert peak.molecule_id is None
 
 
+@pytest.mark.integration
 def test_assign_molecules_raises_for_multiple_peaks_in_window() -> None:
     peaks = [
         _peak(4.95, 300.0, amplitude=180.0, chrom_id="chrom_1"),
@@ -107,6 +111,7 @@ def test_assign_molecules_raises_for_multiple_peaks_in_window() -> None:
     assert all(peak.molecule_id is None for peak in peaks)
 
 
+@pytest.mark.integration
 def test_assign_molecules_skip_multiple_peaks_in_window() -> None:
     ambiguous_peaks = [
         _peak(4.95, 300.0, amplitude=180.0, chrom_id="chrom_1"),
@@ -129,6 +134,7 @@ def test_assign_molecules_skip_multiple_peaks_in_window() -> None:
     assert single_peak.molecule_id == "test_mol"
 
 
+@pytest.mark.integration
 def test_assign_molecules_filters_small_artefact_peaks_by_amplitude() -> None:
     artefact = _peak(4.95, 50.0, amplitude=25.0, chrom_id="chrom_1")
     main_peak = _peak(5.02, 400.0, amplitude=250.0, chrom_id="chrom_1")
@@ -144,6 +150,7 @@ def test_assign_molecules_filters_small_artefact_peaks_by_amplitude() -> None:
     assert main_peak.molecule_id == "test_mol"
 
 
+@pytest.mark.integration
 def test_assign_molecules_skip_mode_separates_missing_and_ambiguous() -> None:
     ambiguous_peaks = [
         _peak(4.95, 300.0, amplitude=180.0, chrom_id="chrom_1"),
@@ -162,6 +169,7 @@ def test_assign_molecules_skip_mode_separates_missing_and_ambiguous() -> None:
     handler.assign_molecules(on_multiple="skip", silent=True)
 
 
+@pytest.mark.integration
 def test_assign_molecules_skip_mode_still_reports_ambiguity_after_filtering() -> None:
     peaks = [
         _peak(4.95, 50.0, amplitude=25.0, chrom_id="chrom_1"),
@@ -183,6 +191,7 @@ def test_assign_molecules_skip_mode_still_reports_ambiguity_after_filtering() ->
     assert all(peak.molecule_id is None for peak in peaks)
 
 
+@pytest.mark.integration
 def test_assign_molecules_is_idempotent_for_targeted_molecules() -> None:
     first_peak = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_1")
     second_peak = _peak(6.0, 350.0, amplitude=220.0, chrom_id="chrom_1")
@@ -200,6 +209,7 @@ def test_assign_molecules_is_idempotent_for_targeted_molecules() -> None:
     assert second_peak.molecule_id == "test_mol"
 
 
+@pytest.mark.integration
 def test_assign_molecules_skip_mode_clears_previous_assignments() -> None:
     first_peak = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_1")
     handler = _handler(
@@ -218,6 +228,7 @@ def test_assign_molecules_skip_mode_clears_previous_assignments() -> None:
     assert second_peak.molecule_id is None
 
 
+@pytest.mark.integration
 def test_assign_molecules_assigns_across_multiple_chromatograms_per_sample() -> None:
     """Time-course style: one sample, several chromatograms, same wavelength."""
     p0 = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_t0")
@@ -236,6 +247,7 @@ def test_assign_molecules_assigns_across_multiple_chromatograms_per_sample() -> 
     assert p30.molecule_id == "test_mol"
 
 
+@pytest.mark.integration
 def test_assign_molecules_uses_window_wavelength_to_pick_chromatogram() -> None:
     peak_254 = _peak(5.0, 300.0, amplitude=200.0, chrom_id="chrom_254")
     peak_280 = _peak(5.02, 450.0, amplitude=260.0, chrom_id="chrom_280")
@@ -253,6 +265,7 @@ def test_assign_molecules_uses_window_wavelength_to_pick_chromatogram() -> None:
     assert peak_280.molecule_id == "test_mol"
 
 
+@pytest.mark.integration
 def test_unassign_peaks_clears_specific_molecule_in_selected_chromatogram() -> None:
     peak_target = _peak(5.0, 300.0, chrom_id="chrom_1", molecule_id="test_mol")
     peak_other = _peak(6.0, 200.0, chrom_id="chrom_1", molecule_id="other_mol")
@@ -280,6 +293,7 @@ def test_unassign_peaks_clears_specific_molecule_in_selected_chromatogram() -> N
     ]
 
 
+@pytest.mark.integration
 def test_unassign_peaks_can_match_sample_and_reaction_time() -> None:
     peak_t0 = _peak(5.0, 300.0, chrom_id="chrom_t0", molecule_id="test_mol")
     peak_t30 = _peak(5.0, 280.0, chrom_id="chrom_t30", molecule_id="test_mol")
@@ -313,6 +327,7 @@ def test_unassign_peaks_can_match_sample_and_reaction_time() -> None:
     assert removed[0]["chromatogram_id"] == "chrom_t30"
 
 
+@pytest.mark.integration
 def test_unassign_peaks_raises_for_unknown_chromatogram_id() -> None:
     handler = _handler(
         _sample("sample_1", _chromatogram("chrom_1", "sample_1", [])),
@@ -323,6 +338,7 @@ def test_unassign_peaks_raises_for_unknown_chromatogram_id() -> None:
         handler.unassign_peaks(chromatogram_ids=["missing"])
 
 
+@pytest.mark.integration
 def test_peak_assignment_summary_table_handles_ambiguous_entries() -> None:
     handler = _handler(molecules=[_molecule()])
     window = handler.add_peak_window("test_mol", 4.8, 5.2)
@@ -353,6 +369,7 @@ def test_peak_assignment_summary_table_handles_ambiguous_entries() -> None:
     ]
 
 
+@pytest.mark.integration
 def test_subset_returns_independent_handler_with_copied_peak_windows() -> None:
     sample_a = _sample(
         "sample_a",
@@ -383,6 +400,7 @@ def test_subset_returns_independent_handler_with_copied_peak_windows() -> None:
     assert math.isclose(child.peak_windows["test_mol"].rt_min, 5.8, rel_tol=0.0, abs_tol=1e-9)
 
 
+@pytest.mark.integration
 def test_subset_raises_for_unknown_chromatogram_ids() -> None:
     handler = _handler(
         _sample("sample_1", _chromatogram("chrom_1", "sample_1", [])),

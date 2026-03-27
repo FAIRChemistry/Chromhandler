@@ -3,6 +3,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import pytest
 
 from chromhandler.handler import Handler
 from chromhandler.model import Chromatogram, Estimate, Peak, Sample
@@ -23,6 +24,7 @@ def _peak(
     )
 
 
+@pytest.mark.integration
 def test_plot_can_annotate_points_with_chromatogram_ids() -> None:
     sample = Sample(
         id="sample_1",
