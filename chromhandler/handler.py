@@ -1480,7 +1480,7 @@ class Handler(BaseModel):
         peak_annotations: list[PeakAnnotation | PeakWindow] | None = None,
         chromatogram_ids: list[str] | None = None,
         show_legend: bool = True,
-    ) -> tuple[object, object]:
+    ) -> tuple[Figure, Any]:
         """Plot all chromatograms; returns ``(fig, ax)`` or ``(fig, axes)``.
 
         The figure is not saved automatically. Use ``fig.savefig(...)`` or
