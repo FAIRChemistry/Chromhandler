@@ -4,6 +4,8 @@ from pathlib import Path  # noqa: TC003 - used at runtime for path.read_text()
 
 from chromhandler.model import Chromatogram
 
+_KNAUER_HEADER_WORDS = ("Analyst", "SampleID", "Sample", "Sample", "Range")
+
 
 class KnauerTXTReader:
     """Reader for ClarityChrom (Knauer HPLC) ASCII export files.
@@ -31,6 +33,24 @@ class KnauerTXTReader:
             reaction_time=0.0,
         )
     """
+
+    @classmethod
+    def can_read(cls, path: Path) -> bool:
+        """Return True if *path* contains a ClarityChrom (Knauer) TXT file."""
+        try:
+            txt_files = [p for p in path.iterdir() if p.is_file() and p.suffix == ".txt"]
+            if not txt_files:
+                return False
+            lines = txt_files[0].read_text(encoding="utf-8", errors="ignore").splitlines()
+            if len(lines) < 5:
+                return False
+            return all(
+                lines[i].split()[0] == word
+                for i, word in enumerate(_KNAUER_HEADER_WORDS)
+                if lines[i].split()
+            )
+        except OSError:
+            return False
 
     def read_file(
         self,

@@ -32,3 +32,22 @@ class TestASMCanRead:
     def test_rejects_empty_dir(self, tmp_path: Path) -> None:
         from chromhandler.readers.asm import ASMReader
         assert ASMReader.can_read(tmp_path) is False
+
+
+class TestKnauerCanRead:
+    def test_detects_knauer_fixture(self) -> None:
+        from chromhandler.readers.knauer_txt import KnauerTXTReader
+        assert KnauerTXTReader.can_read(FIXTURE_ROOT / "knauer_txt") is True
+
+    def test_rejects_shimadzu_dir(self) -> None:
+        from chromhandler.readers.knauer_txt import KnauerTXTReader
+        assert KnauerTXTReader.can_read(FIXTURE_ROOT / "shimadzu") is False
+
+    def test_rejects_empty_dir(self, tmp_path: Path) -> None:
+        from chromhandler.readers.knauer_txt import KnauerTXTReader
+        assert KnauerTXTReader.can_read(tmp_path) is False
+
+    def test_rejects_dir_without_txt(self, tmp_path: Path) -> None:
+        from chromhandler.readers.knauer_txt import KnauerTXTReader
+        (tmp_path / "data.json").touch()
+        assert KnauerTXTReader.can_read(tmp_path) is False
