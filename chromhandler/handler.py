@@ -22,8 +22,10 @@ from .protein import Protein
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from matplotlib.figure import Figure
     from rich.console import Console, Group
 
+    from .fitting.better_fitter import BetterFitter
     from .readers.abstractreader import AbstractReader
 
 # Matches numeric value + unit at the end (or anywhere) of a filename stem,
@@ -122,7 +124,7 @@ def _fit_linear(
 def _parse_reaction_time(stem: str) -> float:
     """Extract a reaction time (in minutes) from a filename stem.
 
-    Supported units: ``min`` → as-is, ``sec`` → ÷60, ``h`` → ×60.
+    Supported units: ``min`` → as-is, ``sec`` → /60, ``h`` → x60.
     The *last* match in the stem is used so that prefixes like ``CV10_`` are
     ignored when the time is at the end.
 
@@ -179,10 +181,6 @@ class Handler(BaseModel):
     samples: list[Sample] = Field(
         default_factory=list,
         description="Samples, each holding one or more chromatograms.",
-    )
-    internal_standard: Molecule | None = Field(
-        default=None,
-        description="Internal standard molecule used for concentration normalisation.",
     )
     peak_windows: PeakWindowRegistry = Field(
         default_factory=PreserveKeysDottedDict,
@@ -352,12 +350,10 @@ class Handler(BaseModel):
             # sample_id as index
             df = pd.DataFrame({"A": [1.0], "B": [2.0]}, index=pd.Index(["s1"], name="sample_id"))
         """
-        if isinstance(path, Path) or isinstance(path, str):
+        if isinstance(path, (Path, str)):
             df = pd.read_csv(path)
-        elif isinstance(path, pd.DataFrame):
-            df = path.copy()
         else:
-            raise ValueError(f"Invalid path type: {type(path)}")
+            df = path.copy()
 
         # Resolve sample_id: column, index level, or implicit index
         if "sample_id" in df.columns:
@@ -385,8 +381,8 @@ class Handler(BaseModel):
             added_any = False
             for mol_id in df_mol.columns:
                 val = df_mol.iloc[i, df_mol.columns.get_loc(mol_id)]
-                if pd.notna(val):
-                    self.add_initial_condition(sample_id, str(mol_id), float(val), conc_unit)
+                if not pd.isna(val):  # type: ignore[arg-type]
+                    self.add_initial_condition(sample_id, str(mol_id), float(val), conc_unit)  # type: ignore[arg-type]
                     added_any = True
             if not added_any:
                 raise ValueError(f"Sample '{sample_id}' has no initial conditions in the file.")
@@ -397,7 +393,7 @@ class Handler(BaseModel):
 
     def collect_areas(
         self,
-        fitter: object,
+        fitter: BetterFitter,
     ) -> dict[str, list[tuple[float, float]]]:
         """Map posterior molecule areas from a fitted fitter to reaction times.
 
@@ -424,7 +420,7 @@ class Handler(BaseModel):
             c.id: c.reaction_time for s in self.samples for c in s.chromatograms
         }
         result: dict[str, list[tuple[float, float]]] = {}
-        for rec in fitter.area_records():  # type: ignore[attr-defined]
+        for rec in fitter.area_records():
             rt = chrom_to_rt.get(rec.chromatogram_id)
             if rt is None:
                 continue
@@ -436,7 +432,7 @@ class Handler(BaseModel):
 
     def write_fitted_peaks(
         self,
-        fitter: object,
+        fitter: BetterFitter,
         *,
         quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
         n_samples: int | None = None,
@@ -467,7 +463,7 @@ class Handler(BaseModel):
 
         Returns:
             The list of :class:`~chromhandler.model.Peak` objects that were
-            written (one per chromatogram × molecule pair).
+            written (one per chromatogram x molecule pair).
 
         Example::
 
@@ -478,14 +474,10 @@ class Handler(BaseModel):
             peak  = chrom.peaks[0]
             print(peak.area.mean, peak.area.std, peak.area.q05, peak.area.q95)
         """
-        peaks = fitter.to_peaks(  # type: ignore[attr-defined]
-            quantiles=quantiles, n_samples=n_samples
-        )
+        peaks = fitter.to_peaks(quantiles=quantiles, n_samples=n_samples)
 
         # Build a flat chromatogram-id → Chromatogram index
-        chrom_index: dict[str, Chromatogram] = {
-            c.id: c for s in self.samples for c in s.chromatograms if c.id is not None
-        }
+        chrom_index: dict[str, Chromatogram] = {c.id: c for s in self.samples for c in s.chromatograms}
 
         for peak in peaks:
             chrom = chrom_index.get(peak.chromatogram_id)
@@ -586,6 +578,7 @@ class Handler(BaseModel):
         areas_mean: list[float] = []
         area_samples_per_point: list[list[float]] = []
         chrom_ids: list[str] = []
+        conc_unit_ref: str | None = None
 
         for sample in self.samples:
             # Only calibration standards (at least one chromatogram at t=0)
@@ -599,6 +592,10 @@ class Handler(BaseModel):
             )
             if ic is None:
                 continue
+
+            # Store conc_unit from the first valid ic
+            if conc_unit_ref is None:
+                conc_unit_ref = ic.conc_unit if isinstance(ic.conc_unit, str) else ic.conc_unit.id
 
             # Chromatogram at t=0 that contains a peak for this molecule
             chrom = next(
@@ -671,7 +668,7 @@ class Handler(BaseModel):
             min_conc=float(np.min(conc_arr)),
             slope_samples=slope_samples,
             intercept_samples=intercept_samples,
-            conc_unit=ic.conc_unit if isinstance(ic.conc_unit, str) else ic.conc_unit.id,
+            conc_unit=conc_unit_ref or "",
             chromatogram_ids=chrom_ids,
             concentrations=known_concs,
             areas_mean=areas_mean,
@@ -781,7 +778,8 @@ class Handler(BaseModel):
         """
         cid_int = int(pubchem_cid)
         if name is None:
-            name = pubchem_request_molecule_name(str(cid_int))
+            # TODO: Implement PubChem API integration to fetch molecule name
+            name = f"CID_{cid_int}"
 
         molecule = Molecule(
             id=id,
@@ -1063,17 +1061,14 @@ class Handler(BaseModel):
         self._validate_peak_windows()
 
         if not self.peak_windows:
-            return []
+            return
 
         targeted_ids = set(self.peak_windows)
         peak_targets: dict[tuple[str, int], str] = {}
         pending_assignments: list[tuple[str, int, str]] = []
         results: list[dict[str, Any]] = []
         chrom_index: dict[str, Chromatogram] = {
-            chrom.id: chrom
-            for sample in self.samples
-            for chrom in sample.chromatograms
-            if chrom.id is not None
+            chrom.id: chrom for sample in self.samples for chrom in sample.chromatograms
         }
 
         for molecule_id, window in self.peak_windows.items():
@@ -1166,17 +1161,12 @@ class Handler(BaseModel):
     # Sample / chromatogram utilities
     # ------------------------------------------------------------------
 
-    def set_dilution_factor(self, dilution_factor: float) -> None:
+    def set_dilution_factor(self, dilution_factor: float | int) -> None:
         """Set a uniform dilution factor on all samples.
 
         Args:
             dilution_factor: The dilution factor to apply.
-
-        Raises:
-            ValueError: If *dilution_factor* is not a number.
         """
-        if not isinstance(dilution_factor, float | int):
-            raise ValueError("Dilution factor must be a float or integer.")
 
         for sample in self.samples:
             sample.dilution_factor = dilution_factor
@@ -1245,15 +1235,16 @@ class Handler(BaseModel):
         ranges: (slice | tuple[float, float] | list[slice] | list[tuple[float, float]]),
     ) -> list[tuple[float, float]]:
         """Convert slice/tuple input to list of (lo, hi) inclusive ranges."""
-        if not isinstance(ranges, list):
-            ranges = [ranges]
         out: list[tuple[float, float]] = []
-        for r in ranges:
+        range_list: list[slice | tuple[float, float]] = (
+            [ranges] if not isinstance(ranges, list) else ranges  # type: ignore[arg-type]
+        )
+        for r in range_list:
             if isinstance(r, slice):
                 lo = r.start if r.start is not None else float("-inf")
                 hi = r.stop if r.stop is not None else float("inf")
             else:
-                lo, hi = r[0], r[1]
+                lo, hi = r[0], r[1]  # type: ignore[index]
             out.append((lo, hi))
         return out
 
@@ -1304,7 +1295,7 @@ class Handler(BaseModel):
         show_balance: bool = False,
         colors: dict[str, str] | None = None,
         show_chromatogram_ids: bool = False,
-    ) -> tuple[object, np.ndarray]:
+    ) -> tuple[Figure, npt.NDArray[np.object_]]:
         """Plot peak areas over reaction time for one or more samples.
 
         Creates one subplot per selected sample in a single column. Each point
@@ -1370,7 +1361,7 @@ class Handler(BaseModel):
             else:
                 molecule_colors[mol_id] = cmap(idx % 10)
 
-        for ax, sample in zip(axes, selected_samples, strict=False):
+        for ax, sample in zip(axes, selected_samples, strict=False):  # type: ignore[arg-type]
             time_unit = "min"
             points_by_molecule: dict[str, list[tuple[float, float, str]]] = {}
             balance_by_time: dict[float, float] = {}
@@ -1487,7 +1478,7 @@ class Handler(BaseModel):
         share_y: bool = False,
         show_peak_annotations: bool = True,
         peak_annotations: list[PeakAnnotation | PeakWindow] | None = None,
-        chromatogram_ids: list[str] = [],
+        chromatogram_ids: list[str] | None = None,
         show_legend: bool = True,
     ) -> tuple[object, object]:
         """Plot all chromatograms; returns ``(fig, ax)`` or ``(fig, axes)``.
@@ -1504,6 +1495,8 @@ class Handler(BaseModel):
         """
         if peak_annotations is None:
             peak_annotations = list(self.peak_windows.values())
+        if chromatogram_ids is None:
+            chromatogram_ids = []
         return visualize.visualize(
             self,
             n_cols=n_cols,
@@ -1517,7 +1510,7 @@ class Handler(BaseModel):
             overlay=overlay,
             share_y=share_y,
             show_peak_annotations=show_peak_annotations,
-            peak_annotations=peak_annotations,
+            peak_annotations=cast("list[PeakAnnotation] | None", peak_annotations),
             chromatogram_ids=chromatogram_ids,
             show_legend=show_legend,
         )
