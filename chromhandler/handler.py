@@ -551,7 +551,14 @@ class Handler(BaseModel):
                     "KnauerTXTReader": cls.read_knauer,
                     "ShimadzuReader": cls.read_shimadzu,
                 }
-                return dispatch[reader_cls.__name__](root, mode=mode)
+                read_fn = dispatch.get(reader_cls.__name__)
+                if read_fn is None:
+                    raise NotImplementedError(
+                        f"Reader '{reader_cls.__name__}' is registered in READERS but has no "
+                        "corresponding Handler.read_* method. Add one to the dispatch table in "
+                        "Handler.read()."
+                    )
+                return read_fn(root, mode=mode)
 
         # Build a helpful error listing what was actually found.
         try:
