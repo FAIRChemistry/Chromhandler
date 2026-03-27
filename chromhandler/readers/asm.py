@@ -32,6 +32,14 @@ class ASMReader:
         )
     """
 
+    @classmethod
+    def can_read(cls, path: Path) -> bool:
+        """Return True if *path* contains at least one ``.json`` file."""
+        try:
+            return any(p.is_file() and p.suffix == ".json" for p in path.iterdir())
+        except OSError:
+            return False
+
     def read_file(
         self,
         path: Path,
