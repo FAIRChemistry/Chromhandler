@@ -56,3 +56,23 @@ class TestKnauerCanRead:
         from chromhandler.readers.knauer_txt import KnauerTXTReader
         (tmp_path / "data.txt").write_text("\n\n\n\n\n")
         assert KnauerTXTReader.can_read(tmp_path) is False
+
+
+class TestShimadzuCanRead:
+    def test_detects_shimadzu_fixture(self) -> None:
+        from chromhandler.readers.shimadzu import ShimadzuReader
+        assert ShimadzuReader.can_read(FIXTURE_ROOT / "shimadzu") is True
+
+    def test_rejects_knauer_dir(self) -> None:
+        from chromhandler.readers.shimadzu import ShimadzuReader
+        assert ShimadzuReader.can_read(FIXTURE_ROOT / "knauer_txt") is False
+
+    def test_rejects_empty_dir(self, tmp_path: Path) -> None:
+        from chromhandler.readers.shimadzu import ShimadzuReader
+        assert ShimadzuReader.can_read(tmp_path) is False
+
+    def test_rejects_incomplete_sections(self, tmp_path: Path) -> None:
+        from chromhandler.readers.shimadzu import ShimadzuReader
+        # Only first two sections present — not a valid Shimadzu file
+        (tmp_path / "data.txt").write_text("[Header]\n[File Information]\n")
+        assert ShimadzuReader.can_read(tmp_path) is False

@@ -6,6 +6,7 @@ from pathlib import Path  # noqa: TC003 - used at runtime for path.read_text()
 from chromhandler.model import Chromatogram, Estimate, Peak
 
 _SECTION_RE = re.compile(r"^\[(.+)\]$", re.MULTILINE)
+_SHIMADZU_SECTIONS = ("[Header]", "[File Information]", "[Sample Information]", "[Original Files]")
 
 
 class ShimadzuReader:
@@ -31,6 +32,22 @@ class ShimadzuReader:
             reaction_time=0.0,
         )
     """
+
+    @classmethod
+    def can_read(cls, path: Path) -> bool:
+        """Return True if *path* contains a Shimadzu LabSolutions TXT file."""
+        try:
+            txt_files = [p for p in path.iterdir() if p.is_file() and p.suffix == ".txt"]
+            if not txt_files:
+                return False
+            lines = txt_files[0].read_text(encoding="utf-8", errors="ignore").splitlines()
+            needle = 0
+            for line in lines:
+                if needle < len(_SHIMADZU_SECTIONS) and line.strip() == _SHIMADZU_SECTIONS[needle]:
+                    needle += 1
+            return needle == len(_SHIMADZU_SECTIONS)
+        except OSError:
+            return False
 
     def read_file(
         self,
