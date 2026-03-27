@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
@@ -57,12 +58,12 @@ def _estimate(mean: float, std: float | None = None, samples: list[float] | None
     """Build an Estimate with mean and optional statistics."""
     return Estimate(
         mean=mean,
-        sd=std,
-        samples=samples,
+        std=std,
+        samples=samples or [],  # type: ignore[arg-type]
     )
 
 
-def _peak(
+def _peak(  # type: ignore[reportUnusedFunction]
     mol_id: str = "mol_a",
     chrom_id: str = "chrom_a",
     location_mean: float = 5.0,
@@ -77,7 +78,7 @@ def _peak(
     )
 
 
-def _chromatogram(
+def _chromatogram(  # type: ignore[reportUnusedFunction]
     chrom_id: str = "chrom_a",
     sample_id: str = "sample_a",
     peaks: list[Peak] | None = None,
@@ -93,7 +94,7 @@ def _chromatogram(
     )
 
 
-def _initial_condition(
+def _initial_condition(  # type: ignore[reportUnusedFunction]
     mol_id: str = "mol_a",
     init_conc: float = 100.0,
     conc_unit: str = "umol / l",
@@ -137,7 +138,7 @@ def _handler(
 # ============================================================================
 
 
-def _peak_annotation(
+def _peak_annotation(  # type: ignore[reportUnusedFunction]
     molecule_id: str = "mol_a",
     rt_min: float = 0.2,
     rt_max: float = 0.8,
@@ -154,7 +155,7 @@ def _peak_annotation(
     )
 
 
-def _baseline_annotation(
+def _baseline_annotation(  # type: ignore[reportUnusedFunction]
     rt_min: float = 0.0,
     rt_max: float = 0.1,
 ) -> BaselineAnnotation:
@@ -170,10 +171,10 @@ def _baseline_annotation(
 # ============================================================================
 
 
-def _make_posterior_samples(
+def _make_posterior_samples(  # type: ignore[reportUnusedFunction]
     area_samples: list[float],
     apex_samples: list[float],
-) -> dict[str, np.ndarray]:
+) -> dict[str, npt.NDArray[np.float64]]:
     """Build a minimal posterior samples dict [n_sample, n_trace, n_peak].
 
     Mimics output from BetterFitter.fit() MCMC chain.
@@ -234,7 +235,7 @@ def matplotlib_agg():
 # ============================================================================
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config) -> None:  # type: ignore[name-defined]
     """Register custom pytest markers."""
     config.addinivalue_line("markers", "unit: marks test as unit test (fast, isolated)")
     config.addinivalue_line("markers", "integration: marks test as integration test (may be slow)")
