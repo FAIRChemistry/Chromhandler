@@ -5,23 +5,19 @@ test suite. Subdirectory conftest.py files inherit these fixtures and can add
 their own specialized fixtures.
 
 Fixture Organization:
-  - Model builders: Lightweight constructors for Molecule, Peak, Sample, Chromatogram
-  - Handler builders: Handlers with specific configurations
-  - Posterior samples: MCMC-like sample structures
-  - Annotations: PeakAnnotation, BaselineAnnotation helpers
+  - Model builders: Lightweight constructors for Molecule, Sample, Handler
+  - Pytest fixtures: Lazy-evaluated builders for common test objects
+  - Pytest markers: Custom markers for categorizing tests
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-import numpy.typing as npt
 import pytest
 
-from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 from chromhandler.handler import Handler
-from chromhandler.model import Chromatogram, Estimate, InitialCondition, Peak, Sample
+from chromhandler.model import Chromatogram, InitialCondition, Sample
 from chromhandler.molecule import Molecule
 from chromhandler.protein import Protein
 
@@ -54,59 +50,6 @@ def _protein(protein_id: str = "prot_a", name: str | None = None) -> Protein:
     )
 
 
-def _estimate(mean: float, std: float | None = None, samples: list[float] | None = None) -> Estimate:
-    """Build an Estimate with mean and optional statistics."""
-    return Estimate(
-        mean=mean,
-        std=std,
-        samples=samples or [],  # type: ignore[arg-type]
-    )
-
-
-def _peak(  # type: ignore[reportUnusedFunction]
-    mol_id: str = "mol_a",
-    chrom_id: str = "chrom_a",
-    location_mean: float = 5.0,
-    area_mean: float = 1000.0,
-) -> Peak:
-    """Build a minimal Peak."""
-    return Peak(
-        chromatogram_id=chrom_id,
-        molecule_id=mol_id,
-        location=_estimate(mean=location_mean),
-        area=_estimate(mean=area_mean),
-    )
-
-
-def _chromatogram(  # type: ignore[reportUnusedFunction]
-    chrom_id: str = "chrom_a",
-    sample_id: str = "sample_a",
-    peaks: list[Peak] | None = None,
-    reaction_time: float | None = None,
-) -> Chromatogram:
-    """Build a minimal Chromatogram."""
-    return Chromatogram(
-        id=chrom_id,
-        sample_id=sample_id,
-        reaction_time=reaction_time,
-        reaction_time_unit="min",
-        peaks=peaks or [],
-    )
-
-
-def _initial_condition(  # type: ignore[reportUnusedFunction]
-    mol_id: str = "mol_a",
-    init_conc: float = 100.0,
-    conc_unit: str = "umol / l",
-) -> InitialCondition:
-    """Build an InitialCondition."""
-    return InitialCondition(
-        molecule_id=mol_id,
-        init_conc=init_conc,
-        conc_unit=conc_unit,
-    )
-
-
 def _sample(
     sample_id: str = "sample_a",
     chromatograms: list[Chromatogram] | None = None,
@@ -133,61 +76,6 @@ def _handler(
     )
 
 
-# ============================================================================
-# Peak Annotation Builders
-# ============================================================================
-
-
-def _peak_annotation(  # type: ignore[reportUnusedFunction]
-    molecule_id: str = "mol_a",
-    rt_min: float = 0.2,
-    rt_max: float = 0.8,
-    mode: str = "single",
-    artefact_side: str | None = None,
-) -> PeakAnnotation:
-    """Build a PeakAnnotation for peak finding."""
-    return PeakAnnotation(
-        molecule_id=molecule_id,
-        rt_min=rt_min,
-        rt_max=rt_max,
-        mode=mode,  # type: ignore[arg-type]
-        artefact_side=artefact_side,  # type: ignore[arg-type]
-    )
-
-
-def _baseline_annotation(  # type: ignore[reportUnusedFunction]
-    rt_min: float = 0.0,
-    rt_max: float = 0.1,
-) -> BaselineAnnotation:
-    """Build a BaselineAnnotation for baseline region."""
-    return BaselineAnnotation(
-        rt_min=rt_min,
-        rt_max=rt_max,
-    )
-
-
-# ============================================================================
-# Posterior Sample Builders (for fitting tests)
-# ============================================================================
-
-
-def _make_posterior_samples(  # type: ignore[reportUnusedFunction]
-    area_samples: list[float],
-    apex_samples: list[float],
-) -> dict[str, npt.NDArray[np.float64]]:
-    """Build a minimal posterior samples dict [n_sample, n_trace, n_peak].
-
-    Mimics output from BetterFitter.fit() MCMC chain.
-    """
-    area_arr = np.asarray(area_samples, dtype=float).reshape(-1, 1, 1)
-    apex_arr = np.asarray(apex_samples, dtype=float).reshape(-1, 1, 1)
-    zero_arr = np.zeros_like(area_arr)
-    return {
-        "area_l": area_arr,
-        "area_r": zero_arr,
-        "apex_l": apex_arr,
-        "apex_r": zero_arr,
-    }
 
 
 # ============================================================================
