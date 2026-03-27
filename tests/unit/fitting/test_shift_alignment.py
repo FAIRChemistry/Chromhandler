@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 
 from chromhandler.fitting.shift import align_chromatograms, shift_trace_linear
 
 
+@pytest.mark.unit
 def test_shift_trace_linear_uses_continuous_interpolation() -> None:
     trace = np.array([0.0, 10.0, 20.0, 30.0], dtype=np.float32)
 
@@ -13,6 +15,7 @@ def test_shift_trace_linear_uses_continuous_interpolation() -> None:
     np.testing.assert_allclose(shifted_neg, np.array([14.0, 24.0, 30.0, 30.0], dtype=np.float32), atol=1e-6)
 
 
+@pytest.mark.unit
 def test_alignment_keeps_y_values_unchanged() -> None:
     signal = np.array(
         [
@@ -37,6 +40,7 @@ def test_alignment_keeps_y_values_unchanged() -> None:
     np.testing.assert_allclose(aligned, signal)
 
 
+@pytest.mark.unit
 def test_alignment_can_return_fractional_shifts() -> None:
     x = np.arange(121, dtype=np.float32)
     base = np.exp(-0.5 * ((x - 60.0) / 5.0) ** 2).astype(np.float32)
@@ -54,6 +58,7 @@ def test_alignment_can_return_fractional_shifts() -> None:
     assert np.any(fractional > 1e-3)
 
 
+@pytest.mark.unit
 def test_alignment_initializer_detects_large_coarse_shift() -> None:
     x = np.arange(241, dtype=np.float32)
     base = np.exp(-0.5 * ((x - 120.0) / 6.0) ** 2).astype(np.float32)

@@ -98,6 +98,7 @@ def _build_default_view() -> BetterFitter:
     return parent._make_subset_view(_DEFAULT_SUBSET_NAME)
 
 
+@pytest.mark.fitting
 def test_compute_model_inputs_exposes_hierarchical_apex_priors() -> None:
     fitter = _build_default_view()
 
@@ -112,6 +113,7 @@ def test_compute_model_inputs_exposes_hierarchical_apex_priors() -> None:
     assert float(inputs["trace_shift_scale"]) > 0.0
 
 
+@pytest.mark.fitting
 def test_compute_model_inputs_includes_window_bounds() -> None:
     fitter = _build_default_view()
 
@@ -124,6 +126,7 @@ def test_compute_model_inputs_includes_window_bounds() -> None:
     assert np.all(inputs["window_hi"] > inputs["window_lo"])
 
 
+@pytest.mark.fitting
 def test_model_assembles_apex_and_separation_consistently_across_modes() -> None:
     trace = handlers.trace(handlers.seed(model, rng_seed=0)).get_trace(**_model_kwargs())
 
@@ -159,6 +162,7 @@ def _model_kwargs_vary() -> dict[str, jnp.ndarray | None]:
     return kwargs
 
 
+@pytest.mark.fitting
 def test_free_doublet_separation_fixed_shapes_and_bounds() -> None:
     """Fixed separation: all traces share the typical; no trace-scale sampled."""
     trace = handlers.trace(handlers.seed(model, rng_seed=1)).get_trace(
@@ -188,6 +192,7 @@ def test_free_doublet_separation_fixed_shapes_and_bounds() -> None:
     assert "sep_trace_scale" not in trace
 
 
+@pytest.mark.fitting
 def test_free_doublet_separation_vary_shapes_and_bounds() -> None:
     """Varying separation: per-peak trace-scale sampled; traces differ."""
     trace = handlers.trace(handlers.seed(model, rng_seed=1)).get_trace(**_model_kwargs_vary())
@@ -207,6 +212,7 @@ def test_free_doublet_separation_vary_shapes_and_bounds() -> None:
     assert np.all(separation_free <= separation_free_max[None, :])
 
 
+@pytest.mark.fitting
 def test_free_doublet_separation_broadcasts_typical_when_trace_offset_is_zero() -> None:
     trace = handlers.trace(
         handlers.substitute(
@@ -226,6 +232,7 @@ def test_free_doublet_separation_broadcasts_typical_when_trace_offset_is_zero() 
     )
 
 
+@pytest.mark.fitting
 def test_free_doublet_separation_stays_within_bounds_for_extreme_offsets() -> None:
     kwargs = _model_kwargs_vary()
 
@@ -260,6 +267,7 @@ def test_free_doublet_separation_stays_within_bounds_for_extreme_offsets() -> No
     assert np.all(sep_pos <= sep_max[None, :])
 
 
+@pytest.mark.fitting
 def test_separation_bounded_by_window_geometry() -> None:
     kwargs = _model_kwargs()
     # Narrow window for the free peak (index 2)
@@ -277,6 +285,7 @@ def test_separation_bounded_by_window_geometry() -> None:
     assert np.all(separation_free > 0.0)
 
 
+@pytest.mark.fitting
 def test_artefact_area_hierarchy_shapes_and_positivity() -> None:
     trace = handlers.trace(handlers.seed(model, rng_seed=5)).get_trace(**_model_kwargs())
 
@@ -291,6 +300,7 @@ def test_artefact_area_hierarchy_shapes_and_positivity() -> None:
     assert np.all(area_artefact > 0.0)
 
 
+@pytest.mark.fitting
 def test_artefact_area_equals_typical_when_offset_is_zero() -> None:
     trace = handlers.trace(
         handlers.substitute(
@@ -310,6 +320,7 @@ def test_artefact_area_equals_typical_when_offset_is_zero() -> None:
     )
 
 
+@pytest.mark.fitting
 def test_artefact_area_varies_across_traces() -> None:
     trace = handlers.trace(handlers.seed(model, rng_seed=7)).get_trace(**_model_kwargs())
 
@@ -318,6 +329,7 @@ def test_artefact_area_varies_across_traces() -> None:
     assert not np.allclose(area_artefact[0, 0], area_artefact[1, 0])
 
 
+@pytest.mark.fitting
 def test_trace_parameter_names_expose_pooled_separation_diagnostics() -> None:
     assert "separation_free_typical" in TRACE_PARAMETER_NAMES
     assert "sep_trace_scale" in TRACE_PARAMETER_NAMES
@@ -327,11 +339,13 @@ def test_trace_parameter_names_expose_pooled_separation_diagnostics() -> None:
     assert "area_artefact_trace_offset" not in TRACE_PARAMETER_NAMES
 
 
+@pytest.mark.fitting
 def test_peak_annotation_vary_separation_defaults_false() -> None:
     ann = PeakAnnotation(molecule_id="x", rt_min=1.0, rt_max=2.0, mode="free_doublet")
     assert ann.vary_separation is False
 
 
+@pytest.mark.fitting
 def test_peak_annotation_vary_separation_true_only_on_free_doublet() -> None:
     import pytest
 
@@ -339,6 +353,7 @@ def test_peak_annotation_vary_separation_true_only_on_free_doublet() -> None:
         PeakAnnotation(molecule_id="x", rt_min=1.0, rt_max=2.0, mode="single", vary_separation=True)
 
 
+@pytest.mark.fitting
 def test_peak_structure_splits_fixed_and_vary_local_indices() -> None:
     fitter = _build_default_view()
 
@@ -349,6 +364,7 @@ def test_peak_structure_splits_fixed_and_vary_local_indices() -> None:
     assert list(structure["free_vary_local_index"]) == []
 
 
+@pytest.mark.fitting
 def test_peak_structure_vary_separation_true_goes_to_vary_local() -> None:
     x = np.linspace(0.0, 6.0, 200, dtype=float)
     peaks = [
@@ -390,6 +406,7 @@ def test_peak_structure_vary_separation_true_goes_to_vary_local() -> None:
     assert list(structure["free_vary_local_index"]) == [1]
 
 
+@pytest.mark.fitting
 def test_model_fixed_separation_equal_across_traces() -> None:
     """With all fixed peaks, every trace must have identical separation."""
     trace = handlers.trace(handlers.seed(model, rng_seed=10)).get_trace(
@@ -399,6 +416,7 @@ def test_model_fixed_separation_equal_across_traces() -> None:
     assert np.allclose(separation_free[0], separation_free[1])
 
 
+@pytest.mark.fitting
 def test_model_vary_separation_differs_across_traces() -> None:
     """With varying peaks, different traces should (almost surely) differ."""
     trace = handlers.trace(handlers.seed(model, rng_seed=10)).get_trace(
@@ -413,6 +431,7 @@ def test_model_vary_separation_differs_across_traces() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.fitting
 def test_include_artefact_in_area_default_is_false() -> None:
     p = PeakAnnotation(
         molecule_id="X",
@@ -424,6 +443,7 @@ def test_include_artefact_in_area_default_is_false() -> None:
     assert p.include_artefact_in_area is False
 
 
+@pytest.mark.fitting
 def test_include_artefact_in_area_accepted_on_artefact_doublet() -> None:
     p = PeakAnnotation(
         molecule_id="X",
@@ -436,6 +456,7 @@ def test_include_artefact_in_area_accepted_on_artefact_doublet() -> None:
     assert p.include_artefact_in_area is True
 
 
+@pytest.mark.fitting
 def test_include_artefact_in_area_rejected_on_single() -> None:
     with pytest.raises(ValidationError, match="include_artefact_in_area"):
         PeakAnnotation(
@@ -447,6 +468,7 @@ def test_include_artefact_in_area_rejected_on_single() -> None:
         )
 
 
+@pytest.mark.fitting
 def test_include_artefact_in_area_rejected_on_free_doublet() -> None:
     with pytest.raises(ValidationError, match="include_artefact_in_area"):
         PeakAnnotation(
@@ -474,6 +496,7 @@ def _art_peak(side: str, *, include: bool = False) -> PeakAnnotation:
     )
 
 
+@pytest.mark.fitting
 def test_molecule_area_slice_artefact_right_excluded() -> None:
     """Artefact on right → dominant on left → return area_l."""
     peak = _art_peak("right", include=False)
@@ -482,6 +505,7 @@ def test_molecule_area_slice_artefact_right_excluded() -> None:
     np.testing.assert_array_equal(BetterFitter._molecule_area_slice(peak, a_l, a_r), a_l)
 
 
+@pytest.mark.fitting
 def test_molecule_area_slice_artefact_left_excluded() -> None:
     """Artefact on left → dominant on right → return area_r."""
     peak = _art_peak("left", include=False)
@@ -490,6 +514,7 @@ def test_molecule_area_slice_artefact_left_excluded() -> None:
     np.testing.assert_array_equal(BetterFitter._molecule_area_slice(peak, a_l, a_r), a_r)
 
 
+@pytest.mark.fitting
 def test_molecule_area_slice_artefact_included_sums_both() -> None:
     """With include_artefact_in_area=True → area_l + area_r regardless of side."""
     for side in ("left", "right"):
@@ -499,6 +524,7 @@ def test_molecule_area_slice_artefact_included_sums_both() -> None:
         np.testing.assert_array_equal(BetterFitter._molecule_area_slice(peak, a_l, a_r), a_l + a_r)
 
 
+@pytest.mark.fitting
 def test_molecule_area_slice_single_returns_area_l() -> None:
     peak = PeakAnnotation(molecule_id="X", rt_min=1.0, rt_max=2.0, mode="single")
     a_l = np.array([50.0])
@@ -506,6 +532,7 @@ def test_molecule_area_slice_single_returns_area_l() -> None:
     np.testing.assert_array_equal(BetterFitter._molecule_area_slice(peak, a_l, a_r), a_l)
 
 
+@pytest.mark.fitting
 def test_molecule_area_slice_free_doublet_sums_both() -> None:
     peak = PeakAnnotation(molecule_id="X", rt_min=1.0, rt_max=2.0, mode="free_doublet")
     a_l = np.array([60.0, 70.0])
@@ -513,8 +540,9 @@ def test_molecule_area_slice_free_doublet_sums_both() -> None:
     np.testing.assert_array_equal(BetterFitter._molecule_area_slice(peak, a_l, a_r), a_l + a_r)
 
 
+@pytest.mark.fitting
 def test_sigma_r_artefact_respects_loguniform_bounds() -> None:
-    """sigma_r_artefact must stay within [0.5, 2.0] × sigma_prior_loc[artefact_idx]."""
+    """sigma_r_artefact must stay within [0.5, 2.0] x sigma_prior_loc[artefact_idx]."""
     import numpyro.handlers as handlers
 
     from chromhandler.fitting.better_model import model
@@ -538,6 +566,7 @@ def test_sigma_r_artefact_respects_loguniform_bounds() -> None:
         )
 
 
+@pytest.mark.fitting
 def test_baseline_centring_flat_when_slope_is_zero() -> None:
     """When baseline_slope=0 for all traces, baseline_curve must equal baseline_intercept."""
     import numpyro.handlers as handlers
@@ -571,8 +600,9 @@ def test_baseline_centring_flat_when_slope_is_zero() -> None:
         )
 
 
+@pytest.mark.fitting
 def test_sigma_r_free_respects_loguniform_bounds() -> None:
-    """sigma_r_free must stay within [0.5, 2.0] × sigma_prior_loc[free_idx]."""
+    """sigma_r_free must stay within [0.5, 2.0] x sigma_prior_loc[free_idx]."""
     import numpyro.handlers as handlers
 
     from chromhandler.fitting.better_model import model
@@ -598,6 +628,7 @@ def test_sigma_r_free_respects_loguniform_bounds() -> None:
         )
 
 
+@pytest.mark.fitting
 def test_hierarchical_slope_sites_exist_in_trace() -> None:
     """Model must produce baseline_slope_pop_mean, baseline_slope_pop_scale, baseline_slope_raw."""
     import numpyro.handlers as handlers
@@ -611,6 +642,7 @@ def test_hierarchical_slope_sites_exist_in_trace() -> None:
     assert "baseline_slope" in trace, "baseline_slope deterministic missing"
 
 
+@pytest.mark.fitting
 def test_hierarchical_slope_per_trace_shapes() -> None:
     """baseline_slope_raw [n_trace], baseline_slope [n_trace], pop scalars."""
     import numpyro.handlers as handlers
@@ -626,6 +658,7 @@ def test_hierarchical_slope_per_trace_shapes() -> None:
     assert np.asarray(trace["baseline_slope"]["value"]).shape == (2,)
 
 
+@pytest.mark.fitting
 def test_hierarchical_slope_pop_scale_positive() -> None:
     """Population scale is always positive (HalfNormal)."""
     import numpyro.handlers as handlers
@@ -638,6 +671,7 @@ def test_hierarchical_slope_pop_scale_positive() -> None:
         assert pop_scale > 0.0, f"seed={seed}: pop_scale={pop_scale} not positive"
 
 
+@pytest.mark.fitting
 def test_hierarchical_slope_in_summary_parameter_names() -> None:
     from chromhandler.fitting.better_model import SUMMARY_PARAMETER_NAMES
 
@@ -645,8 +679,9 @@ def test_hierarchical_slope_in_summary_parameter_names() -> None:
     assert "baseline_slope_pop_scale" in SUMMARY_PARAMETER_NAMES
 
 
+@pytest.mark.fitting
 def test_sigma_base_respects_loguniform_bounds() -> None:
-    """sigma_base must stay within [0.5, 2.0] × sigma_prior_loc for every prior sample."""
+    """sigma_base must stay within [0.5, 2.0] x sigma_prior_loc for every prior sample."""
     import numpyro.handlers as handlers
 
     from chromhandler.fitting.better_model import model
@@ -666,6 +701,7 @@ def test_sigma_base_respects_loguniform_bounds() -> None:
         assert np.all(sigma_base <= upper + 1e-5), f"seed={seed}: sigma_base={sigma_base} above upper={upper}"
 
 
+@pytest.mark.fitting
 def test_svi_smoke_with_loguniform_sigma_and_hierarchical_slope() -> None:
     """End-to-end: SVI should complete and posterior shapes should be correct."""
     x = np.linspace(0.0, 6.0, 400, dtype=float)
@@ -742,6 +778,7 @@ def test_svi_smoke_with_loguniform_sigma_and_hierarchical_slope() -> None:
     )
 
 
+@pytest.mark.fitting
 def test_hierarchical_slope_formula_under_substitution() -> None:
     """baseline_slope deterministic must equal pop_mean + pop_scale * raw."""
     import numpyro.handlers as handlers

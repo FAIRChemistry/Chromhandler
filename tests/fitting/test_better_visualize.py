@@ -8,12 +8,14 @@ from chromhandler.fitting.better_fitter import PosteriorCurves
 from chromhandler.fitting.better_visualize import _validate_hex_colors, plot_fit
 
 
+@pytest.mark.fitting
 def test_validate_hex_colors_valid():
     """Test that valid hex codes pass validation."""
     colors = ["#FF5733", "#33FF57", "#3357FF"]
     _validate_hex_colors(colors, n_peak=3)  # Should not raise
 
 
+@pytest.mark.fitting
 def test_validate_hex_colors_wrong_length():
     """Test that wrong number of colors raises ValueError."""
     colors = ["#FF5733", "#33FF57"]
@@ -21,6 +23,7 @@ def test_validate_hex_colors_wrong_length():
         _validate_hex_colors(colors, n_peak=3)
 
 
+@pytest.mark.fitting
 def test_validate_hex_colors_invalid_format():
     """Test that invalid hex format raises ValueError."""
     colors = ["FF5733", "#33FF57", "#3357FF"]  # Missing # on first
@@ -28,6 +31,7 @@ def test_validate_hex_colors_invalid_format():
         _validate_hex_colors(colors, n_peak=3)
 
 
+@pytest.mark.fitting
 def test_validate_hex_colors_invalid_length():
     """Test that too-short hex code raises ValueError."""
     colors = ["#FF5", "#33FF57", "#3357FF"]  # Too short
@@ -88,16 +92,18 @@ def sample_posterior_curves():
     return time, signal, peaks, curves
 
 
+@pytest.mark.fitting
 def test_plot_fit_with_custom_colors(sample_posterior_curves):
     """Test that plot_fit accepts colors parameter."""
     time, signal, peaks, curves = sample_posterior_curves
 
     # Should not raise with valid colors
-    fig, axes = plot_fit(time, signal, peaks, curves, colors=["#FF5733", "#33FF57"])
+    fig, _axes = plot_fit(time, signal, peaks, curves, colors=["#FF5733", "#33FF57"])
     assert fig is not None
     plt.close(fig)
 
 
+@pytest.mark.fitting
 def test_plot_fit_colors_wrong_length(sample_posterior_curves):
     """Test that plot_fit raises ValueError for mismatched colors length."""
     time, signal, peaks, curves = sample_posterior_curves
@@ -112,6 +118,7 @@ def test_plot_fit_colors_wrong_length(sample_posterior_curves):
         )
 
 
+@pytest.mark.fitting
 def test_plot_fit_custom_colors_rendering(sample_posterior_curves):
     """Test that custom colors are actually rendered (sanity check)."""
     time, signal, peaks, curves = sample_posterior_curves
