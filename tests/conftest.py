@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from chromhandler.handler import Handler
-from chromhandler.model import Chromatogram, InitialCondition, Sample
+from chromhandler.model import Chromatogram, Estimate, InitialCondition, Peak, Sample
 from chromhandler.molecule import Molecule
 from chromhandler.protein import Protein
 
@@ -47,6 +47,59 @@ def _protein(protein_id: str = "prot_a", name: str | None = None) -> Protein:
     return Protein(
         id=protein_id,
         name=name or f"Protein_{protein_id}",
+    )
+
+
+def _estimate(mean: float, std: float | None = None, samples: list[float] | None = None) -> Estimate:  # type: ignore[reportUnusedFunction]
+    """Build an Estimate with mean and optional statistics."""
+    return Estimate(
+        mean=mean,
+        std=std,
+        samples=samples or [],  # type: ignore[arg-type]
+    )
+
+
+def _peak(  # type: ignore[reportUnusedFunction]
+    mol_id: str = "mol_a",
+    chrom_id: str = "chrom_a",
+    location_mean: float = 5.0,
+    area_mean: float = 1000.0,
+) -> Peak:
+    """Build a minimal Peak."""
+    return Peak(
+        chromatogram_id=chrom_id,
+        molecule_id=mol_id,
+        location=_estimate(mean=location_mean),
+        area=_estimate(mean=area_mean),
+    )
+
+
+def _chromatogram(  # type: ignore[reportUnusedFunction]
+    chrom_id: str = "chrom_a",
+    sample_id: str = "sample_a",
+    peaks: list[Peak] | None = None,
+    reaction_time: float | None = None,
+) -> Chromatogram:
+    """Build a minimal Chromatogram."""
+    return Chromatogram(
+        id=chrom_id,
+        sample_id=sample_id,
+        reaction_time=reaction_time,
+        reaction_time_unit="min",
+        peaks=peaks or [],
+    )
+
+
+def _initial_condition(  # type: ignore[reportUnusedFunction]
+    mol_id: str = "mol_a",
+    init_conc: float = 100.0,
+    conc_unit: str = "umol / l",
+) -> InitialCondition:
+    """Build an InitialCondition."""
+    return InitialCondition(
+        molecule_id=mol_id,
+        init_conc=init_conc,
+        conc_unit=conc_unit,
     )
 
 
