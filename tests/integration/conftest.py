@@ -8,15 +8,16 @@ This conftest.py provides fixtures for integration tests that span multiple modu
 
 from __future__ import annotations
 
-import pytest
-
-from chromhandler.handler import Handler
-from chromhandler.model import Chromatogram, Sample
-
 # Import builders from parent conftest (pytest conftest loader makes parent available)
 # Using a dynamic import to avoid circular dependencies
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
+
+if TYPE_CHECKING:
+    from chromhandler.handler import Handler
 
 _parent_conftest_path = Path(__file__).parent.parent / "conftest.py"
 spec = importlib.util.spec_from_file_location("parent_conftest", _parent_conftest_path)

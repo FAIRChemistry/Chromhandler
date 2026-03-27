@@ -15,7 +15,7 @@ from chromhandler.fitting.better_fitter import BetterFitter
 
 # Import from parent conftest (tests/conftest.py)
 # Pytest automatically loads parent conftest files, so we can import directly
-from tests.conftest import _peak_annotation, _make_posterior_samples
+from tests.conftest import _make_posterior_samples, _peak_annotation
 
 
 @pytest.fixture
