@@ -3,118 +3,32 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-import numpy as np
-import numpy.typing as npt
 import pandas as pd
-from dotted_dict import PreserveKeysDottedDict
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from dotted_dict import DottedDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import pretty, visualize
 from .annotations import PeakAnnotation, PeakWindow
 from .enzymeml import handler_to_enzymeml_document
 from .model import Chromatogram, InitialCondition, Peak, Sample
-from .molecule import CalibrationMethod, LinearCalibration, Molecule
+from .molecule import Molecule
 from .protein import Protein
 from .readers.utils import parse_reaction_time
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import numpy as np
+    import numpy.typing as npt
     from matplotlib.figure import Figure
     from rich.console import Console, Group
 
+    from .calibration import LinearCalibration
     from .fitting.better_fitter import BetterFitter
     from .readers.abstractreader import AbstractReader
 
-
-def _coerce_molecule_registry(v: object) -> PreserveKeysDottedDict:
-    """Accept ``PreserveKeysDottedDict``, ``dict``, or legacy ``list`` of molecules."""
-    if isinstance(v, PreserveKeysDottedDict):
-        return v
-    out: PreserveKeysDottedDict = PreserveKeysDottedDict()
-    if isinstance(v, dict):
-        for raw in cast("dict[str, Any]", v).values():
-            mol = raw if isinstance(raw, Molecule) else Molecule.model_validate(raw)
-            out[mol.id] = mol
-        return out
-    if isinstance(v, list):
-        for raw in cast("list[Any]", v):
-            mol = raw if isinstance(raw, Molecule) else Molecule.model_validate(raw)
-            out[mol.id] = mol
-        return out
-    raise TypeError(f"molecules must be PreserveKeysDottedDict, dict, or list, not {type(v).__name__}")
-
-
-def _coerce_protein_registry(v: object) -> PreserveKeysDottedDict:
-    """Accept ``PreserveKeysDottedDict``, ``dict``, or legacy ``list`` of proteins."""
-    if isinstance(v, PreserveKeysDottedDict):
-        return v
-    out: PreserveKeysDottedDict = PreserveKeysDottedDict()
-    if isinstance(v, dict):
-        for raw in cast("dict[str, Any]", v).values():
-            prot = raw if isinstance(raw, Protein) else Protein.model_validate(raw)
-            out[prot.id] = prot
-        return out
-    if isinstance(v, list):
-        for raw in cast("list[Any]", v):
-            prot = raw if isinstance(raw, Protein) else Protein.model_validate(raw)
-            out[prot.id] = prot
-        return out
-    raise TypeError(f"proteins must be PreserveKeysDottedDict, dict, or list, not {type(v).__name__}")
-
-
-def _coerce_peak_window_registry(v: object) -> PreserveKeysDottedDict:
-    """Accept ``PreserveKeysDottedDict`` or ``dict`` mapping molecule id → window."""
-    if isinstance(v, PreserveKeysDottedDict):
-        return v
-    out: PreserveKeysDottedDict = PreserveKeysDottedDict()
-    if isinstance(v, dict):
-        for raw in cast("dict[str, Any]", v).values():
-            win = raw if isinstance(raw, PeakWindow) else PeakWindow.model_validate(raw)
-            out[win.molecule_id] = win
-        return out
-    raise TypeError(f"peak_windows must be PreserveKeysDottedDict or dict, not {type(v).__name__}")
-
-
-MoleculeRegistry = Annotated[
-    PreserveKeysDottedDict | dict[str, Molecule],
-    BeforeValidator(_coerce_molecule_registry),
-]
-ProteinRegistry = Annotated[
-    PreserveKeysDottedDict | dict[str, Protein],
-    BeforeValidator(_coerce_protein_registry),
-]
-PeakWindowRegistry = Annotated[
-    PreserveKeysDottedDict,
-    BeforeValidator(_coerce_peak_window_registry),
-]
-
-
-def _fit_linear(
-    x: npt.NDArray[np.floating[Any]],
-    y: npt.NDArray[np.floating[Any]],
-    *,
-    fit_intercept: bool,
-) -> tuple[float, float]:
-    """OLS linear regression ``y = slope*x (+ intercept)``.
-
-    Args:
-        x: Predictor array (concentrations).
-        y: Response array (areas).
-        fit_intercept: Whether to include an intercept term.
-
-    Returns:
-        ``(slope, intercept)`` tuple.  *intercept* is ``0.0`` when
-        *fit_intercept* is ``False``.
-    """
-    if fit_intercept:
-        A = np.column_stack([x, np.ones_like(x)])
-        result, *_ = np.linalg.lstsq(A, y, rcond=None)
-        return float(result[0]), float(result[1])
-    slope = float(np.dot(x, y) / np.dot(x, x))
-    return slope, 0.0
 
 
 class Handler(BaseModel):
@@ -124,29 +38,54 @@ class Handler(BaseModel):
     containing one or more :class:`~chromhandler.model.Chromatogram` instances.
     Molecules and proteins are registered separately for peak annotation and
     downstream quantification, keyed by species id in
-    ``PreserveKeysDottedDict`` from ``dotted_dict`` (attribute access works when
+    ``DottedDict`` from ``dotted_dict`` (attribute access works when
     the id is a valid Python identifier). :attr:`peak_windows` uses the same type,
     keyed by molecule id.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    molecules: MoleculeRegistry = Field(
-        default_factory=PreserveKeysDottedDict,
+    molecules: dict[str, Molecule] = Field(
+        default_factory=DottedDict,
         description="Molecules keyed by :attr:`~chromhandler.molecule.Molecule.id`.",
     )
-    proteins: ProteinRegistry = Field(
-        default_factory=PreserveKeysDottedDict,
+    proteins: dict[str, Protein] = Field(
+        default_factory=DottedDict,
         description="Proteins keyed by :attr:`~chromhandler.protein.Protein.id`.",
     )
     samples: list[Sample] = Field(
         default_factory=list,
         description="Samples, each holding one or more chromatograms.",
     )
-    peak_windows: PeakWindowRegistry = Field(
-        default_factory=PreserveKeysDottedDict,
+    peak_windows: dict[str, PeakWindow] = Field(
+        default_factory=DottedDict,
         description="Retention-time peak windows keyed by molecule id.",
     )
+
+    @model_validator(mode="after")
+    def _validate_registries(self) -> Handler:
+        """Validate registry key/ID alignment and ensure DottedDict containers."""
+        for key, mol in self.molecules.items():
+            if key != mol.id:
+                raise ValueError(
+                    f"molecules key {key!r} does not match Molecule.id {mol.id!r}. "
+                    "Use create_molecule() or register_molecule() to add molecules."
+                )
+        for key, prot in self.proteins.items():
+            if key != prot.id:
+                raise ValueError(
+                    f"proteins key {key!r} does not match Protein.id {prot.id!r}. "
+                    "Use create_protein() or register_protein() to add proteins."
+                )
+        # Pydantic rebuilds dicts as plain dict during validation — restore DottedDict.
+        if not isinstance(self.molecules, DottedDict):
+            self.molecules = DottedDict(self.molecules)
+        if not isinstance(self.proteins, DottedDict):
+            self.proteins = DottedDict(self.proteins)
+        if not isinstance(self.peak_windows, DottedDict):
+            self.peak_windows = DottedDict(self.peak_windows)
+        return self
+
     # ------------------------------------------------------------------
     # Core read method
     # ------------------------------------------------------------------
@@ -460,6 +399,171 @@ class Handler(BaseModel):
 
         return handler
 
+    @classmethod
+    def read_agilent(
+        cls,
+        path: Path | str,
+        *,
+        mode: Literal["timecourse", "endpoint"] = "timecourse",
+        wavelength: float | None = None,
+        channel: str | None = None,
+    ) -> Handler:
+        """Read a directory of Agilent ``.D`` chromatogram directories.
+
+        Each ``.D`` sub-directory represents one injection.  The ``rainbow``
+        library is used to parse the proprietary binary files.
+
+        **Timecourse mode** (default) — reaction time extracted from each
+        ``.D`` directory stem (e.g. ``"run_30min.D"`` → ``30.0 min``):
+
+        *Dir-of-dirs* (one sample per sub-directory)::
+
+            data/
+            ├── sample_A/
+            │   ├── 0min.D
+            │   └── 30min.D
+            └── sample_B/
+                └── 0min.D
+
+        *Flat* (all ``.D`` dirs are chromatograms of a single sample)::
+
+            data/
+            ├── 0min.D
+            └── 30min.D
+
+        **Endpoint mode** — each ``.D`` directory becomes its own sample::
+
+            data/
+            ├── condition_A.D   → sample "condition_A"
+            └── condition_B.D   → sample "condition_B"
+
+        **Detector-file selection** — Agilent ``.D`` directories may contain
+        multiple detector files (e.g. ``FID1A.CH``, ``TCD2B.CH``):
+
+        * ``channel`` selects by file name (case-insensitive).
+        * ``wavelength`` selects by DAD wavelength in nm (only for UV/DAD data).
+        * If both are ``None`` and the directory holds exactly one file, that
+          file is used automatically; otherwise a :exc:`ValueError` is raised.
+
+        Args:
+            path: Root directory containing ``.D`` sub-directories.
+            mode: ``"timecourse"`` (default) or ``"endpoint"``.
+            wavelength: DAD wavelength in nm to select, or ``None``.
+            channel: Detector file name to select (e.g. ``"FID1A.CH"``), or
+                ``None``.
+
+        Returns:
+            A fully populated :class:`Handler`.
+        """
+        from .readers.agilent import AgilentReader
+
+        root = Path(path)
+        if not root.is_dir():
+            raise NotADirectoryError(f"'{root}' is not a directory.")
+
+        handler = cls()
+        reader = AgilentReader(wavelength=wavelength, channel=channel)
+
+        def _is_d_dir(p: Path) -> bool:
+            return p.is_dir() and p.name.endswith(".D") and not p.name.startswith(".")
+
+        if mode == "endpoint":
+            d_dirs = sorted(p for p in root.iterdir() if _is_d_dir(p))
+            if not d_dirs:
+                raise FileNotFoundError(f"No '.D' directories found under '{root}'.")
+            for d_dir in d_dirs:
+                handler.read_chromatogram(d_dir.stem, d_dir.stem, d_dir, None, reader)
+            return handler
+
+        # timecourse mode
+        subdirs = sorted(
+            p
+            for p in root.iterdir()
+            if p.is_dir() and not p.name.endswith(".D") and not p.name.startswith(".")
+        )
+        d_dirs_flat = sorted(p for p in root.iterdir() if _is_d_dir(p))
+
+        if subdirs:
+            for sample_dir in subdirs:
+                sample_id = sample_dir.name
+                for d_dir in sorted(p for p in sample_dir.iterdir() if _is_d_dir(p)):
+                    rt = parse_reaction_time(d_dir.stem)
+                    handler.read_chromatogram(sample_id, d_dir.stem, d_dir, rt, reader)
+        elif d_dirs_flat:
+            sample_id = root.name
+            for d_dir in d_dirs_flat:
+                rt = parse_reaction_time(d_dir.stem)
+                handler.read_chromatogram(sample_id, d_dir.stem, d_dir, rt, reader)
+        else:
+            raise FileNotFoundError(f"No '.D' directories found under '{root}'.")
+
+        for sample in handler.samples:
+            sample.chromatograms.sort(key=lambda c: (c.reaction_time is None, c.reaction_time or 0))
+
+        return handler
+
+    @classmethod
+    def read(
+        cls,
+        path: Path | str,
+        *,
+        mode: Literal["timecourse", "endpoint"] = "timecourse",
+        channel: str | None = None,
+        wavelength: float | None = None,
+    ) -> Handler:
+        """Auto-detect instrument format and read chromatography data.
+
+        Tries each registered reader in order (Agilent → ASM → Knauer →
+        Shimadzu) and delegates to the matching ``read_*`` classmethod.
+
+        Agilent-specific kwargs (``channel``, ``wavelength``) are forwarded
+        only when the Agilent format is detected; they are silently ignored
+        for all other formats.
+
+        Args:
+            path: Root directory containing chromatography data.
+            mode: ``"timecourse"`` (default) or ``"endpoint"``.
+            channel: Agilent detector-file name (e.g. ``"FID1A.CH"``).
+            wavelength: Agilent DAD wavelength in nm.
+
+        Returns:
+            A fully populated :class:`Handler`.
+
+        Raises:
+            NotADirectoryError: If *path* is not a directory.
+            ValueError: If no registered reader recognises the contents of
+                *path*.
+        """
+        from .readers import READERS, AgilentReader
+
+        root = Path(path)
+        if not root.is_dir():
+            raise NotADirectoryError(f"'{root}' is not a directory.")
+
+        for reader_cls in READERS:
+            if reader_cls.can_read(root):
+                if reader_cls is AgilentReader:
+                    return cls.read_agilent(
+                        root, mode=mode, channel=channel, wavelength=wavelength
+                    )
+                dispatch = {
+                    "ASMReader": cls.read_asm,
+                    "KnauerTXTReader": cls.read_knauer,
+                    "ShimadzuReader": cls.read_shimadzu,
+                }
+                return dispatch[reader_cls.__name__](root, mode=mode)
+
+        # Build a helpful error listing what was actually found.
+        try:
+            found = sorted({p.suffix or p.name for p in root.iterdir()})
+        except OSError:
+            found = []
+        found_str = ", ".join(found) if found else "nothing"
+        raise ValueError(
+            f"No reader recognised the contents of '{root}' (found: {found_str}). "
+            "Use a specific read_* method: read_agilent, read_asm, read_knauer, read_shimadzu."
+        )
+
     # ------------------------------------------------------------------
     # Peak annotation management
     # ------------------------------------------------------------------
@@ -667,9 +771,9 @@ class Handler(BaseModel):
         ``Peak.area.samples`` (posterior draws) → ``Peak.area.median`` →
         ``Peak.area.mean``.
 
-        The fitted :class:`~chromhandler.molecule.LinearCalibration` is stored on
-        ``Molecule.calibration`` as a side effect.  Retrieve it afterwards via
-        :meth:`get_molecule`.
+        The fitted :class:`~chromhandler.calibration.LinearCalibration` is stored
+        on ``Molecule.calibration`` as a side effect.  Retrieve it afterwards via
+        ``handler.molecules["Ino"].calibration``.
 
         Args:
             molecule_ids: Which molecules to calibrate.  Default: every molecule
@@ -690,142 +794,18 @@ class Handler(BaseModel):
             handler.write_fitted_peaks(fitter)
             handler.calibrate_molecules(molecule_ids=["Ino", "Hyp"])
 
-            mol = handler.get_molecule("Ino")
-            est = mol.calibration.area_to_conc(12_500.0)
+            est = handler.molecules["Ino"].calibration.area_to_conc(12_500.0)
             print(est.mean, est.std)
         """
-        if method == "internal":
-            raise NotImplementedError("Internal standard calibration is not yet implemented.")
-        if method != "external":
-            raise ValueError(f"Unknown calibration method: {method!r}. Use 'external'.")
+        from .calibration import calibrate_molecules as _cal
 
-        targets = (
-            [self.get_molecule(mid) for mid in molecule_ids]
-            if molecule_ids is not None
-            else list(self.molecules.values())
-        )
-
-        summary: list[tuple[Molecule, LinearCalibration | None]] = []
-        for molecule in targets:
-            cal = self._external_calibration(molecule, fit_intercept=fit_intercept)
-            if cal is not None:
-                molecule.calibration = cal
-                self.molecules[molecule.id] = molecule
-            summary.append((molecule, cal))
-
-        if verbose:
-            pretty.display_calibration_summary(summary)
-
-    def _external_calibration(
-        self,
-        molecule: Molecule,
-        *,
-        fit_intercept: bool,
-    ) -> LinearCalibration | None:
-        """Build a :class:`~chromhandler.molecule.LinearCalibration` from t=0 samples.
-
-        Iterates all samples whose chromatograms include ``reaction_time == 0``,
-        collects ``(init_conc, peak_area)`` pairs, and fits an OLS linear model.
-        Returns ``None`` (with a warning) when fewer than 2 data points are found.
-        """
-        known_concs: list[float] = []
-        areas_mean: list[float] = []
-        area_samples_per_point: list[list[float]] = []
-        chrom_ids: list[str] = []
-        conc_unit_ref: str | None = None
-
-        for sample in self.samples:
-            # Only calibration standards (at least one chromatogram at t=0)
-            if not any(c.reaction_time is not None and c.reaction_time == 0.0 for c in sample.chromatograms):
-                continue
-
-            # Known concentration for this molecule
-            ic = next(
-                (ic for ic in sample.initial_conditions if ic.molecule_id == molecule.id),
-                None,
-            )
-            if ic is None:
-                continue
-
-            # Store conc_unit from the first valid ic
-            if conc_unit_ref is None:
-                conc_unit_ref = ic.conc_unit if isinstance(ic.conc_unit, str) else ic.conc_unit.id
-
-            # Chromatogram at t=0 that contains a peak for this molecule
-            chrom = next(
-                (
-                    c
-                    for c in sample.chromatograms
-                    if c.reaction_time is not None
-                    and c.reaction_time == 0.0
-                    and any(p.molecule_id == molecule.id for p in c.peaks)
-                ),
-                None,
-            )
-            if chrom is None:
-                continue
-
-            peak = next(p for p in chrom.peaks if p.molecule_id == molecule.id)
-
-            # Extract area: posterior samples > median > mean
-            if peak.area.samples:
-                area_pt = float(np.mean(peak.area.samples))
-                area_samples_per_point.append(list(peak.area.samples))
-            elif peak.area.median is not None:
-                area_pt = float(peak.area.median)
-                area_samples_per_point.append([])
-            else:
-                area_pt = float(peak.area.mean)
-                area_samples_per_point.append([])
-
-            known_concs.append(float(ic.init_conc))
-            areas_mean.append(area_pt)
-            chrom_ids.append(str(chrom.id))
-
-        if len(known_concs) < 1:
-            return None
-
-        conc_arr = np.asarray(known_concs, dtype=float)
-        area_arr = np.asarray(areas_mean, dtype=float)
-
-        # --- Point-estimate regression ---
-        slope, intercept = _fit_linear(conc_arr, area_arr, fit_intercept=fit_intercept)
-        area_pred = slope * conc_arr + intercept
-        ss_res = float(np.sum((area_arr - area_pred) ** 2))
-        ss_tot = float(np.sum((area_arr - np.mean(area_arr)) ** 2))
-        r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 0.0
-        n_params = 2 if fit_intercept else 1
-        residual_std = float(np.sqrt(ss_res / max(len(conc_arr) - n_params, 1)))
-
-        # --- Per-draw regression (only when ALL points have posterior samples) ---
-        slope_samples: list[float] = []
-        intercept_samples: list[float] = []
-        if all(len(s) > 0 for s in area_samples_per_point):
-            n_draws = min(len(s) for s in area_samples_per_point)
-            for i in range(n_draws):
-                a_i = np.asarray([s[i] for s in area_samples_per_point])
-                s_i, ic_i = _fit_linear(conc_arr, a_i, fit_intercept=fit_intercept)
-                slope_samples.append(float(s_i))
-                intercept_samples.append(float(ic_i))
-
-        return LinearCalibration(
-            method=CalibrationMethod.EXTERNAL,
+        _cal(
+            self.molecules,
+            self.samples,
+            molecule_ids,
             fit_intercept=fit_intercept,
-            slope=float(slope),
-            intercept=float(intercept),
-            r_squared=float(r_squared),
-            residual_std=residual_std,
-            n_standards=len(known_concs),
-            max_area=float(np.max(area_arr)),
-            min_area=float(np.min(area_arr)),
-            max_conc=float(np.max(conc_arr)),
-            min_conc=float(np.min(conc_arr)),
-            slope_samples=slope_samples,
-            intercept_samples=intercept_samples,
-            conc_unit=conc_unit_ref or "",
-            chromatogram_ids=chrom_ids,
-            concentrations=known_concs,
-            areas_mean=areas_mean,
+            method=method,
+            verbose=verbose,
         )
 
     # ------------------------------------------------------------------
@@ -961,24 +941,7 @@ class Handler(BaseModel):
         registered = copy.deepcopy(molecule)
         self.molecules[registered.id] = registered
 
-    def get_molecule(self, molecule_id: str) -> Molecule:
-        """Return the molecule with `molecule_id`.
-
-        Raises:
-            ValueError: If no molecule with that ID exists.
-        """
-        try:
-            return self.molecules[molecule_id]
-        except KeyError:
-            registered = sorted(self.molecules.keys())
-            listed = ", ".join(repr(x) for x in registered) if registered else "(none)"
-            raise ValueError(
-                f"Unknown molecule id {molecule_id!r}. Register the molecule first "
-                "with create_molecule() or register_molecule(). "
-                f"Currently registered ids: {listed}."
-            ) from None
-
-    def define_protein(
+    def create_protein(
         self,
         id: str,
         name: str,
@@ -998,7 +961,7 @@ class Handler(BaseModel):
         )
         self.proteins[protein.id] = protein
 
-    def add_protein(
+    def register_protein(
         self,
         protein: Protein,
     ) -> None:
@@ -1016,7 +979,11 @@ class Handler(BaseModel):
         wavelength: float | None = None,
     ) -> PeakWindow:
         """Add or replace the peak window for *molecule_id* on this handler."""
-        self.get_molecule(molecule_id)
+        if self.molecules.get(molecule_id) is None:
+            raise ValueError(
+                f"Molecule {molecule_id} not found. Define the molecule first "
+                "with create_molecule() or register_molecule()."
+            )
         window = PeakWindow(
             molecule_id=molecule_id,
             rt_min=rt_min,
@@ -1226,7 +1193,7 @@ class Handler(BaseModel):
         }
 
         for molecule_id, window in self.peak_windows.items():
-            molecule = self.get_molecule(molecule_id)
+            molecule = self.molecules[molecule_id]
             assigned_peak_count = 0
             chromatograms_with_no_peaks: list[str] = []
             chromatograms_with_multiple_peaks: list[str] = []
