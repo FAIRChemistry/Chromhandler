@@ -6,8 +6,7 @@ from typing import Any, cast
 
 from loguru import logger
 
-from chromhandler.model import Estimate, Peak
-from chromhandler.readers.abstractreader import ChromatogramData
+from chromhandler.model import Chromatogram, Estimate, Peak
 
 
 def _point_estimate(value: float) -> Estimate:
@@ -19,26 +18,39 @@ class ASMReader:
     """Reader for Allotrope Simple Model (ASM) JSON files.
 
     Implements the :class:`AbstractReader` protocol: parses a single ASM file
-    and returns raw signal/time data plus any peaks extracted from the file.
+    and returns a fully constructed :class:`~chromhandler.model.Chromatogram`.
     Supports both LC and GC aggregate document formats.
 
     Example::
 
         reader = ASMReader()
-        data = reader.read_file(Path("CV10_0min.json"), chromatogram_id="CV10_0min")
-        # data.signal, data.time, data.peaks, data.wavelength
+        chrom = reader.read_file(
+            Path("CV10_0min.json"),
+            chromatogram_id="CV10_0min",
+            sample_id="CV10",
+            reaction_time=0.0,
+        )
     """
 
-    def read_file(self, path: Path, *, chromatogram_id: str) -> ChromatogramData:
+    def read_file(
+        self,
+        path: Path,
+        *,
+        chromatogram_id: str,
+        sample_id: str,
+        reaction_time: float | None = None,
+    ) -> Chromatogram:
         """Parse a single ASM JSON file.
 
         Args:
             path: Path to the ASM JSON file.
-            chromatogram_id: Identifier of the chromatogram (for peak attribution).
+            chromatogram_id: Identifier for this chromatogram.
+            sample_id: Identifier of the parent sample.
+            reaction_time: Time since reaction start in minutes, or ``None``.
 
         Returns:
-            ChromatogramData with signal, time (both in minutes), peaks, and
-            wavelength if available.
+            A :class:`~chromhandler.model.Chromatogram` with signal, time
+            (both in minutes), peaks, and wavelength if available.
 
         Raises:
             ValueError: If the document type is not recognised.
@@ -46,9 +58,9 @@ class ASMReader:
         content: dict[str, Any] = json.loads(path.read_text())
 
         if "liquid chromatography aggregate document" in content:
-            return self._map_lc(content, path, chromatogram_id)
+            return self._map_lc(content, path, chromatogram_id, sample_id, reaction_time)
         if "gas chromatography aggregate document" in content:
-            return self._map_gc(content, path, chromatogram_id)
+            return self._map_gc(content, path, chromatogram_id, sample_id, reaction_time)
 
         raise ValueError(
             f"Unrecognised ASM document type in '{path}'. "
@@ -65,7 +77,9 @@ class ASMReader:
         content: dict[str, Any],
         path: Path,
         chromatogram_id: str,
-    ) -> ChromatogramData:
+        sample_id: str,
+        reaction_time: float | None,
+    ) -> Chromatogram:
         doc = content["liquid chromatography aggregate document"][
             "liquid chromatography document"
         ]
@@ -89,7 +103,14 @@ class ASMReader:
         signal, time = self._extract_signal_time(meas_document, path)
         peaks = self._extract_lc_peaks(doc[0], meas_document, path, chromatogram_id)
 
-        return ChromatogramData(signal=signal, time=time, peaks=peaks)
+        return Chromatogram(
+            id=chromatogram_id,
+            sample_id=sample_id,
+            signal=signal,
+            time=time,
+            peaks=peaks,
+            reaction_time=reaction_time,
+        )
 
     # ------------------------------------------------------------------
     # GC mapping
@@ -100,7 +121,9 @@ class ASMReader:
         content: dict[str, Any],
         path: Path,
         chromatogram_id: str,
-    ) -> ChromatogramData:
+        sample_id: str,
+        reaction_time: float | None,
+    ) -> Chromatogram:
         doc = content["gas chromatography aggregate document"][
             "gas chromatography document"
         ]
@@ -118,7 +141,14 @@ class ASMReader:
         signal, time = self._extract_signal_time(meas_document, path)
         peaks = self._extract_gc_peaks(meas_document, path, chromatogram_id)
 
-        return ChromatogramData(signal=signal, time=time, peaks=peaks)
+        return Chromatogram(
+            id=chromatogram_id,
+            sample_id=sample_id,
+            signal=signal,
+            time=time,
+            peaks=peaks,
+            reaction_time=reaction_time,
+        )
 
     # ------------------------------------------------------------------
     # Shared helpers

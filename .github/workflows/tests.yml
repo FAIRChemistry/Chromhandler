@@ -1,0 +1,102 @@
+name: Tests & Coverage
+
+# When to run this workflow
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # Allow manual trigger
+  workflow_dispatch:
+
+# Concurrency: cancel old runs when new push happens
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Test on multiple Python versions
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      # Step 1: Checkout the code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Setup Python
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Step 3: Install uv (fast package manager)
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+
+      # Step 4: Install dependencies using uv
+      - name: Install dependencies
+        run: uv sync --dev
+
+      # Step 5: Run ruff linting
+      - name: Lint with ruff
+        run: |
+          echo "🔍 Running ruff linting..."
+          uv run ruff check chromhandler tests --diff
+
+      # Step 6: Run pyright type checking
+      - name: Type check with pyright
+        run: |
+          echo "🔍 Running pyright type checking..."
+          uv run pyright chromhandler
+
+      # Step 7: Run pytest with coverage
+      - name: Run tests with coverage
+        run: |
+          echo "🧪 Running tests with coverage tracking..."
+          uv run coverage run -m pytest tests/ -v --tb=short
+          uv run coverage report --fail-under=75
+          uv run coverage xml
+
+      # Step 8: Generate HTML coverage report (for debugging)
+      - name: Generate HTML coverage report
+        run: uv run coverage html
+        if: always()
+
+      # Step 9: Upload coverage to Codecov (optional - requires setup)
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: unittests-py${{ matrix.python-version }}
+          name: py${{ matrix.python-version }}
+          fail_ci_if_error: false
+        if: always()
+
+      # Step 10: Archive HTML report as artifact (view in GitHub UI)
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report-py${{ matrix.python-version }}
+          path: htmlcov/
+        if: always()
+
+  # Summary job - runs after all test jobs
+  summary:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.test.result }}" == "success" ]; then
+            echo "✅ All tests passed!"
+            exit 0
+          else
+            echo "❌ Some tests failed!"
+            exit 1
+          fi
