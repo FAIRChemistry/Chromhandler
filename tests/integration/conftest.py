@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 _parent_conftest_path = Path(__file__).parent.parent / "conftest.py"
 spec = importlib.util.spec_from_file_location("parent_conftest", _parent_conftest_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"Cannot load parent conftest from {_parent_conftest_path}")
 _parent_conftest_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_parent_conftest_module)
 
