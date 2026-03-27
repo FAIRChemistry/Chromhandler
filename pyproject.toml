@@ -55,7 +55,10 @@ packages = ["chromhandler"]
 
 [tool.pytest.ini_options]
 markers = [
-  "readers: marks tests as slow (deselect with '-m \"not slow\"')",
+  "unit: marks tests as unit tests (use '-m unit')",
+  "integration: marks tests as integration tests (use '-m integration')",
+  "fitting: marks tests as fitting-specific tests (use '-m fitting')",
+  "readers: marks tests as slow (deselect with '-m \"not readers\"')",
   "core: marks tests as core (deselect with '-m \"not core\"')"
 ]
 
@@ -92,3 +95,47 @@ select = [
     "PERF",   # performance footguns
     "TCH",    # TYPE_CHECKING imports — pairs with your strict typing
 ]
+
+[tool.coverage.run]
+# Track coverage for chromhandler package
+source = ["chromhandler"]
+
+# Don't track test files themselves
+omit = [
+    "*/tests/*",
+    "*/setup.py",
+    "chromhandler/__pycache__/*",
+]
+
+[tool.coverage.report]
+# Fail CI if coverage drops below this percentage
+fail_under = 75
+
+# Don't report files with high coverage
+skip_covered = false
+
+# Lines to exclude from coverage (e.g., error handling, abstract methods)
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+    "@abstractproperty",
+    "class .*Protocol.*:",
+    "\\.\\.\\.",
+]
+
+# Precision (default 2 decimal places)
+precision = 2
+
+[tool.coverage.html]
+# Output directory for HTML coverage report
+directory = "htmlcov"
+
+[tool.coverage.json]
+# Output JSON report for tools like codecov
+output = "coverage.json"
