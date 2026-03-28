@@ -562,7 +562,11 @@ class Handler(BaseModel):
 
         # Build a helpful error listing what was actually found.
         try:
-            found = sorted({p.suffix or p.name for p in root.iterdir()})
+            found = sorted({
+                p.suffix or p.name
+                for p in root.iterdir()
+                if not p.name.startswith(".")
+            })
         except OSError:
             found = []
         found_str = ", ".join(found) if found else "nothing"

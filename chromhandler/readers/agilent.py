@@ -50,11 +50,21 @@ class AgilentReader:
 
     @classmethod
     def can_read(cls, path: Path) -> bool:
-        """Return True if *path* contains at least one ``.D`` sub-directory."""
+        """Return True if *path* (or a direct sub-directory) contains a ``.D`` directory."""
         try:
-            return any(p.is_dir() and p.name.endswith(".D") for p in path.iterdir())
+            if any(p.is_dir() and p.name.endswith(".D") for p in path.iterdir()):
+                return True
+            for sub in (
+                p for p in path.iterdir() if p.is_dir() and not p.name.startswith(".")
+            ):
+                try:
+                    if any(p.is_dir() and p.name.endswith(".D") for p in sub.iterdir()):
+                        return True
+                except OSError:  # noqa: PERF203
+                    continue
         except OSError:
-            return False
+            pass
+        return False
 
     def read_file(
         self,

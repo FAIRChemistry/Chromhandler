@@ -34,11 +34,10 @@ class ASMReader:
 
     @classmethod
     def can_read(cls, path: Path) -> bool:
-        """Return True if *path* contains at least one ``.json`` file."""
-        try:
-            return any(p.is_file() and p.suffix == ".json" for p in path.iterdir())
-        except OSError:
-            return False
+        """Return True if *path* (or a direct sub-directory) contains a ``.json`` file."""
+        from chromhandler.readers._utils import find_representative_file
+
+        return find_representative_file(path, ".json") is not None
 
     def read_file(
         self,

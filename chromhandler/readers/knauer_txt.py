@@ -36,12 +36,14 @@ class KnauerTXTReader:
 
     @classmethod
     def can_read(cls, path: Path) -> bool:
-        """Return True if *path* contains a ClarityChrom (Knauer) TXT file."""
+        """Return True if *path* (or a direct sub-directory) contains a ClarityChrom TXT file."""
+        from chromhandler.readers._utils import find_representative_file
+
         try:
-            txt_files = [p for p in path.iterdir() if p.is_file() and p.suffix == ".txt"]
-            if not txt_files:
+            probe = find_representative_file(path, ".txt")
+            if probe is None:
                 return False
-            lines = txt_files[0].read_text(encoding="utf-8", errors="ignore").splitlines()
+            lines = probe.read_text(encoding="utf-8", errors="ignore").splitlines()
             if len(lines) < 5:
                 return False
             return all(
