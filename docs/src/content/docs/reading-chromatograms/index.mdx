@@ -1,0 +1,143 @@
+---
+title: 📖 Reading Chromatograms
+description: Learn how Chromhandler expects chromatographic exports to be organized and how to load them into a Handler.
+---
+
+import { CardGrid, LinkCard, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Reading chromatograms is the first step in almost every Chromhandler workflow. Before peak assignment, integration, calibration, or quantification, the data has to be loaded in a structure that preserves which run belongs to which sample and which time point belongs to which reaction.
+
+This chapter explains that structure from a user point of view rather than an implementation point of view.
+
+## 🧠 The Core Mental Model
+
+Chromhandler organizes imported data around three ideas:
+
+- A `Handler` holds the full dataset.
+- Each `sample` represents one reaction condition, one biological sample, or one experimental series.
+- Each `chromatogram` is one injection or one time point within that sample.
+
+When you read a directory, Chromhandler uses folder names and file names to build that hierarchy automatically.
+
+## ✅ Typical Workflow
+
+<Steps>
+1. Organize your exported chromatogram data on disk so file and folder names reflect samples and reaction times.
+2. Read the chromatograms with `Handler.read(...)`, which turns the exported files into `samples` and `chromatograms`.
+3. Define the molecules that are present in the chromatograms and that you actually want to track, assign, quantify, or fit later.
+4. Load initial-condition assignments from a CSV using `handler.load_initial_conditions(...)` so those values are attached to the existing samples in the handler.
+</Steps>
+
+## 🎛️ Workflow At A Glance
+
+<CardGrid>
+  <LinkCard
+    title="1. Organize Data"
+    href="./data-organization/"
+    description="Prepare folders and file names so Chromhandler can infer samples and reaction times correctly."
+  />
+  <LinkCard
+    title="2. Read Chromatograms"
+    href="./how-to-read-chromatograms/"
+    description="Use the generic Handler.read(...) entry point to load supported chromatogram exports."
+  />
+  <LinkCard
+    title="3. Define Molecules"
+    href="./define-molecules/"
+    description="Register the analytes you care about and optionally define peak windows for assignment and quantification."
+  />
+  <LinkCard
+    title="4. Load Initial Conditions"
+    href="./load-initial-conditions/"
+    description="Attach a CSV of initial concentrations to the samples that already exist in the handler."
+  />
+</CardGrid>
+
+## 🧭 Click Through The Stages
+
+<Tabs>
+  <TabItem label="1 Organize">
+    <p>
+      Before anything is read, the important input is the exported folder structure itself.
+      Directory names and file stems define:
+    </p>
+    <ul>
+      <li>which runs belong to the same sample</li>
+      <li>which files represent time points</li>
+      <li>which reaction times can be inferred automatically</li>
+    </ul>
+
+  </TabItem>
+  <TabItem label="2 Read">
+    <p>The first real import step is usually:</p>
+    <pre><code>handler = Handler.read("data/reaction_series", mode="timecourse")</code></pre>
+    <p>At this point the <code>Handler</code> gains:</p>
+    <ul>
+      <li><code>samples</code></li>
+      <li><code>chromatograms</code></li>
+      <li>vendor peak tables when the format already contains them</li>
+    </ul>
+
+  </TabItem>
+  <TabItem label="3 Molecules">
+    <p>
+      Once chromatograms exist, you define which molecules are actually relevant for your
+      workflow. Those molecule definitions are what later allow peak assignment, calibration,
+      and concentration conversion.
+    </p>
+    <p>Typical examples are:</p>
+    <ul>
+      <li>substrate</li>
+      <li>product</li>
+      <li>internal standard</li>
+    </ul>
+
+  </TabItem>
+  <TabItem label="4 Initial Conditions">
+    <p>Initial conditions are usually loaded after chromatograms already exist:</p>
+    <pre><code>handler.load_initial_conditions("data/initial_conditions.csv", conc_unit="mmol / L")</code></pre>
+    <p>
+      This enriches existing samples with starting concentrations and depends on matching
+      <code>sample_id</code> values.
+    </p>
+
+  </TabItem>
+</Tabs>
+
+This sequence is useful because each step builds on the previous one:
+
+- data organization determines how samples and time points are inferred
+- chromatogram import creates the experimental structure inside the `Handler`
+- molecule definition tells Chromhandler which analytes you care about
+- initial-condition tables enrich those already existing samples afterward
+
+## 🧭 What You Usually Read First
+
+In most workflows, the first thing that goes into a handler is not a CSV table or a list of molecule values. It is a directory of chromatogram exports.
+
+That first read step determines:
+
+- which samples exist
+- which chromatograms belong to each sample
+- which reaction times are attached to those chromatograms
+- whether peak tables are already available from the vendor export
+
+Only after that does it make sense to attach extra metadata such as initial conditions.
+
+## 🗺️ What This Section Covers
+
+- [Data Organization](./data-organization/) explains how folders and file names are interpreted.
+- [Supported File Types](./supported-file-types/) shows which vendor exports can be read and what information they preserve.
+- [How To Read Chromatograms](./how-to-read-chromatograms/) shows how to use the generic `Handler.read(...)` workflow in normal practice.
+- [Define Molecules](./define-molecules/) explains how to register the analytes you care about before assignment, calibration, and quantification.
+- [Load Initial Conditions](./load-initial-conditions/) explains how to attach a whole CSV of starting concentrations to samples that were already read.
+
+## ❓ Why This Matters
+
+Chromhandler is designed for batch processing. That only works well when the software can infer a few things reliably:
+
+- which files belong to the same sample
+- which file corresponds to which reaction time
+- whether a format already contains integrated peaks or only raw signal
+
+Once those rules are understood, the rest of the workflow becomes much easier to reason about.

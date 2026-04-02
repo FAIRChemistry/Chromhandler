@@ -1,24 +1,22 @@
 """Window-geometry-based Bayesian priors for chromatographic peak fitting.
 
-Combines window geometry, apex statistics, and FWHM-derived shape estimates.
-All priors are derived from:
+All priors are derived from directly observable FWHM half-width geometry:
 
-- **Apex-height-weighted centroid**      → apex_loc, apex_scale
-- **FWHM half-width geometry**           → sigma_loc, sigma_scale, alpha_loc, alpha_scale
-- **Gaussian area from apex x sigma**    → dominant_area_loc_per_trace
-- **Trapezoid total-window integration** → area_total_loc_per_trace
-- **Residual integration**               → artefact_area_loc_shared (artefact peaks only)
+- **Apex-height-weighted centroid**   → apex_loc, apex_scale
+- **Left/right HWHM geometry**       → w_left_loc/scale, w_right_loc/scale
+- **Gaussian area from height*sigma** → area_gaussian_pt
+- **Trapezoid window integration**    → area_trapz_pt
+- **Residual integration**            → area_art_shared (artefact peaks only)
+- **Signal-to-noise ratio**           → snr_per_trace (for adaptive area prior width)
 
 Pipeline
 --------
 1. ``_median_dt``              — robust median sampling interval in a window.
 2. ``_height_weighted_apex``   — height-weighted apex centroid across traces.
-3. ``_shape_priors_from_fwhm`` — height-weighted FWHM-based sigma/alpha priors.
+3. ``_halfwidth_priors``       — height-weighted left/right half-width priors.
 4. ``_window_area``            — per-trace baseline-subtracted trapezoid areas.
-5. ``_main_peak_approximation`` — per-trace Gaussian main-peak approximation.
-6. ``_residual_area``            — per-trace residual area after subtracting Gaussian main area.
-7. ``build_geometric_priors``   — assemble all of the above per ``PeakAnnotation``.
-8. ``geometric_priors_to_arrays`` — convert list of priors to model-ready numpy arrays.
+5. ``build_peak_priors``       — single-pass assembly of all priors per peak.
+6. ``geometric_priors_to_arrays`` — convert list of priors to model-ready numpy arrays.
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .data import (
+from .types import (
     PeakMode,
     peak_component_count,
     peak_is_artefact_mode,
@@ -66,6 +64,11 @@ _SINGLE_VALUE_SCALE_FRAC: Final = 0.05
 class GeometricPeakPriors:
     """Window-geometry-based priors for one annotated peak window.
 
+    Half-width priors ``w_left_*`` and ``w_right_*`` are the directly measured
+    FWHM half-widths (left and right of the apex), aggregated across traces
+    with height weighting.  The model samples ``log(w_left)`` and
+    ``log(w_right)`` and converts to ``(sigma, alpha)`` deterministically.
+
     Attributes
     ----------
     apex_loc:
@@ -73,54 +76,46 @@ class GeometricPeakPriors:
     apex_scale:
         Height-weighted standard deviation of apex positions across traces.
         Reflects retention-time drift between injections, not peak width.
-    sigma_loc:
-        Height-weighted centre of per-trace FWHM-derived sigma estimates.
-    sigma_scale:
-        Height-weighted spread of per-trace FWHM-derived sigma estimates.
-    alpha_loc:
-        Height-weighted centre of per-trace FWHM-derived alpha estimates.
-    alpha_scale:
-        Height-weighted spread of per-trace FWHM-derived alpha estimates.
-    mode:
-        Peak fitting mode from the source :class:`PeakAnnotation`.
-    main_area_per_trace:
-        Gaussian main-area estimate for each trace, shape ``[n_trace]``.
-
-        This is derived from the baseline-corrected apex height and Gaussian
-        sigma under a Gaussian approximation:
-
-        ``A_main = apex_height x sigma x sqrt(2π)``.
-
-        Used as the per-trace prior centre for the primary component area in
-        the ``single`` and ``artefact_doublet`` model branches.
-    total_area_per_trace:
+    w_left_loc:
+        Height-weighted mean of the left half-width at half-maximum [time units].
+    w_left_scale:
+        Height-weighted spread of the left HWHM across traces.
+    w_right_loc:
+        Height-weighted mean of the right half-width at half-maximum [time units].
+    w_right_scale:
+        Height-weighted spread of the right HWHM across traces.
+    area_gaussian_pt:
+        Gaussian-approximation area per trace, shape ``[n_trace]``.
+        ``A = apex_height * sigma * sqrt(2*pi)`` where sigma is derived from
+        the measured half-widths.  For traces without valid FWHM, falls
+        back to the cross-trace median (scaled down).
+    area_trapz_pt:
         Total trapezoid-integrated window area per trace, shape ``[n_trace]``.
-        Used as the per-trace prior centre for ``A_total_free`` in the
-        ``free_doublet`` model branch.
-    artefact_shoulder_area_loc:
-        Median positive residual area across traces [area units], where the
-        residual is ``max(total_trapezoid_area - gaussian_main_area, 0)``.
-        ``0.0`` unless ``mode == "artefact_doublet"``. Used as the prior
-        centre for the shared artefact shoulder area scalar in the artefact
-        branch of the model.
+    area_art_shared:
+        Median positive residual area across traces (``max(trapz - gaussian, 0)``).
+        ``0.0`` unless ``mode == "artefact_doublet"``.
+    snr_per_trace:
+        Per-trace signal-to-noise ratio (apex height / noise estimate),
+        shape ``[n_trace]``.  Used by the model for adaptive area prior width.
     window_lo:
         Lower bound of the peak window [time units].
     window_hi:
         Upper bound of the peak window [time units].
     n_valid_traces:
-        Number of traces that contributed a valid apex to the centroid estimate.
+        Number of traces that contributed a valid FWHM measurement.
     """
 
     mode: PeakMode
     apex_loc: float
     apex_scale: float
-    sigma_loc: float
-    sigma_scale: float
-    alpha_loc: float
-    alpha_scale: float
-    main_area_per_trace: NDArray[np.float64]
-    total_area_per_trace: NDArray[np.float64]
-    artefact_shoulder_area_loc: float
+    w_left_loc: float
+    w_left_scale: float
+    w_right_loc: float
+    w_right_scale: float
+    area_gaussian_pt: NDArray[np.float64]
+    area_trapz_pt: NDArray[np.float64]
+    area_art_shared: float
+    snr_per_trace: NDArray[np.float64]
     window_lo: float
     window_hi: float
     n_valid_traces: int
@@ -131,86 +126,36 @@ class GeometricPeakPriors:
 
     def __repr__(self) -> str:
         art_str = (
-            f", art_sh_area={self.artefact_shoulder_area_loc:.2e}" if peak_is_artefact_mode(self.mode) else ""
+            f", art_area={self.area_art_shared:.2e}" if peak_is_artefact_mode(self.mode) else ""
         )
         return (
             f"GeometricPeakPriors("
             f"window=[{self.window_lo:.4f}, {self.window_hi:.4f}], "
             f"mode={self.mode}, "
             f"apex={self.apex_loc:.4f}±{self.apex_scale:.4f}, "
-            f"sigma={self.sigma_loc:.4f}±{self.sigma_scale:.4f}, "
-            f"alpha={self.alpha_loc:.3f}±{self.alpha_scale:.3f}, "
+            f"w_left={self.w_left_loc:.5f}±{self.w_left_scale:.5f}, "
+            f"w_right={self.w_right_loc:.5f}±{self.w_right_scale:.5f}, "
             f"ncomp={self.n_components}{art_str}, "
             f"n_valid={self.n_valid_traces})"
         )
 
 
 @dataclasses.dataclass(frozen=True)
-class FwhmShapeDiagnostics:
-    """Per-trace FWHM-derived main-peak shape diagnostics across all windows.
+class PeakApexTraces:
+    """Per-trace FWHM apex data used for trace-shift refinement.
 
     Attributes
     ----------
     fwhm_apex_trace:
-        Detected apex times per trace and peak window, shape ``[n_trace, n_peak]``.
-        This is the FWHM-detected apex position used for diagnostics, not the
-        posterior ``apex`` latent from the model.
-    apex_height_trace:
-        Baseline-corrected apex heights, shape ``[n_trace, n_peak]``.
-    sigma_trace:
-        Per-trace sigma estimates derived from FWHM half-width geometry,
-        shape ``[n_trace, n_peak]``.
-    alpha_trace:
-        Per-trace alpha estimates derived from FWHM half-width asymmetry,
-        shape ``[n_trace, n_peak]``.
-    fwhm_trace:
-        Per-trace FWHM values, shape ``[n_trace, n_peak]``.
-    area_gaussian_trace:
-        Per-trace Gaussian main-area estimates. FWHM-valid traces use their
-        own per-trace apex and sigma; low-height fallback traces use the
-        shared ``apex_loc`` / ``sigma_loc`` approximation.
-        shape ``[n_trace, n_peak]``.
-    area_total_trace:
-        Per-trace total trapezoid-integrated window areas,
-        shape ``[n_trace, n_peak]``.
-    area_residual_trace:
-        Per-trace residual areas used for shoulder estimation,
-        shape ``[n_trace, n_peak]``.
-    height_valid_trace:
-        Boolean mask marking traces whose window apex height passes the
-        relative threshold in each peak window, shape ``[n_trace, n_peak]``.
+        FWHM-detected apex time per trace and peak window, shape ``[n_trace, n_peak]``.
+        ``NaN`` for traces where FWHM detection failed.
     fwhm_valid_trace:
-        Boolean mask marking traces that produced a valid FWHM-based shape
-        estimate in each peak window, shape ``[n_trace, n_peak]``.
-    approx_apex_trace:
-        Dense per-trace Gaussian-approximation centres, shape ``[n_trace, n_peak]``.
-    approx_height_trace:
-        Dense per-trace Gaussian-approximation heights, shape ``[n_trace, n_peak]``.
-    approx_sigma_trace:
-        Dense per-trace Gaussian-approximation sigma values, shape ``[n_trace, n_peak]``.
-    approx_valid_trace:
-        Boolean mask marking traces that contribute a Gaussian main-peak
-        approximation, shape ``[n_trace, n_peak]``.
-    approx_fallback_trace:
-        Boolean mask marking traces that use the low-height fallback
-        approximation instead of a per-trace FWHM estimate, shape ``[n_trace, n_peak]``.
+        Boolean mask: ``True`` where a valid FWHM apex was detected,
+        shape ``[n_trace, n_peak]``.
     """
 
     fwhm_apex_trace: NDArray[np.float64]
-    apex_height_trace: NDArray[np.float64]
-    sigma_trace: NDArray[np.float64]
-    alpha_trace: NDArray[np.float64]
-    fwhm_trace: NDArray[np.float64]
-    area_gaussian_trace: NDArray[np.float64]
-    area_total_trace: NDArray[np.float64]
-    area_residual_trace: NDArray[np.float64]
-    height_valid_trace: NDArray[np.bool_]
     fwhm_valid_trace: NDArray[np.bool_]
-    approx_apex_trace: NDArray[np.float64]
-    approx_height_trace: NDArray[np.float64]
-    approx_sigma_trace: NDArray[np.float64]
-    approx_valid_trace: NDArray[np.bool_]
-    approx_fallback_trace: NDArray[np.bool_]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -512,68 +457,44 @@ def _trace_fwhm_geometry(
     )
 
 
-def _fwhm_to_sigma_alpha(
-    w_left: jnp.ndarray,
-    w_right: jnp.ndarray,
-    valid: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Convert left/right HWHM values to per-trace ``(sigma, alpha)``."""
-    w_left_arr = jnp.asarray(w_left, dtype=jnp.float32)
-    w_right_arr = jnp.asarray(w_right, dtype=jnp.float32)
-    valid_arr = jnp.asarray(valid, dtype=bool)
-
-    sl = jnp.where(valid_arr, w_left_arr / _GAUSSIAN_HWHM_FACTOR, jnp.nan)
-    sr = jnp.where(valid_arr, w_right_arr / _GAUSSIAN_HWHM_FACTOR, jnp.nan)
-    sigma = jnp.where(valid_arr, jnp.sqrt(0.5 * (sl**2 + sr**2)), jnp.nan)
-    delta = (sr - sl) / jnp.maximum(sr + sl, _FLOAT_MIN)
-    delta = jnp.where(valid_arr, jnp.clip(delta, -0.95, 0.95), jnp.nan)
-    alpha = jnp.where(
-        valid_arr,
-        delta / jnp.sqrt(jnp.maximum(1.0 - delta**2, 1e-8)),
-        jnp.nan,
-    )
-    return sigma, alpha
-
-
-def _shape_priors_from_fwhm(
+def _halfwidth_priors(
     x_win: NDArray[np.float64],
     y_win: NDArray[np.float64],
     *,
     level: float = 0.5,
     min_height_frac: float = _MIN_APEX_HEIGHT_FRAC,
 ) -> tuple[float, float, float, float, _TraceFwhmGeometry]:
-    """Estimate population ``sigma`` and ``alpha`` priors from per-trace FWHM geometry."""
+    """Height-weighted population priors for left/right half-widths.
+
+    Returns ``(w_left_loc, w_left_scale, w_right_loc, w_right_scale, geometry)``.
+    Half-widths are the directly measured HWHM values — no conversion to
+    ``(sigma, alpha)`` is performed here.
+    """
     geometry = _trace_fwhm_geometry(
         x_win,
         y_win,
         level=level,
         min_height_frac=min_height_frac,
     )
-    sigma_trace, alpha_trace = _fwhm_to_sigma_alpha(
-        geometry.w_left,
-        geometry.w_right,
-        geometry.fwhm_valid,
-    )
-    sigma_trace = jnp.where(geometry.fwhm_valid, sigma_trace, jnp.nan)
     apex_height = jnp.where(geometry.fwhm_valid, geometry.apex_height, jnp.nan)
 
-    sigma_loc = _weighted_loc(sigma_trace, apex_height, geometry.fwhm_valid)
-    sigma_scale = _weighted_scale(
-        sigma_trace,
+    w_left_loc = _weighted_loc(geometry.w_left, apex_height, geometry.fwhm_valid)
+    w_left_scale = _weighted_scale(
+        geometry.w_left,
         apex_height,
         geometry.fwhm_valid,
-        sigma_loc,
+        w_left_loc,
         scale_floor=1e-6,
     )
-    alpha_loc = _weighted_loc(alpha_trace, apex_height, geometry.fwhm_valid)
-    alpha_scale = _weighted_scale(
-        alpha_trace,
+    w_right_loc = _weighted_loc(geometry.w_right, apex_height, geometry.fwhm_valid)
+    w_right_scale = _weighted_scale(
+        geometry.w_right,
         apex_height,
         geometry.fwhm_valid,
-        alpha_loc,
-        scale_floor=1e-3,
+        w_right_loc,
+        scale_floor=1e-6,
     )
-    return sigma_loc, sigma_scale, alpha_loc, alpha_scale, geometry
+    return w_left_loc, w_left_scale, w_right_loc, w_right_scale, geometry
 
 
 def _window_area(
@@ -593,100 +514,43 @@ def _window_area(
         Array of shape ``[n_trace]`` with one trapezoid-integrated area per trace.
     """
     areas = [
-        float(np.trapz(np.maximum(y_win[t], 0.0), x_win))  # type: ignore[attr-defined]
+        float(np.trapezoid(np.maximum(y_win[t], 0.0), x_win))  # type: ignore[attr-defined]
         for t in range(y_win.shape[0])
     ]
     return np.array(areas, dtype=np.float64)
 
 
-def _gaussian_area_from_sigma(
-    apex_height: jnp.ndarray,
-    sigma: jnp.ndarray,
-    valid: jnp.ndarray,
-) -> jnp.ndarray:
-    """Estimate Gaussian peak area from apex height and sigma."""
-    apex_height_arr = jnp.asarray(apex_height, dtype=jnp.float32)
-    sigma_arr = jnp.asarray(sigma, dtype=jnp.float32)
-    valid_arr = jnp.asarray(valid, dtype=bool)
-
-    return jnp.where(
-        valid_arr,
-        _GAUSSIAN_AREA_FROM_HEIGHT_SIGMA * apex_height_arr * sigma_arr,
-        0.0,
-    )
-
-
-def _residual_area(
-    total_area: NDArray[np.float64] | jax.Array,
-    area_gaussian: jax.Array,
-    valid: jax.Array,
-) -> jax.Array:
-    """Residual positive area after subtracting the Gaussian main-area estimate."""
-    total_area_arr = jnp.asarray(total_area, dtype=jnp.float32)
-    area_gaussian_arr = jnp.asarray(area_gaussian, dtype=jnp.float32)
-    valid_arr = jnp.asarray(valid, dtype=bool)
-    residual = jnp.maximum(total_area_arr - area_gaussian_arr, 0.0)
-    return jnp.where(valid_arr, residual, 0.0)
-
-
-def _main_peak_approximation(
-    x_win: NDArray[np.float64],
-    y_win: NDArray[np.float64],
-    *,
-    apex_loc: float,
-    sigma_loc: float,
+def _gaussian_area_from_halfwidths(
     geometry: _TraceFwhmGeometry,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Dense per-trace Gaussian main-peak approximation for one window.
+) -> jax.Array:
+    """Per-trace Gaussian area estimate from FWHM half-widths and apex height.
 
-    Valid FWHM traces use their own apex height/time and FWHM-derived sigma.
-    Low-height traces fall back to the shared ``apex_loc`` and ``sigma_loc``.
+    ``A = height * sigma * sqrt(2*pi)`` where ``sigma`` is derived from the
+    measured left/right half-widths: ``sigma = sqrt(0.5*(w_l² + w_r²)) / HWHM_factor``.
+
+    Returns ``NaN`` for traces where FWHM detection failed.
     """
-    sigma_trace, _ = _fwhm_to_sigma_alpha(
-        geometry.w_left,
-        geometry.w_right,
-        geometry.fwhm_valid,
-    )
-    fallback_mask = ~geometry.height_valid
+    s_left = geometry.w_left / _GAUSSIAN_HWHM_FACTOR
+    s_right = geometry.w_right / _GAUSSIAN_HWHM_FACTOR
+    sigma = jnp.sqrt(0.5 * (s_left**2 + s_right**2))
+    area = _GAUSSIAN_AREA_FROM_HEIGHT_SIGMA * jnp.maximum(geometry.apex_height, 0.0) * sigma
+    return jnp.where(geometry.fwhm_valid, area, jnp.nan)
 
-    x_arr = np.asarray(x_win, dtype=float).ravel()
-    y_arr = jnp.asarray(y_win, dtype=jnp.float32)
-    nearest_idx = int(np.argmin(np.abs(x_arr - float(apex_loc))))
-    nearest_height = jnp.maximum(
-        jnp.where(jnp.isfinite(y_arr[:, nearest_idx]), y_arr[:, nearest_idx], 0.0),
-        0.0,
-    )
 
-    approx_apex = jnp.where(
-        geometry.fwhm_valid,
-        geometry.apex_time,
-        jnp.where(fallback_mask, float(apex_loc), jnp.nan),
-    )
-    approx_height = jnp.where(
-        geometry.fwhm_valid,
-        jnp.maximum(geometry.apex_height, 0.0),
-        jnp.where(fallback_mask, nearest_height, jnp.nan),
-    )
-    approx_sigma = jnp.where(
-        geometry.fwhm_valid,
-        sigma_trace,
-        jnp.where(fallback_mask, float(sigma_loc), jnp.nan),
-    )
-    approx_valid = geometry.fwhm_valid | fallback_mask
-    approx_fallback = (~geometry.fwhm_valid) & fallback_mask
-    area_gaussian = _gaussian_area_from_sigma(
-        approx_height,
-        approx_sigma,
-        approx_valid,
-    )
-    return (
-        approx_apex,
-        approx_height,
-        approx_sigma,
-        area_gaussian,
-        approx_valid,
-        approx_fallback,
-    )
+def _estimate_snr(
+    y_win: NDArray[np.float64],
+    apex_height: jax.Array,
+) -> NDArray[np.float64]:
+    """Per-trace signal-to-noise ratio from first-difference MAD.
+
+    Uses the median absolute deviation of first differences as a robust
+    noise estimator (no baseline regions required).
+    """
+    diffs = np.abs(np.diff(np.asarray(y_win, dtype=float), axis=1))
+    # MAD of first differences → noise std (factor 0.7071 = 1/sqrt(2))
+    noise_est = float(np.median(diffs)) * 0.7071
+    noise_est = max(noise_est, _FLOAT_MIN)
+    return np.maximum(np.asarray(apex_height, dtype=float) / noise_est, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -694,148 +558,17 @@ def _main_peak_approximation(
 # ---------------------------------------------------------------------------
 
 
-def compute_fwhm_shape_diagnostics(
+def build_peak_priors(
     peaks: list[PeakAnnotation],
     x: NDArray[np.float64],
     signal: NDArray[np.float64],
     baseline: NDArray[np.float64],
-    *,
-    level: float = 0.5,
-    min_height_frac: float = _MIN_APEX_HEIGHT_FRAC,
-) -> FwhmShapeDiagnostics:
-    """Compute per-trace FWHM-derived main-peak shape diagnostics for all windows."""
-    x = np.asarray(x, dtype=float).ravel()
-    signal = np.asarray(signal, dtype=float)
-    baseline = np.asarray(baseline, dtype=float)
+) -> tuple[list[GeometricPeakPriors], PeakApexTraces]:
+    """Build window-geometry-based priors and per-trace apex data in one pass.
 
-    if signal.ndim != 2:
-        raise ValueError(f"signal must be 2-D [n_trace, n_time], got shape {signal.shape}.")
-    if baseline.ndim != 2:
-        raise ValueError(f"baseline must be 2-D [n_trace, n_time], got shape {baseline.shape}.")
-    if x.size != signal.shape[1]:
-        raise ValueError(f"x length ({x.size}) must match signal.shape[1] ({signal.shape[1]}).")
-    if signal.shape != baseline.shape:
-        raise ValueError(
-            f"signal and baseline must have the same shape, got {signal.shape} vs {baseline.shape}."
-        )
-
-    n_trace = int(signal.shape[0])
-    n_peak = len(peaks)
-    signal_corrected = signal - baseline
-
-    fwhm_apex_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    apex_height_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    sigma_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    alpha_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    fwhm_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    area_gaussian_trace = np.zeros((n_trace, n_peak), dtype=np.float64)
-    area_total_trace = np.zeros((n_trace, n_peak), dtype=np.float64)
-    area_residual_trace = np.zeros((n_trace, n_peak), dtype=np.float64)
-    height_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
-    fwhm_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
-    approx_apex_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    approx_height_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    approx_sigma_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
-    approx_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
-    approx_fallback_trace = np.zeros((n_trace, n_peak), dtype=bool)
-
-    for peak_idx, peak in enumerate(peaks):
-        lo, hi = float(peak.rt_min), float(peak.rt_max)
-        mask = (x >= lo) & (x <= hi) & np.isfinite(x)
-
-        if not np.any(mask):
-            raise ValueError(
-                f"Peak '{peak.molecule_id}' window [{lo:.4f}, {hi:.4f}] contains no finite data points in x."
-            )
-
-        x_win = x[mask]
-        y_win = signal_corrected[:, mask]
-        apex_loc_j, _, _ = _height_weighted_apex(
-            x_win,
-            y_win,
-            min_height_frac=min_height_frac,
-        )
-        sigma_loc_j, _, _, _, geometry_j = _shape_priors_from_fwhm(
-            x_win,
-            y_win,
-            level=level,
-            min_height_frac=min_height_frac,
-        )
-        total_area_j = _window_area(x_win, y_win)
-        sigma_j, alpha_j = _fwhm_to_sigma_alpha(
-            geometry_j.w_left,
-            geometry_j.w_right,
-            geometry_j.fwhm_valid,
-        )
-        fwhm_j = jnp.where(
-            geometry_j.fwhm_valid,
-            geometry_j.w_left + geometry_j.w_right,
-            jnp.nan,
-        )
-        (
-            approx_apex_j,
-            approx_height_j,
-            approx_sigma_j,
-            area_gaussian_j,
-            approx_valid_j,
-            approx_fallback_j,
-        ) = _main_peak_approximation(
-            x_win,
-            y_win,
-            apex_loc=apex_loc_j,
-            sigma_loc=sigma_loc_j,
-            geometry=geometry_j,
-        )
-        area_residual_j = _residual_area(total_area_j, area_gaussian_j, approx_valid_j)
-
-        fwhm_apex_trace[:, peak_idx] = np.asarray(
-            jnp.where(geometry_j.fwhm_valid, geometry_j.apex_time, jnp.nan),
-            dtype=np.float32,
-        )
-        apex_height_trace[:, peak_idx] = np.asarray(
-            jnp.where(geometry_j.fwhm_valid, geometry_j.apex_height, jnp.nan),
-            dtype=np.float32,
-        )
-        sigma_trace[:, peak_idx] = np.asarray(sigma_j, dtype=np.float32)
-        alpha_trace[:, peak_idx] = np.asarray(alpha_j, dtype=np.float32)
-        fwhm_trace[:, peak_idx] = np.asarray(fwhm_j, dtype=np.float32)
-        area_gaussian_trace[:, peak_idx] = np.asarray(area_gaussian_j, dtype=np.float32)
-        area_total_trace[:, peak_idx] = np.asarray(total_area_j, dtype=np.float32)
-        area_residual_trace[:, peak_idx] = np.asarray(area_residual_j, dtype=np.float32)
-        height_valid_trace[:, peak_idx] = np.asarray(geometry_j.height_valid, dtype=bool)
-        fwhm_valid_trace[:, peak_idx] = np.asarray(geometry_j.fwhm_valid, dtype=bool)
-        approx_apex_trace[:, peak_idx] = np.asarray(approx_apex_j, dtype=np.float32)
-        approx_height_trace[:, peak_idx] = np.asarray(approx_height_j, dtype=np.float32)
-        approx_sigma_trace[:, peak_idx] = np.asarray(approx_sigma_j, dtype=np.float32)
-        approx_valid_trace[:, peak_idx] = np.asarray(approx_valid_j, dtype=bool)
-        approx_fallback_trace[:, peak_idx] = np.asarray(approx_fallback_j, dtype=bool)
-
-    return FwhmShapeDiagnostics(
-        fwhm_apex_trace=fwhm_apex_trace,
-        apex_height_trace=apex_height_trace,
-        sigma_trace=sigma_trace,
-        alpha_trace=alpha_trace,
-        fwhm_trace=fwhm_trace,
-        area_gaussian_trace=area_gaussian_trace,
-        area_total_trace=area_total_trace,
-        area_residual_trace=area_residual_trace,
-        height_valid_trace=height_valid_trace,
-        fwhm_valid_trace=fwhm_valid_trace,
-        approx_apex_trace=approx_apex_trace,
-        approx_height_trace=approx_height_trace,
-        approx_sigma_trace=approx_sigma_trace,
-        approx_valid_trace=approx_valid_trace,
-        approx_fallback_trace=approx_fallback_trace,
-    )
-
-
-def build_geometric_priors(
-    peaks: list[PeakAnnotation],
-    x: NDArray[np.float64],
-    signal: NDArray[np.float64],
-    baseline: NDArray[np.float64],
-) -> list[GeometricPeakPriors]:
-    """Build window-geometry-based priors for all annotated peak windows.
+    Computes FWHM geometry once per peak window, assembling both the
+    ``GeometricPeakPriors`` needed by the model and the ``PeakApexTraces``
+    needed by :func:`refine_apex_priors_with_trace_shift`.
 
     Parameters
     ----------
@@ -851,8 +584,9 @@ def build_geometric_priors(
 
     Returns
     -------
-    list[GeometricPeakPriors]
-        One entry per element of ``peaks``, preserving the input order.
+    tuple[list[GeometricPeakPriors], PeakApexTraces]
+        ``priors`` — one :class:`GeometricPeakPriors` per element of ``peaks``.
+        ``apex_traces`` — per-trace FWHM apex data for trace-shift refinement.
 
     Raises
     ------
@@ -875,10 +609,15 @@ def build_geometric_priors(
             f"signal and baseline must have the same shape, got {signal.shape} vs {baseline.shape}."
         )
 
+    n_trace = int(signal.shape[0])
+    n_peak = len(peaks)
     signal_corrected = signal - baseline  # [n_trace, n_time]
-    results: list[GeometricPeakPriors] = []
 
-    for peak in peaks:
+    fwhm_apex_trace = np.full((n_trace, n_peak), np.nan, dtype=np.float64)
+    fwhm_valid_trace = np.zeros((n_trace, n_peak), dtype=bool)
+    priors: list[GeometricPeakPriors] = []
+
+    for peak_idx, peak in enumerate(peaks):
         lo, hi = float(peak.rt_min), float(peak.rt_max)
         mask = (x >= lo) & (x <= hi) & np.isfinite(x)
 
@@ -890,61 +629,74 @@ def build_geometric_priors(
         x_win = x[mask]  # [n_win]
         y_win = signal_corrected[:, mask]  # [n_trace, n_win]
 
-        apex_loc, apex_scale_legacy, n_valid = _height_weighted_apex(x_win, y_win)
-        sigma_loc, sigma_scale, alpha_loc, alpha_scale, geometry = _shape_priors_from_fwhm(
-            x_win,
-            y_win,
-        )
-        (
-            _,
-            _,
-            _,
-            main_area_pt,
-            approx_valid_pt,
-            _,
-        ) = _main_peak_approximation(
-            x_win,
-            y_win,
-            apex_loc=apex_loc,
-            sigma_loc=sigma_loc,
-            geometry=geometry,
-        )
-        total_area_pt = _window_area(x_win, y_win)
-        sh_area_pt = _residual_area(total_area_pt, main_area_pt, approx_valid_pt)
+        # --- Apex position priors ---
+        apex_loc, apex_scale, n_valid = _height_weighted_apex(x_win, y_win)
 
-        main_area_per_trace = np.maximum(main_area_pt, _FLOAT_MIN)
-        total_area_per_trace = np.maximum(total_area_pt, _FLOAT_MIN)
+        # --- Half-width shape priors (directly from FWHM geometry) ---
+        w_left_loc, w_left_scale, w_right_loc, w_right_scale, geometry = _halfwidth_priors(
+            x_win,
+            y_win,
+        )
+
+        # --- Area priors ---
+        # Gaussian area from half-widths (NaN for invalid traces)
+        area_gaussian_raw = _gaussian_area_from_halfwidths(geometry)
+        # Fill invalid traces with scaled-down cross-trace median
+        median_area = float(jnp.nanmedian(area_gaussian_raw))
+        median_area = max(median_area, _FLOAT_MIN)
+        area_gaussian_pt = np.maximum(
+            np.where(np.isfinite(area_gaussian_raw), area_gaussian_raw, median_area * 0.01),
+            _FLOAT_MIN,
+        )
+        # Trapezoid total area
+        area_trapz_pt = np.maximum(_window_area(x_win, y_win), _FLOAT_MIN)
+
+        # Artefact residual area
         if peak.mode == "artefact_doublet":
-            # Shared artefact area prior: median positive residual across traces.
-            valid_sh = sh_area_pt[sh_area_pt > _FLOAT_MIN]
-            artefact_shoulder_area_loc = float(np.median(valid_sh)) if valid_sh.size > 0 else _FLOAT_MIN
+            residual = np.maximum(area_trapz_pt - np.asarray(area_gaussian_pt, dtype=float), 0.0)
+            valid_residual = residual[residual > _FLOAT_MIN]
+            area_art_shared = float(np.median(valid_residual)) if valid_residual.size > 0 else _FLOAT_MIN
         else:
-            artefact_shoulder_area_loc = 0.0
+            area_art_shared = 0.0
 
-        results.append(
+        # --- Signal-to-noise ratio ---
+        snr_per_trace = _estimate_snr(y_win, geometry.apex_height)
+
+        # --- Per-trace apex data for trace-shift refinement ---
+        fwhm_apex_trace[:, peak_idx] = np.asarray(
+            jnp.where(geometry.fwhm_valid, geometry.apex_time, jnp.nan),
+            dtype=np.float64,
+        )
+        fwhm_valid_trace[:, peak_idx] = np.asarray(geometry.fwhm_valid, dtype=bool)
+
+        priors.append(
             GeometricPeakPriors(
                 mode=peak.mode,
                 apex_loc=apex_loc,
-                apex_scale=apex_scale_legacy / 4,
-                sigma_loc=sigma_loc,
-                sigma_scale=sigma_scale,
-                alpha_loc=alpha_loc,
-                alpha_scale=alpha_scale,
-                main_area_per_trace=main_area_per_trace,
-                total_area_per_trace=total_area_per_trace,
-                artefact_shoulder_area_loc=artefact_shoulder_area_loc,
+                apex_scale=float(apex_scale),
+                w_left_loc=w_left_loc,
+                w_left_scale=w_left_scale,
+                w_right_loc=w_right_loc,
+                w_right_scale=w_right_scale,
+                area_gaussian_pt=area_gaussian_pt,
+                area_trapz_pt=area_trapz_pt,
+                area_art_shared=area_art_shared,
+                snr_per_trace=snr_per_trace,
                 window_lo=lo,
                 window_hi=hi,
                 n_valid_traces=n_valid,
             )
         )
 
-    return results
+    return priors, PeakApexTraces(
+        fwhm_apex_trace=fwhm_apex_trace,
+        fwhm_valid_trace=fwhm_valid_trace,
+    )
 
 
 def refine_apex_priors_with_trace_shift(
     priors: list[GeometricPeakPriors],
-    diagnostics: FwhmShapeDiagnostics,
+    traces: PeakApexTraces,
     *,
     apex_scale_floor: float = 1e-4,
     trace_shift_scale_floor: float = 1e-6,
@@ -955,16 +707,16 @@ def refine_apex_priors_with_trace_shift(
     deviations across peaks with valid FWHM apex measurements. The per-peak
     apex scales are then recomputed from the residual deviations after
     removing that shared trace shift. Peaks without enough residual data fall
-    back to their legacy apex spread.
+    back to the ``apex_scale`` stored in the prior.
     """
     if not priors:
         return [], float(trace_shift_scale_floor)
 
-    fwhm_apex = np.asarray(diagnostics.fwhm_apex_trace, dtype=float)
-    fwhm_valid = np.asarray(diagnostics.fwhm_valid_trace, dtype=bool)
+    fwhm_apex = np.asarray(traces.fwhm_apex_trace, dtype=float)
+    fwhm_valid = np.asarray(traces.fwhm_valid_trace, dtype=bool)
     if fwhm_apex.shape[1] != len(priors):
         raise ValueError(
-            "refine_apex_priors_with_trace_shift requires one diagnostics column per peak prior."
+            "refine_apex_priors_with_trace_shift requires one apex_trace column per peak prior."
         )
 
     apex_loc = np.asarray([p.apex_loc for p in priors], dtype=float)
@@ -1010,12 +762,10 @@ def geometric_priors_to_arrays(
 ) -> dict[str, NDArray[np.float64]]:
     """Convert a list of ``GeometricPeakPriors`` to model-ready numpy arrays.
 
-    Always includes per-trace area arrays (required by the model).
-
     Parameters
     ----------
     priors:
-        Output of ``build_geometric_priors``.
+        Output of ``build_peak_priors``.
 
     Returns
     -------
@@ -1023,35 +773,39 @@ def geometric_priors_to_arrays(
 
     - ``apex_loc``           [n_peak]          — apex-weighted centroid.
     - ``apex_scale``         [n_peak]          — local apex spread after removing shared trace drift.
-    - ``sigma_loc``          [n_peak]          — FWHM-derived sigma prior centres.
-    - ``sigma_scale``        [n_peak]          — FWHM-derived sigma prior scales.
-    - ``alpha_loc``          [n_peak]          — FWHM-derived alpha prior centres.
-    - ``alpha_scale``        [n_peak]          — FWHM-derived alpha prior scales.
+    - ``w_left_loc``         [n_peak]          — left HWHM prior centres.
+    - ``w_left_scale``       [n_peak]          — left HWHM prior scales.
+    - ``w_right_loc``        [n_peak]          — right HWHM prior centres.
+    - ``w_right_scale``      [n_peak]          — right HWHM prior scales.
     - ``window_lo``          [n_peak]          — window lower bounds.
     - ``window_hi``          [n_peak]          — window upper bounds.
-    - ``dominant_area_loc_per_trace`` [n_peak, n_trace] — per-trace Gaussian dominant areas.
-    - ``area_total_loc_per_trace``    [n_peak, n_trace] — per-trace total window areas.
-    - ``artefact_area_loc_shared``    [n_artefact]      — shared artefact area prior centres.
+    - ``area_gaussian_pt``   [n_trace, n_peak] — per-trace Gaussian area estimates.
+    - ``area_trapz_pt``      [n_trace, n_peak] — per-trace trapezoid areas.
+    - ``area_art_shared``    [n_artefact]      — shared artefact area prior centres.
+    - ``snr_per_trace``      [n_trace, n_peak] — per-trace signal-to-noise ratio.
     """
     return {
         "apex_loc": np.array([p.apex_loc for p in priors], dtype=np.float64),
         "apex_scale": np.array([p.apex_scale for p in priors], dtype=np.float64),
-        "sigma_loc": np.array([p.sigma_loc for p in priors], dtype=np.float64),
-        "sigma_scale": np.array([p.sigma_scale for p in priors], dtype=np.float64),
-        "alpha_loc": np.array([p.alpha_loc for p in priors], dtype=np.float64),
-        "alpha_scale": np.array([p.alpha_scale for p in priors], dtype=np.float64),
+        "w_left_loc": np.array([p.w_left_loc for p in priors], dtype=np.float64),
+        "w_left_scale": np.array([p.w_left_scale for p in priors], dtype=np.float64),
+        "w_right_loc": np.array([p.w_right_loc for p in priors], dtype=np.float64),
+        "w_right_scale": np.array([p.w_right_scale for p in priors], dtype=np.float64),
         "window_lo": np.array([p.window_lo for p in priors], dtype=np.float64),
         "window_hi": np.array([p.window_hi for p in priors], dtype=np.float64),
-        "dominant_area_loc_per_trace": np.array(
-            [p.main_area_per_trace for p in priors], dtype=np.float64
-        ),  # [n_peak, n_trace]
-        "area_total_loc_per_trace": np.array(
-            [p.total_area_per_trace for p in priors], dtype=np.float64
-        ),  # [n_peak, n_trace]
-        "artefact_area_loc_shared": np.array(
-            [p.artefact_shoulder_area_loc for p in priors if p.mode == "artefact_doublet"],
+        "area_gaussian_pt": np.column_stack(
+            [p.area_gaussian_pt for p in priors]
+        ).astype(np.float64) if priors else np.empty((0, 0), dtype=np.float64),
+        "area_trapz_pt": np.column_stack(
+            [p.area_trapz_pt for p in priors]
+        ).astype(np.float64) if priors else np.empty((0, 0), dtype=np.float64),
+        "area_art_shared": np.array(
+            [p.area_art_shared for p in priors if p.mode == "artefact_doublet"],
             dtype=np.float64,
-        ),  # [n_artefact]
+        ),
+        "snr_per_trace": np.column_stack(
+            [p.snr_per_trace for p in priors]
+        ).astype(np.float64) if priors else np.empty((0, 0), dtype=np.float64),
     }
 
 
@@ -1061,7 +815,7 @@ def summarise_priors(priors: list[GeometricPeakPriors]) -> str:
     Parameters
     ----------
     priors:
-        Output of ``build_geometric_priors``.
+        Output of ``build_peak_priors``.
 
     Returns
     -------
@@ -1069,31 +823,32 @@ def summarise_priors(priors: list[GeometricPeakPriors]) -> str:
         Multi-line table suitable for logging or ``print()``.
     """
     lines = [
-        f"{'Peak':>4}  {'mode':>17}  {'window':>18}  {'apex_loc':>8}  {'apex_scale':>10}  "
-        f"{'s_loc':>7}  {'s_scale':>8}  "
-        f"{'a_loc':>7}  {'a_scale':>8}  {'art_sh':>10}  {'ncomp':>5}  {'nvalid':>6}",
-        "-" * 128,
+        f"{'Peak':>4}  {'mode':>17}  {'window':>18}  {'apex_loc':>8}  {'apex_sc':>8}  "
+        f"{'w_L':>8}  {'w_L_sc':>8}  "
+        f"{'w_R':>8}  {'w_R_sc':>8}  "
+        f"{'art_area':>10}  {'med_snr':>7}  {'nvalid':>6}",
+        "-" * 132,
     ]
     for i, p in enumerate(priors):
-        sh_area_str = f"{p.artefact_shoulder_area_loc:.3e}" if p.mode == "artefact_doublet" else "       ---"
+        art_str = f"{p.area_art_shared:.3e}" if p.mode == "artefact_doublet" else "       ---"
+        med_snr = float(np.median(p.snr_per_trace))
         lines.append(
             f"{i:>4}  "
             f"{p.mode:>17}  "
             f"[{p.window_lo:.3f},{p.window_hi:.3f}]  "
-            f"{p.apex_loc:>8.4f}  {p.apex_scale:>10.5f}  "
-            f"{p.sigma_loc:>7.5f}  {p.sigma_scale:>8.5f}  "
-            f"{p.alpha_loc:>7.3f}  {p.alpha_scale:>8.4f}  "
-            f"{sh_area_str:>10}  "
-            f"{p.n_components:>5}  {p.n_valid_traces:>6}"
+            f"{p.apex_loc:>8.4f}  {p.apex_scale:>8.5f}  "
+            f"{p.w_left_loc:>8.5f}  {p.w_left_scale:>8.5f}  "
+            f"{p.w_right_loc:>8.5f}  {p.w_right_scale:>8.5f}  "
+            f"{art_str:>10}  "
+            f"{med_snr:>7.1f}  {p.n_valid_traces:>6}"
         )
     return "\n".join(lines)
 
 
 __all__ = [
-    "FwhmShapeDiagnostics",
     "GeometricPeakPriors",
-    "build_geometric_priors",
-    "compute_fwhm_shape_diagnostics",
+    "PeakApexTraces",
+    "build_peak_priors",
     "geometric_priors_to_arrays",
     "refine_apex_priors_with_trace_shift",
     "summarise_priors",

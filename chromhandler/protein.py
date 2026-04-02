@@ -2,7 +2,9 @@ import json
 import re
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .molecule import validate_python_identifier
 
 
 class Protein(BaseModel):
@@ -33,6 +35,11 @@ class Protein(BaseModel):
         description="Boolean indicating whether the protein concentration is constant",
         default=True,
     )
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return validate_python_identifier(value, field_name="Protein.id")
 
     @classmethod
     def read_json(cls, path: str) -> "Protein":

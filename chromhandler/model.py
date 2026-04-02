@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     pass
+
 # Filter Wrapper definition used to filter a list of objects
 # based on their attributes
 Cls = TypeVar("Cls")
@@ -80,11 +81,11 @@ class Sample(BaseModel):
         description="""Unique identifier of the sample.""",
     )
     chromatograms: list[Chromatogram] = Field(
-        default_factory=lambda: [],
+        default_factory=list,
         description="""Measured chromatogram and peaks.""",
     )
     initial_conditions: list[InitialCondition] = Field(
-        default_factory=lambda: [],
+        default_factory=list,
         description="""Initial conditions of the sample.""",
     )
     timestamp: str | None = Field(
@@ -214,14 +215,20 @@ class Sample(BaseModel):
         self,
         id: str,
         sample_id: str,
-        signal: list[float] = Field(default_factory=lambda: []),
-        time: list[float] = Field(default_factory=lambda: []),
-        peaks: list[Peak] = Field(default_factory=lambda: []),
+        signal: list[float] | None = None,
+        time: list[float] | None = None,
+        peaks: list[Peak] | None = None,
         wavelength: float | None = None,
         reaction_time: float | None = None,
         reaction_time_unit: str | UnitDefinitionAnnot | None = None,
         **kwargs: Any,
     ) -> Any:
+        if signal is None:
+            signal = []
+        if time is None:
+            time = []
+        if peaks is None:
+            peaks = []
         params: dict[str, Any] = {
             "id": id,
             "sample_id": sample_id,
@@ -272,15 +279,15 @@ class Chromatogram(BaseModel):
         part of.""",
     )
     signal: list[float] = Field(
-        default_factory=lambda: [],
+        default_factory=list,
         description="""Signal values.""",
     )
     time: list[float] = Field(
-        default_factory=lambda: [],
+        default_factory=list,
         description="""Time values of the signal in minutes.""",
     )
     peaks: list[Peak] = Field(
-        default_factory=lambda: [],
+        default_factory=list,
         description="""Peaks in the signal.""",
     )
     wavelength: float | None = Field(
@@ -458,7 +465,7 @@ class Estimate(BaseModel):
         description="""95th percentile of the estimate.""",
     )
     samples: list[float] = Field(
-        default_factory=lambda: [],
+        default_factory=list,
         description="""Samples from the posterior distribution.""",
     )
 

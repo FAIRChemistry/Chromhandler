@@ -4,8 +4,9 @@ import warnings as _warnings
 from typing import Any
 
 from .annotations import BaselineAnnotation, PeakAnnotation, PeakWindow
+from .calibration import CalibrationMethod, LinearCalibration
 from .handler import Handler
-from .molecule import CalibrationMethod, LinearCalibration, Molecule
+from .molecule import Molecule
 from .protein import Protein
 
 

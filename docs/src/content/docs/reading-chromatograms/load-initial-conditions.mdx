@@ -1,0 +1,105 @@
+---
+title: 🧫 Load Initial Conditions
+description: Load a whole CSV of initial concentrations into an existing handler using matching sample IDs.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+After reading chromatograms, the next common step is to attach reaction metadata such as starting concentrations. Chromhandler provides `handler.load_initial_conditions(...)` for this job.
+
+This method reads a whole table at once and adds initial conditions to samples that already exist in the handler.
+
+## ✅ Recommended Workflow
+
+<Steps>
+1. Read your chromatograms first so the handler already contains samples.
+2. Prepare a CSV where each row corresponds to one sample.
+3. Make sure the `sample_id` values in the CSV match the sample IDs already present in the handler.
+4. Call `handler.load_initial_conditions(...)` with the CSV path and a concentration unit.
+</Steps>
+
+## 📄 Recommended CSV Layout
+
+For CSV files, the clearest layout is an explicit `sample_id` column followed by one column per molecule.
+
+<Tabs>
+  <TabItem label="Table View">
+
+| sample_id | ATP | ADP | AMP |
+| --- | ---: | ---: | ---: |
+| `sample_A` | 1.00 | 0.00 |  |
+| `sample_B` | 0.50 | 0.50 | 0.10 |
+| `sample_C` | 0.25 |  | 0.30 |
+
+  </TabItem>
+  <TabItem label="Raw CSV">
+
+```csv
+sample_id,ATP,ADP,AMP
+sample_A,1.00,0.00,
+sample_B,0.50,0.50,0.10
+sample_C,0.25,,0.30
+```
+
+  </TabItem>
+</Tabs>
+
+In this layout:
+
+- each row corresponds to one sample already loaded into the handler
+- each molecule column becomes an initial condition
+- blank cells are treated as missing values and are skipped
+- the concentration unit is passed in Python, not stored in the CSV
+
+## ⚡ Usage
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/reaction_series", mode="timecourse")
+handler.load_initial_conditions("data/initial_conditions.csv", conc_unit="mmol / L")
+```
+
+After this call, matching samples in the handler will carry `InitialCondition` entries for all non-empty molecule values found in the CSV.
+
+## ⚠️ Sample ID Matching Matters
+
+<Aside type="caution" title="`sample_id` Must Match Existing Samples">
+The `sample_id` values in the CSV must match the existing `sample.id` values in the handler. If you loaded chromatograms into samples named `sample_A` and `sample_B`, the CSV must use exactly those same IDs.
+</Aside>
+
+This is the key idea to remember:
+
+- the handler already defines which samples exist
+- the CSV only adds initial-condition values to those samples
+- rows with unknown `sample_id` values are ignored
+
+That means a typo in `sample_id` will not create a new sample. It will simply not attach anything to the handler.
+
+## 🧠 How Chromhandler Interprets The Table
+
+`load_initial_conditions(...)` accepts tabular input in a few shapes, but for documentation and normal CSV use, the explicit `sample_id` column is the best option.
+
+The method expects:
+
+- rows = samples
+- columns = molecule IDs
+- values = initial concentrations
+
+So the CSV above is interpreted roughly like this:
+
+| sample_id | molecule_id | init_conc |
+| --- | --- | --- |
+| `sample_A` | `ATP` | `1.00` |
+| `sample_A` | `ADP` | `0.00` |
+| `sample_B` | `ATP` | `0.50` |
+| `sample_B` | `ADP` | `0.50` |
+| `sample_B` | `AMP` | `0.10` |
+| `sample_C` | `ATP` | `0.25` |
+| `sample_C` | `AMP` | `0.30` |
+
+## 🔎 Practical Notes
+
+- Molecule column names should match the molecule IDs you want to use downstream.
+- If a row matches an existing sample but all molecule values are empty, Chromhandler raises an error.
+- If you are working from a pandas `DataFrame`, `sample_id` can also come from the index, but for CSV files an explicit `sample_id` column is much easier to understand and debug.

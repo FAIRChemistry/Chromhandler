@@ -40,14 +40,13 @@ from rich import print
 
 from . import model
 from .baseline import BaselinePriors, estimate_baseline
-from .data import (
+from .types import (
     PEAK_MODE_TO_CODE,
     ModelHyperparams,
-    baseline_to_mask,
-    pad_traces,
     peak_is_artefact_mode,
     peak_is_free_mode,
 )
+from .utils import baseline_to_mask, pad_traces
 from .priors import (
     GeometricPeakPriors,
     build_peak_priors,

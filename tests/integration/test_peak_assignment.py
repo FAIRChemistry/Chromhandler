@@ -347,7 +347,7 @@ def test_peak_assignment_summary_table_handles_ambiguous_entries() -> None:
         handler,
         [
             {
-                "molecule": handler.get_molecule("test_mol"),
+                "molecule": handler.molecules["test_mol"],
                 "window": window,
                 "assigned_peak_count": 1,
                 "chromatograms_with_no_peaks": ["chrom_missing"],

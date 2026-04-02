@@ -1,40 +1,61 @@
 ---
-title: Welcome to Starlight
-description: Get started building your docs site with Starlight.
-template: splash # Remove or comment out this line to display the site sidebar on this page.
-hero:
-  tagline: Congrats on setting up a new Starlight project!
-  image:
-    file: ../../assets/houston.webp
-  actions:
-    - text: Example Guide
-      link: /guides/example/
-      icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
-      icon: external
-      variant: minimal
+title: 👋 Welcome to ChromHandler
+description: Workflow-first documentation for organizing, reading, integrating, and quantifying chromatographic reaction data.
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Next steps
+ChromHandler is built for chromatography workflows where the goal is not just to inspect one chromatogram, but to organize whole experiments, process batches of runs, quantify peaks, and turn the result into analysis-ready kinetic data.
 
-<CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
-	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
-	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
-	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
-	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
-	</Card>
+## 📦 Installation
+
+Install ChromHandler from PyPI:
+
+```bash
+pip install chromhandler
+```
+
+For the latest development version, install directly from GitHub:
+
+```bash
+pip install git+https://github.com/FAIRChemistry/Chromhandler.git
+```
+
+## ⚡ Quick Start
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/reaction_series", mode="timecourse")
+
+sample = handler.samples[0]
+chrom = sample.chromatograms[0]
+
+print(sample.id)
+print(chrom.id)
+print(chrom.reaction_time)
+print(len(chrom.peaks))
+```
+
+This shows the core idea behind ChromHandler:
+
+- load a whole directory of chromatograms in one step
+- preserve the sample and time-course structure
+- start working immediately with chromatograms, peaks, and reaction times
+
+## 🚀 Getting Started
+
+If you are new here, start with the reading workflow guides. They explain how ChromHandler expects your data to be organized, which vendor formats are supported, and how the generic `Handler.read(...)` workflow behaves.
+
+<CardGrid>
+	<LinkCard
+		title="📖 Start With Reading Chromatograms"
+		href="/reading-chromatograms/"
+		description="Learn the main ChromHandler workflow for importing chromatographic time courses and endpoint datasets."
+	/>
+	<LinkCard
+		title="🗂️ Understand Data Organization"
+		href="/reading-chromatograms/data-organization/"
+		description="See how folder names, file names, and reaction-time tokens become samples and chromatograms inside ChromHandler."
+	/>
 </CardGrid>

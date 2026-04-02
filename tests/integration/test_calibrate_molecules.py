@@ -77,7 +77,7 @@ def test_calibrate_molecules_sets_calibration_on_molecule() -> None:
     """The side effect (molecule.calibration) must still be set after the call."""
     handler = _handler_with_calibration_data()
     handler.calibrate_molecules(verbose=False)
-    mol = handler.get_molecule("Ino")
+    mol = handler.molecules["Ino"]
     assert mol.calibration is not None
     assert mol.calibration.slope > 0
 

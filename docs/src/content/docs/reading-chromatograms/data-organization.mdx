@@ -1,0 +1,120 @@
+---
+title: 🗂️ Data Organization
+description: Organize folders and file names so Chromhandler can group samples and infer reaction times correctly.
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+Chromhandler is opinionated about data organization because it is built for batch processing. The reader methods do not just open one file at a time. They infer sample identity, chromatogram identity, and reaction time from the directory layout and file names.
+
+If your exports are organized consistently, reading an entire experiment becomes a one-line operation.
+
+## 🔎 What Chromhandler Infers
+
+When you use `Handler.read(...)`, Chromhandler infers the following information:
+
+| File system element | Becomes in Chromhandler |
+| --- | --- |
+| Root directory name in a flat layout | `sample.id` |
+| Immediate subdirectory name in a grouped layout | `sample.id` |
+| File stem or `.D` directory stem | `chromatogram.id` |
+| Time token in the file stem | `chromatogram.reaction_time` in minutes |
+
+This is why naming matters so much.
+
+## ⏱️ Two Timecourse Layouts
+
+For time-resolved experiments, Chromhandler supports two common layouts.
+
+### 📁 Flat Layout
+
+Use a flat layout when all files belong to one sample or one reaction series.
+
+<FileTree>
+
+- `experiment_A/` one sample
+  - `0min.D`
+  - `30min.D`
+  - `60min.D`
+
+</FileTree>
+
+In this case:
+
+- `sample.id` becomes `experiment_A`
+- each file or `.D` directory becomes one chromatogram
+- reaction time is parsed from each file stem
+
+### 🧪 Directory-Of-Directories Layout
+
+Use a grouped layout when each subdirectory is a separate sample and each sample contains multiple time points.
+
+<FileTree>
+
+- `data/`
+  - `sample_A/` one sample
+    - `P0-0.0_min.txt`
+    - `P1-30.0_min.txt`
+  - `sample_B/` one sample
+    - `P0-0.0_min.txt`
+    - `P1-30.0_min.txt`
+
+</FileTree>
+
+In this case:
+
+- each immediate subdirectory becomes one sample
+- files inside that subdirectory become chromatograms of that sample
+- reaction time is parsed from each file stem
+
+## 🎯 Endpoint Layout
+
+For endpoint experiments, Chromhandler treats each file as its own sample.
+
+<FileTree>
+
+- `endpoint_screen/`
+  - `condition_A.txt` one sample
+  - `condition_B.txt` one sample
+  - `condition_C.txt` one sample
+
+</FileTree>
+
+In `endpoint` mode:
+
+- each file becomes a separate sample
+- `sample.id` is the file stem
+- `chromatogram.id` is also the file stem
+- no reaction time is extracted
+
+This is useful for screening data, single injections, or datasets that do not represent a reaction time course.
+
+## ⌛ How Reaction Time Is Parsed
+
+In `timecourse` mode, Chromhandler extracts reaction time from the file stem and converts it to minutes.
+
+Supported patterns include:
+
+- `30min`
+- `120sec`
+- `2h`
+- `3.10_min`
+
+The last time-like pattern in the file stem is used. This allows names such as `CV10_120min`, where `CV10` is part of the sample naming and `120min` is the actual reaction time.
+
+If no time token is present, Chromhandler cannot build a time course from that file name and the read operation will fail.
+
+## 🏷️ Practical Naming Advice
+
+- Keep sample names in directory names when possible.
+- Keep reaction time in the file name, ideally near the end.
+- Use one consistent naming scheme within a dataset.
+- Avoid putting extra unmatched time-like tokens into the same file stem.
+- Do not rely on nested folder structures deeper than one sample directory level for the high-level readers.
+
+## ✅ A Good Rule Of Thumb
+
+If a human looking at the directory can immediately answer these two questions, Chromhandler will usually also be able to:
+
+- Which chromatograms belong to the same sample?
+- Which chromatogram corresponds to which reaction time?

@@ -1,0 +1,69 @@
+---
+title: 🧪 Supported File Types
+description: Overview of the chromatogram export formats Chromhandler can read and what information each format preserves.
+---
+
+Chromhandler can work with both vendor-specific exports and more generic interchange formats. The important difference is not only which company produced the file, but also what information survives the export.
+
+Some formats contain raw chromatogram traces and an integrated peak table. Others only expose the signal, which means peak integration has to happen later inside Chromhandler.
+
+## 🚦 High-Level Auto-Detection
+
+The main import workflow is now the generic reader:
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/experiment", mode="timecourse")
+```
+
+Chromhandler inspects the directory contents, detects the matching format, and dispatches to the correct reader internally.
+
+| Source | Input | Signal trace | Vendor peak table | Works with `Handler.read()` | Notes |
+| --- | --- | --- | --- | --- | --- |
+| ASM / Allotrope export | `.json` files | Yes | Yes | Yes | Good standardized option when both chromatogram and peak data are present. |
+| Shimadzu LabSolutions export | `.txt` files | Yes | Yes | Yes | Preserves wavelength and peak table information when present in the export. |
+| Knauer ClarityChrom export | `.txt` files | Yes | No | Yes | Good for loading traces, but peak integration must happen later. |
+| Agilent data directories | `.D` directories | Yes | No | Yes | Reads proprietary raw data. `channel` or `wavelength` may be needed. |
+
+## 🧰 Lower-Level Reader Classes
+
+Chromhandler also contains lower-level readers for other import situations, but these are not the normal starting point in the docs:
+
+| Source | Input | Signal trace | Peak table | Works with `Handler.read()` | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Thermo TX0 export | `.TX0` files | No | Yes | No | Reads peak-table style exports and metadata, but is not currently part of the generic `Handler.read(...)` dispatch. |
+| Generic CSV | `.csv` files | No | Yes | No | Useful for user-defined peak tables or data exported from other software. Column names must be specified manually. |
+
+## 🧭 What This Means In Practice
+
+If your input format already contains integrated peaks, you can often start from vendor-generated peak areas and use Chromhandler mainly for organization, metadata handling, and downstream quantification.
+
+If your format only gives you the raw signal, Chromhandler still helps by loading the chromatograms consistently, but peak integration becomes part of the Chromhandler workflow itself.
+
+This is one of the key ideas in the project:
+
+- Chromhandler can reuse peak information when vendor software already did the integration.
+- Chromhandler can also take over integration when only the chromatogram trace is available.
+
+## 📝 Format-Specific Notes
+
+### 📄 ASM
+
+ASM is a strong interchange format because it can preserve both chromatogram signal and peak-level information in a standardized structure.
+
+### 🧪 Shimadzu
+
+Shimadzu LabSolutions ASCII exports can include both the chromatogram and a peak table, which makes them a good fit when you want to preserve vendor integration results.
+
+### 📈 Knauer
+
+Knauer TXT exports provide the chromatogram trace in a straightforward text format, but no peak table is recovered by the current reader.
+
+### 🏭 Agilent
+
+Agilent inputs are read from proprietary `.D` directories. If a directory contains more than one detector file, you need to specify which one to use, either by detector file name or by wavelength for suitable UV data.
+
+### 🧩 Thermo And Generic CSV
+
+These readers are useful, but they currently sit outside the main `Handler.read(...)` workflow. They make sense as lower-level or specialized imports, not as the default starting point for new users.

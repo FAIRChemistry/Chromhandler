@@ -1,0 +1,126 @@
+---
+title: 🧬 Define Molecules
+description: Register the molecules you care about so Chromhandler can assign peaks, calibrate analytes, and quantify concentrations.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+After chromatograms are loaded, the next important step is to define which molecules are actually relevant for the workflow. Chromhandler does not automatically know which analytes you want to track just because they appear somewhere in the chromatogram.
+
+## ✅ Recommended Workflow
+
+<Steps>
+1. Read chromatograms first so the handler already contains samples and chromatograms.
+2. Create or register the molecules you care about, such as substrate, product, or internal standard.
+3. Add peak windows for those molecules when you want Chromhandler to assign or integrate peaks by retention-time region.
+</Steps>
+
+## ⚡ Minimal Example
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/reaction_series", mode="timecourse")
+
+handler.create_molecule(id="ATP", name="ATP", pubchem_cid=5957)
+handler.create_molecule(id="ADP", name="ADP", pubchem_cid=6022)
+
+handler.add_peak_window("ATP", 4.8, 5.2)
+handler.add_peak_window("ADP", 5.8, 6.2)
+```
+
+In this example:
+
+- `create_molecule(...)` registers the analytes on the handler
+- `add_peak_window(...)` defines where those analytes are expected in retention time
+- later assignment, fitting, and quantification steps can build on that information
+
+## 📥 Register Molecules
+
+In practice, there are two normal ways to get molecules into the handler:
+
+<Tabs>
+  <TabItem label="Create Directly">
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/reaction_series", mode="timecourse")
+
+handler.create_molecule(id="ATP", name="ATP", pubchem_cid=5957)
+handler.create_molecule(
+    id="IS",
+    name="Internal Standard",
+    pubchem_cid=0,
+    internal_standard=True,
+)
+```
+
+Use `create_molecule(...)` when you want to define the molecule directly in code and register it on the handler in one step.
+
+  </TabItem>
+  <TabItem label="Register Existing Molecule">
+
+```python
+from chromhandler.handler import Handler
+from chromhandler.molecule import Molecule
+
+handler = Handler.read("data/reaction_series", mode="timecourse")
+
+molecule = Molecule.read_json("molecules/ATP.json")
+handler.register_molecule(molecule)
+```
+
+Use `register_molecule(...)` when you already have a `Molecule` object, for example from `Molecule.read_json(...)` or when reusing a molecule definition across handlers.
+
+  </TabItem>
+</Tabs>
+
+Both methods register the molecule under `handler.molecules[...]`. If you reuse the same molecule ID, the new registration replaces the previous one.
+
+## 🧾 What `create_molecule(...)` Defines
+
+When you create a molecule directly, the main inputs are:
+
+- `id`: the internal molecule identifier used throughout the workflow
+- `name`: a human-readable name
+- `pubchem_cid`: the PubChem compound ID
+- `constant`: whether the concentration is treated as constant
+- `internal_standard`: whether the molecule is an internal standard
+
+For most documentation examples, it is a good idea to pass `name` explicitly so the molecule definition is easy to read and unambiguous.
+
+## 🧠 Why This Step Matters
+
+Molecule definitions are what connect chromatogram structure to biochemical meaning.
+
+Without molecules, you may still have:
+
+- samples
+- chromatograms
+- raw signal
+- maybe vendor-generated peaks
+
+But you do not yet have a clear statement of which peaks correspond to which analytes of interest.
+
+## 🔎 What A Molecule Definition Adds
+
+When you register a molecule, you are typically defining:
+
+- the molecule ID used throughout the workflow
+- a human-readable name
+- whether it is constant or an internal standard
+- optional later calibration information
+
+When you add a peak window, you also define:
+
+- the retention-time region where that molecule is expected
+- the basis for later peak assignment or targeted integration
+
+## ⚠️ ID Rules
+
+<Aside type="caution" title="Use Stable Molecule IDs">
+Choose molecule IDs that are stable and machine-friendly. These IDs are used throughout the handler, in peak windows, initial conditions, calibration, and downstream export.
+</Aside>
+
+In practice, that means the molecule ID should be something you are happy to reuse consistently, such as `ATP`, `ADP`, `substrate`, or `product`.

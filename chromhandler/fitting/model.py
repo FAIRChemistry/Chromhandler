@@ -30,7 +30,7 @@ import numpyro
 import numpyro.distributions as dist
 from jax.scipy.special import log_ndtr
 
-from .data import ModelHyperparams  # noqa: TC001 — used at runtime in model() signature
+from .types import ModelHyperparams  # noqa: TC001 — used at runtime in model() signature
 
 numpyro.set_host_device_count(8)
 

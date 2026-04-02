@@ -105,9 +105,9 @@ shift_signal_vmap: jnp.ndarray = jax.vmap(
 
 
 def _compute_template(
-    shifted_signal: jnp.ndarray,   # [C, N]
-    mask: jnp.ndarray | None,   # [C, N] bool or None
-) -> jnp.ndarray:                   # [N]
+    shifted_signal: jnp.ndarray,  # [C, N]
+    mask: jnp.ndarray | None,  # [C, N] bool or None
+) -> jnp.ndarray:  # [N]
     """Per-timepoint template from aligned traces, optionally masked."""
     if mask is None:
         return jnp.mean(shifted_signal, axis=0)
@@ -123,20 +123,16 @@ def _compute_template(
 
 
 def _coarse_shift_init(
-    signal: np.ndarray,            # [C, N]
-    mask: np.ndarray | None,       # [C, N] bool or None
+    signal: np.ndarray,  # [C, N]
+    mask: np.ndarray | None,  # [C, N] bool or None
     max_shift_samples: float | None,
-) -> np.ndarray:                   # [C] float32 integer lag estimates
+) -> np.ndarray:  # [C] float32 integer lag estimates
     """Estimate per-trace integer shifts via masked cross-correlation."""
     C, N = signal.shape
     if N < 3 or C == 0:
         return np.zeros(C, dtype=np.float32)
 
-    mask_arr = (
-        np.ones((C, N), dtype=bool)
-        if mask is None
-        else np.asarray(mask, dtype=bool)
-    )
+    mask_arr = np.ones((C, N), dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
 
     # Template = unweighted mean over valid (masked) values.
     # Columns with no valid points (all-False mask) naturally produce NaN;
@@ -145,11 +141,7 @@ def _coarse_shift_init(
         template = np.nanmean(np.where(mask_arr, signal, np.nan), axis=0)
     template = np.where(np.isfinite(template), template, 0.0)
 
-    radius = (
-        int(np.ceil(max_shift_samples))
-        if max_shift_samples is not None
-        else min(max(8, N // 50), 20)
-    )
+    radius = int(np.ceil(max_shift_samples)) if max_shift_samples is not None else min(max(8, N // 50), 20)
     radius = min(radius, N - 2)
 
     initial = np.zeros(C, dtype=np.float32)
@@ -170,7 +162,7 @@ def _coarse_shift_init(
                 continue
             yc = y - y.mean()
             tc = t - t.mean()
-            denom = np.sqrt((yc ** 2).sum() * (tc ** 2).sum())
+            denom = np.sqrt((yc**2).sum() * (tc**2).sum())
             if denom < 1e-12:
                 continue
             score = float((yc * tc).sum() / denom)
@@ -187,8 +179,8 @@ def _coarse_shift_init(
 
 
 def alignment_loss(
-    shifts_samples: jnp.ndarray,   # [C]
-    signal: jnp.ndarray,           # [C, N]
+    shifts_samples: jnp.ndarray,  # [C]
+    signal: jnp.ndarray,  # [C, N]
     mask: jnp.ndarray | None = None,
     center_weight: float = 1e3,
 ) -> jnp.ndarray:
@@ -213,10 +205,10 @@ def alignment_loss(
     residual = shifted - template[None, :]
 
     if mask is None:
-        data_term = jnp.sum(residual ** 2)
+        data_term = jnp.sum(residual**2)
     else:
         mask_bool = jnp.asarray(mask, dtype=bool)
-        data_term = jnp.sum(jnp.where(mask_bool, residual ** 2, 0.0))
+        data_term = jnp.sum(jnp.where(mask_bool, residual**2, 0.0))
 
     center_term = jnp.float32(center_weight) * jnp.mean(shifts_samples) ** 2
     return data_term + center_term
@@ -228,16 +220,16 @@ def alignment_loss(
 
 
 def _adam_scan(
-    initial_params: jnp.ndarray,   # [C]
-    signal: jnp.ndarray,            # [C, N]
-    mask: jnp.ndarray | None,   # [C, N] bool or None
+    initial_params: jnp.ndarray,  # [C]
+    signal: jnp.ndarray,  # [C, N]
+    mask: jnp.ndarray | None,  # [C, N] bool or None
     *,
     lr: float,
     n_steps: int,
     center_weight: float,
     max_shift_samples: float | None,
     enforce_zero_mean: bool,
-) -> tuple[jnp.ndarray, jnp.ndarray]:   # (final_params [C], final_loss scalar)
+) -> tuple[jnp.ndarray, jnp.ndarray]:  # (final_params [C], final_loss scalar)
     """Single Adam run using jax.lax.scan — safe to vmap.
 
     No jax.jit calls inside: the outer jit(vmap(...)) handles compilation.
@@ -253,7 +245,7 @@ def _adam_scan(
         _, g = val_and_grad(p)
         t = t + jnp.int32(1)
         m = jnp.float32(0.9) * m + jnp.float32(0.1) * g
-        v = jnp.float32(0.999) * v + jnp.float32(0.001) * g ** 2
+        v = jnp.float32(0.999) * v + jnp.float32(0.001) * g**2
         m_hat = m / (jnp.float32(1.0) - jnp.float32(0.9) ** t)
         v_hat = v / (jnp.float32(1.0) - jnp.float32(0.999) ** t)
         p = p - jnp.float32(lr) * m_hat / (jnp.sqrt(v_hat) + jnp.float32(1e-8))
@@ -280,9 +272,9 @@ def _adam_scan(
 
 
 def _multistart_optimize(
-    coarse_init: jnp.ndarray,       # [C]
-    signal: jnp.ndarray,             # [C, N]
-    mask: jnp.ndarray | None,    # [C, N] bool or None
+    coarse_init: jnp.ndarray,  # [C]
+    signal: jnp.ndarray,  # [C, N]
+    mask: jnp.ndarray | None,  # [C, N] bool or None
     *,
     n_starts: int,
     sigma_perturb: float,
@@ -292,7 +284,7 @@ def _multistart_optimize(
     center_weight: float,
     max_shift_samples: float | None,
     enforce_zero_mean: bool,
-) -> jnp.ndarray:   # [C] best shifts
+) -> jnp.ndarray:  # [C] best shifts
     """Run N perturbed Adam starts in parallel; return the best result.
 
     Uses ``jax.jit(jax.vmap(run_one))`` to compile the whole batch once.
@@ -300,9 +292,7 @@ def _multistart_optimize(
     key = jax.random.PRNGKey(seed)
     noise = jax.random.normal(key, shape=(n_starts - 1, coarse_init.shape[0]))
     perturbed = coarse_init[None, :] + jnp.float32(sigma_perturb) * noise  # [n_starts-1, C]
-    all_inits = jnp.concatenate(
-        [coarse_init[None, :], perturbed], axis=0
-    )  # [n_starts, C]
+    all_inits = jnp.concatenate([coarse_init[None, :], perturbed], axis=0)  # [n_starts, C]
 
     if enforce_zero_mean:
         all_inits = all_inits - jnp.mean(all_inits, axis=1, keepdims=True)
@@ -389,9 +379,7 @@ def align_chromatograms(
     else:
         mask_arr = jnp.asarray(mask, dtype=bool)
         if mask_arr.shape != signal.shape:
-            raise ValueError(
-                f"`mask` shape {mask_arr.shape} does not match signal shape {signal.shape}"
-            )
+            raise ValueError(f"`mask` shape {mask_arr.shape} does not match signal shape {signal.shape}")
         mask_clean = mask_arr & finite
 
     # Coarse integer-lag initialization (NumPy, one-time)
@@ -422,7 +410,9 @@ def align_chromatograms(
         best_shifts, _ = _adam_scan(coarse_init_jax, signal_clean, mask_clean, **adam_kwargs)
     else:
         best_shifts = _multistart_optimize(
-            coarse_init_jax, signal_clean, mask_clean,
+            coarse_init_jax,
+            signal_clean,
+            mask_clean,
             n_starts=n_starts,
             sigma_perturb=sigma_perturb,
             seed=seed,
@@ -438,7 +428,7 @@ def align_chromatograms(
 
     return ShiftAlignmentResult(
         shifts_samples=best_shifts,
-        signal_aligned=signal_clean,   # X-axis-only: caller updates time, not signal
+        signal_aligned=signal_clean,  # X-axis-only: caller updates time, not signal
         template=template,
         loss_initial=loss_initial,
         loss_final=loss_final,

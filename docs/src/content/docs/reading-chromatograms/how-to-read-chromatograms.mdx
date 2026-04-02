@@ -1,0 +1,94 @@
+---
+title: ⚡ How To Read Chromatograms
+description: Use the generic Handler.read method to load time courses and endpoint datasets from supported chromatogram exports.
+---
+
+Once the files are organized correctly, reading chromatograms in Chromhandler is usually simple. In normal use, you should start with `Handler.read(...)` and let Chromhandler detect the correct reader automatically.
+
+## 🧭 Choose A Reading Mode
+
+Use `mode="timecourse"` when:
+
+- multiple files belong to the same reaction or sample
+- file names contain a reaction time such as `0min`, `30min`, or `2h`
+- you want Chromhandler to sort chromatograms by reaction time
+
+Use `mode="endpoint"` when:
+
+- each file represents an independent sample
+- there is no meaningful reaction time in the file name
+- you want one sample per file
+
+## 📥 Use The Generic Reader
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/reaction_series", mode="timecourse")
+```
+
+This is the recommended starting point for supported reader formats. Chromhandler inspects the directory contents and chooses the matching reader internally.
+
+In practice, this means you usually do not need to decide whether the directory contains ASM, Shimadzu, Knauer, or Agilent data before calling the method.
+
+## 🏭 Pass Agilent Options When Needed
+
+Agilent inputs are read from `.D` directories rather than from single files.
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read(
+    "data/agilent",
+    mode="timecourse",
+    channel="FID1A.CH",
+)
+```
+
+If the detected format is Agilent and a `.D` directory contains more than one detector file, you may need to pass either:
+
+- `channel`, for example `FID1A.CH`
+- `wavelength`, for example `254.0`, when wavelength-based selection is possible
+
+## 🎯 Read An Endpoint Dataset
+
+The same generic method can also be used in `endpoint` mode.
+
+```python
+from chromhandler.handler import Handler
+
+handler = Handler.read("data/endpoint_screen", mode="endpoint")
+```
+
+In this mode, each file becomes its own sample and no reaction time is extracted.
+
+## 🔍 Inspect What Was Loaded
+
+After reading, it is useful to inspect the structure directly.
+
+```python
+sample = handler.samples[0]
+chrom = sample.chromatograms[0]
+
+print(sample.id)
+print(chrom.id)
+print(chrom.reaction_time)
+print(len(chrom.time), len(chrom.signal))
+print(len(chrom.peaks))
+```
+
+This makes it easy to verify that:
+
+- samples were grouped the way you expected
+- reaction times were parsed correctly
+- peak information is present when the format supports it
+
+## 🧱 What `Handler.read(...)` Covers
+
+At the moment, `Handler.read(...)` is the public entry point for the supported high-level reader workflows in the docs. It auto-detects the supported directory formats and then delegates internally to the correct reader implementation.
+
+That is why the directory structure matters so much. Once the sample grouping and file naming are right, the batch import workflow becomes predictable.
+
+For most users, the recommended starting point is simply:
+
+- `Handler.read()`

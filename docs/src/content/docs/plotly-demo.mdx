@@ -1,0 +1,24 @@
+---
+title: 📊 Interactive Plot Demo
+description: Test a client-side Plotly chart inside the Starlight docs site.
+---
+
+import InteractivePlot from '../../components/InteractivePlot';
+
+This page is a small testbed for interactive plotting inside the docs. The page itself is static, but the chart below is hydrated as a client island so you can zoom, pan, export, and inspect traces in the browser.
+
+The interaction here is intentionally linked:
+
+- Plot A shows derived data.
+- Plot B shows the source measurements behind the currently hovered point in Plot A.
+- Hovering the top plot updates the bottom plot.
+
+## 🧪 Plotly Test
+
+<InteractivePlot client:only="react" />
+
+## 📝 Notes
+
+- This demo uses React inside Astro only for the chart component.
+- `client:only="react"` avoids server-side rendering issues that are common with Plotly-based components.
+- Once you like the behavior, we can swap this dummy chart for a real chromatogram, replicate integration view, or kinetics plot.

@@ -9,8 +9,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 if TYPE_CHECKING:
+    from .calibration import LinearCalibration
     from .handler import Handler
-    from .molecule import LinearCalibration, Molecule
+    from .molecule import Molecule
 
 
 def _safe_emoji(emoji: str, fallback: str) -> str:
