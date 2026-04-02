@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from rich.console import Console, Group
 
     from .calibration import LinearCalibration
-    from .fitting.better_fitter import BetterFitter
+    from .fitting.fitter import Fitter
     from .readers.abstractreader import AbstractReader
 
 
@@ -662,7 +662,7 @@ class Handler(BaseModel):
 
     def collect_areas(
         self,
-        fitter: BetterFitter,
+        fitter: Fitter,
     ) -> dict[str, list[tuple[float, float]]]:
         """Map posterior molecule areas from a fitted fitter to reaction times.
 
@@ -672,7 +672,7 @@ class Handler(BaseModel):
         whose chromatogram ID is not found in this handler are silently skipped.
 
         Args:
-            fitter: A fitted :class:`~chromhandler.fitting.better_fitter.BetterFitter`
+            fitter: A fitted :class:`~chromhandler.fitting.fitter.Fitter`
                 instance (with or without subsets).
 
         Returns:
@@ -701,14 +701,14 @@ class Handler(BaseModel):
 
     def write_fitted_peaks(
         self,
-        fitter: BetterFitter,
+        fitter: Fitter,
         *,
         quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
         n_samples: int | None = None,
     ) -> list[Peak]:
         """Write Bayesian posterior peak estimates into matching Chromatograms.
 
-        Calls :meth:`~chromhandler.fitting.better_fitter.BetterFitter.to_peaks`
+        Calls :meth:`~chromhandler.fitting.fitter.Fitter.to_peaks`
         and upserts each returned :class:`~chromhandler.model.Peak` into the
         :class:`~chromhandler.model.Chromatogram` whose ``id`` matches
         ``Peak.chromatogram_id``.  An existing peak whose ``molecule_id``
@@ -720,8 +720,8 @@ class Handler(BaseModel):
         fields.
 
         Args:
-            fitter: A fitted :class:`~chromhandler.fitting.better_fitter.BetterFitter`
-                instance (:meth:`~chromhandler.fitting.better_fitter.BetterFitter.fit`
+            fitter: A fitted :class:`~chromhandler.fitting.fitter.Fitter`
+                instance (:meth:`~chromhandler.fitting.fitter.Fitter.fit`
                 must have been called).  Subset-mode fitters are supported; in
                 that case peaks are aggregated across fitted child subsets.
             quantiles: ``(q_low, q_median, q_high)`` percentile levels forwarded

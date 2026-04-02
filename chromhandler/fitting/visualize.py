@@ -20,7 +20,7 @@ from matplotlib.patches import Patch
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 
 if TYPE_CHECKING:
-    from chromhandler.fitting.better_fitter import PosteriorCurves
+    from chromhandler.fitting.fitter import PosteriorCurves
 
 # ---------------------------------------------------------------------------
 # Validation Helpers
@@ -1258,7 +1258,7 @@ def plot_fit(
         Peak window definitions from the fitted subset.
     curves : PosteriorCurves or None
         Precomputed posterior curves from
-        :meth:`~BetterFitter.posterior_curves`.  ``None`` → scatter-only.
+        :meth:`~Fitter.posterior_curves`.  ``None`` → scatter-only.
     fitted_rows : np.ndarray or None
         Indices (into the *time/signal* row dimension) of traces that have
         posterior curves.  ``curves.total_median[i]`` corresponds to
@@ -1544,11 +1544,11 @@ def plot_posterior_predictive(
     figsize: tuple[float, float] | None = None,
     baselines: list | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
-    """Deprecated — use :meth:`~BetterFitter.plot_fit` instead.
+    """Deprecated — use :meth:`~Fitter.plot_fit` instead.
 
     .. deprecated::
         ``plot_posterior_predictive`` is superseded by the
-        :meth:`BetterFitter.plot_fit` method which avoids the posterior
+        :meth:`Fitter.plot_fit` method which avoids the posterior
         axis alignment bug.  This function remains for backward compatibility
         but will be removed in a future release.
     """
@@ -1610,7 +1610,7 @@ def plot_trace(
 
     available_vars = list(posterior.posterior.data_vars)
     if var_names is None:
-        from .better_model import TRACE_PARAMETER_NAMES
+        from .model import TRACE_PARAMETER_NAMES
 
         var_names = [name for name in TRACE_PARAMETER_NAMES if name in available_vars]
         if not var_names:

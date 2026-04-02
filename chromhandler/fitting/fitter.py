@@ -6,7 +6,7 @@ approach from ``priors.py``.  This file contains only what is needed to:
 1. Accept pre-selected time/signal data + peak/baseline annotations.
 2. Estimate a linear baseline via ``baseline.py``.
 3. Compute window-geometry priors via ``priors.py``.
-4. Run MCMC inference via ``better_model.py`` using NUTS sampler.
+4. Run MCMC inference via ``model.py`` using NUTS sampler.
 5. Print a human-readable prior summary and posterior statistics via ArviZ.
 
 Usage::
@@ -38,7 +38,7 @@ import numpy as np
 from numpyro.infer import MCMC, NUTS
 from rich import print
 
-from . import better_model
+from . import model
 from .baseline import BaselinePriors, estimate_baseline
 from .data import (
     PEAK_MODE_TO_CODE,
@@ -472,7 +472,7 @@ class Fitter:
         Returns
         -------
         dict[str, np.ndarray]
-            Keys: all parameters expected by ``better_model.model()``.
+            Keys: all parameters expected by ``model.model()``.
         """
         priors, trace_shift_scale = self._compute_position_priors()
         prior_arrays = geometric_priors_to_arrays(priors)
@@ -775,7 +775,7 @@ class Fitter:
 
         available_vars = list(self._posterior.posterior.data_vars)  # type: ignore[union-attr]
         summary_vars = [
-            v for v in better_model.SUMMARY_PARAMETER_NAMES if v in available_vars
+            v for v in model.SUMMARY_PARAMETER_NAMES if v in available_vars
         ]
         summary_df = az.summary(self._posterior, var_names=summary_vars or None)
         Path(path).write_text(summary_df.to_string(), encoding="utf-8")
@@ -793,7 +793,7 @@ class Fitter:
             If given, saves the figure to this path and closes it.
         var_names : list[str] or None
             Parameters to plot. Defaults to ``TRACE_PARAMETER_NAMES`` from
-            ``better_model``, filtered to variables present in the posterior.
+            ``model``, filtered to variables present in the posterior.
 
         Returns
         -------
@@ -811,9 +811,9 @@ class Fitter:
 
         import matplotlib.pyplot as _plt
 
-        from . import better_visualize
+        from . import visualize
 
-        fig = better_visualize.plot_trace(self._posterior, var_names=var_names)
+        fig = visualize.plot_trace(self._posterior, var_names=var_names)
         if path is not None:
             fig.savefig(str(path), dpi=150, bbox_inches="tight")
             _plt.close(fig)
@@ -843,7 +843,7 @@ class Fitter:
         """
         import matplotlib.pyplot as _plt
 
-        from . import better_visualize
+        from . import visualize
 
         curves = None
         fitted_rows: np.ndarray[Any, Any] | None = None
@@ -865,7 +865,7 @@ class Fitter:
             else None
         )
 
-        fig, axes = better_visualize.plot_fit(
+        fig, axes = visualize.plot_fit(
             self.time,
             self.signal,
             self.peaks,
@@ -928,7 +928,7 @@ class Fitter:
 
         Converts all numpy arrays to JAX with appropriate dtypes and applies
         safety clamps to scale parameters.  Uses ``inspect.signature`` to
-        filter to only the parameters accepted by ``better_model.model()``.
+        filter to only the parameters accepted by ``model.model()``.
         """
         import inspect
 
@@ -969,7 +969,7 @@ class Fitter:
                     model_inputs[key] = arr
 
         # Filter to only the parameters accepted by model().
-        sig = inspect.signature(better_model.model)
+        sig = inspect.signature(model.model)
         model_param_names = set(sig.parameters.keys()) - {"hyperparams"}
         return {k: v for k, v in model_inputs.items() if k in model_param_names}
 
@@ -986,7 +986,7 @@ class Fitter:
         """Execute NUTS sampler. Returns the MCMC object."""
         import functools
 
-        model_fn = functools.partial(better_model.model, hyperparams=self.hyperparams)
+        model_fn = functools.partial(model.model, hyperparams=self.hyperparams)
 
         mcmc = MCMC(
             NUTS(model_fn),
@@ -1014,7 +1014,7 @@ class Fitter:
         self.mcmc = mcmc
         raw_samples: dict[str, Any] = mcmc.get_samples()
 
-        derived = better_model.compute_derived_quantities(
+        derived = model.compute_derived_quantities(
             raw_samples, model_inputs, self.hyperparams  # type: ignore[arg-type]
         )
         self.samples = {**raw_samples, **derived}
@@ -1032,7 +1032,7 @@ class Fitter:
         self._posterior.posterior = self._posterior.posterior.assign(new_xr_vars)  # type: ignore[union-attr]
 
         available_vars = list(self.posterior.posterior.data_vars)  # type: ignore[union-attr]
-        summary_vars = [v for v in better_model.SUMMARY_PARAMETER_NAMES if v in available_vars]
+        summary_vars = [v for v in model.SUMMARY_PARAMETER_NAMES if v in available_vars]
         summary_df = az.summary(self.posterior, var_names=summary_vars)
         print("\n" + "=" * 80)
         print("ArviZ Posterior Summary")
