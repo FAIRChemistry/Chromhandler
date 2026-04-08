@@ -386,6 +386,7 @@ def model(
         sep_min = hp.art_sep_min_w_mult * jnp.minimum(
             w_left_loc[artefact_idx], w_right_loc[artefact_idx]
         )  # [n_artefact]
+        room = jnp.maximum(room, sep_min * 2.0)
         log_separation_artefact = numpyro.sample(
             "log_separation_artefact",
             dist.Uniform(jnp.log(sep_min), jnp.log(room)),
@@ -415,7 +416,6 @@ def model(
         )
         sigma_y = numpyro.sample("sigma_y", dist.LogNormal(jnp.log(sigma_y_prior_loc), 0.5))
 
-    print("the shape of trace_shift_scale", trace_shift_scale.shape)
     trace_shift = trace_shift_scale * (trace_shift_raw - jnp.mean(trace_shift_raw))
     apex = apex_loc[None, :] + trace_shift[:, None]  # [n_trace, n_peak]
 
@@ -560,10 +560,6 @@ def compute_derived_quantities(
     artefact_side_v = jnp.asarray(model_inputs["artefact_side"], dtype=jnp.float32)
     apex_loc_arr = jnp.asarray(model_inputs["apex_loc"], dtype=jnp.float32)
     trace_shift_scale = float(jnp.asarray(model_inputs["trace_shift_scale"]).max())
-    window_lo_arr = jnp.asarray(model_inputs["window_lo"], dtype=jnp.float32)
-    window_hi_arr = jnp.asarray(model_inputs["window_hi"], dtype=jnp.float32)
-    w_left_loc_arr = jnp.asarray(model_inputs["w_left_loc"], dtype=jnp.float32)
-
     n_peak = int(apex_loc_arr.shape[0])
     n_artefact = int(artefact_idx.shape[0])
     n_free = int(free_idx.shape[0])

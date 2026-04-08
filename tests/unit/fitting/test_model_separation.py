@@ -1,9 +1,10 @@
 """Tests that artefact separation prior respects window-geometry bounds."""
 from __future__ import annotations
 
+import jax
 import numpy as np
 import numpyro
-import jax
+
 from chromhandler.fitting import model
 from chromhandler.fitting.types import ModelHyperparams
 
@@ -28,33 +29,33 @@ def _minimal_model_inputs(
     x = jnp.linspace(window_lo - 0.1, window_hi + 0.1, n_time)
     x = jnp.tile(x, (n_trace, 1))
 
-    return dict(
-        x=x,
-        y=None,
-        hyperparams=ModelHyperparams(),
-        peak_mode_code=jnp.array([1], dtype=jnp.int32),       # artefact_doublet
-        artefact_side=jnp.array([artefact_side], dtype=jnp.int32),
-        artefact_peak_index=jnp.array([0], dtype=jnp.int32),
-        free_peak_index=jnp.array([], dtype=jnp.int32),
-        nonfree_idx=jnp.array([0], dtype=jnp.int32),
-        nonfree_position=jnp.array([0], dtype=jnp.int32),
-        apex_loc=jnp.array([apex_loc], dtype=jnp.float32),
-        trace_shift_scale=jnp.array(trace_shift_scale, dtype=jnp.float32),
-        w_left_loc=jnp.array([w_left_loc], dtype=jnp.float32),
-        w_left_scale=jnp.array([0.01], dtype=jnp.float32),
-        w_right_loc=jnp.array([w_right_loc], dtype=jnp.float32),
-        w_right_scale=jnp.array([0.01], dtype=jnp.float32),
-        area_gaussian_pt=jnp.ones((n_trace, 1), dtype=jnp.float32) * 100.0,
-        area_art_shared=jnp.array([10.0], dtype=jnp.float32),
-        snr_per_trace=jnp.ones((n_trace, 1), dtype=jnp.float32) * 10.0,
-        window_lo=jnp.array([window_lo], dtype=jnp.float32),
-        window_hi=jnp.array([window_hi], dtype=jnp.float32),
-        baseline_intercept_loc=jnp.zeros(n_trace, dtype=jnp.float32),
-        baseline_intercept_scale=jnp.ones(n_trace, dtype=jnp.float32) * 100.0,
-        baseline_slope_loc=jnp.zeros(n_trace, dtype=jnp.float32),
-        baseline_slope_scale=jnp.ones(n_trace, dtype=jnp.float32) * 10.0,
-        sigma_y_prior_loc=jnp.ones(n_trace, dtype=jnp.float32) * 50.0,
-    )
+    return {
+        "x": x,
+        "y": None,
+        "hyperparams": ModelHyperparams(),
+        "peak_mode_code": jnp.array([1], dtype=jnp.int32),       # artefact_doublet
+        "artefact_side": jnp.array([artefact_side], dtype=jnp.int32),
+        "artefact_peak_index": jnp.array([0], dtype=jnp.int32),
+        "free_peak_index": jnp.array([], dtype=jnp.int32),
+        "nonfree_idx": jnp.array([0], dtype=jnp.int32),
+        "nonfree_position": jnp.array([0], dtype=jnp.int32),
+        "apex_loc": jnp.array([apex_loc], dtype=jnp.float32),
+        "trace_shift_scale": jnp.array(trace_shift_scale, dtype=jnp.float32),
+        "w_left_loc": jnp.array([w_left_loc], dtype=jnp.float32),
+        "w_left_scale": jnp.array([0.01], dtype=jnp.float32),
+        "w_right_loc": jnp.array([w_right_loc], dtype=jnp.float32),
+        "w_right_scale": jnp.array([0.01], dtype=jnp.float32),
+        "area_gaussian_pt": jnp.ones((n_trace, 1), dtype=jnp.float32) * 100.0,
+        "area_art_shared": jnp.array([10.0], dtype=jnp.float32),
+        "snr_per_trace": jnp.ones((n_trace, 1), dtype=jnp.float32) * 10.0,
+        "window_lo": jnp.array([window_lo], dtype=jnp.float32),
+        "window_hi": jnp.array([window_hi], dtype=jnp.float32),
+        "baseline_intercept_loc": jnp.zeros(n_trace, dtype=jnp.float32),
+        "baseline_intercept_scale": jnp.ones(n_trace, dtype=jnp.float32) * 100.0,
+        "baseline_slope_loc": jnp.zeros(n_trace, dtype=jnp.float32),
+        "baseline_slope_scale": jnp.ones(n_trace, dtype=jnp.float32) * 10.0,
+        "sigma_y_prior_loc": jnp.ones(n_trace, dtype=jnp.float32) * 50.0,
+    }
 
 
 def _sample_separation(inputs: dict, n_samples: int = 500) -> np.ndarray:
