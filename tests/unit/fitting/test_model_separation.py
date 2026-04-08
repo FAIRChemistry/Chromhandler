@@ -1,6 +1,8 @@
 """Tests that artefact separation prior respects window-geometry bounds."""
 from __future__ import annotations
 
+from typing import Any
+
 import jax
 import numpy as np
 import numpyro
@@ -22,7 +24,7 @@ def _minimal_model_inputs(
     trace_shift_scale: float = 0.005,
     n_trace: int = 3,
     n_time: int = 50,
-) -> dict:
+) -> dict[str, Any]:
     """Minimal model inputs for a single artefact_doublet peak."""
     import jax.numpy as jnp
 
@@ -58,7 +60,7 @@ def _minimal_model_inputs(
     }
 
 
-def _sample_separation(inputs: dict, n_samples: int = 500) -> np.ndarray:
+def _sample_separation(inputs: dict[str, Any], n_samples: int = 500) -> np.ndarray[Any, Any]:
     """Run prior predictive and return log_separation_artefact samples."""
     from numpyro.infer import Predictive
 
