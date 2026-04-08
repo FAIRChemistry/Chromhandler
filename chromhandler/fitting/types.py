@@ -46,7 +46,6 @@ class ModelHyperparams:
     free_sep_log_sigma: float = 0.4
 
     art_sep_min_w_mult: float = 0.5        # min separation in half-width units
-    art_sep_max_window_frac: float = 0.5
 
 
 def peak_component_count(mode: str) -> int:
