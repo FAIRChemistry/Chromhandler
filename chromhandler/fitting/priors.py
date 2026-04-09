@@ -772,7 +772,7 @@ def geometric_priors_to_arrays(
     dict with keys:
 
     - ``apex_loc``           [n_peak]          — apex-weighted centroid.
-    - ``apex_scale``         [n_peak]          — local apex spread after removing shared trace drift.
+    - ``apex_offset_scale``  [n_peak]          — local apex spread after removing shared trace drift.
     - ``w_left_loc``         [n_peak]          — left HWHM prior centres.
     - ``w_left_scale``       [n_peak]          — left HWHM prior scales.
     - ``w_right_loc``        [n_peak]          — right HWHM prior centres.
@@ -786,7 +786,7 @@ def geometric_priors_to_arrays(
     """
     return {
         "apex_loc": np.array([p.apex_loc for p in priors], dtype=np.float64),
-        "apex_scale": np.array([p.apex_scale for p in priors], dtype=np.float64),
+        "apex_offset_scale": np.array([p.apex_scale for p in priors], dtype=np.float64),
         "w_left_loc": np.array([p.w_left_loc for p in priors], dtype=np.float64),
         "w_left_scale": np.array([p.w_left_scale for p in priors], dtype=np.float64),
         "w_right_loc": np.array([p.w_right_loc for p in priors], dtype=np.float64),

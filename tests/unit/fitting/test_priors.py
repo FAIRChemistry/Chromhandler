@@ -393,7 +393,7 @@ def test_geometric_priors_to_arrays_keys(synthetic_single_peak: _SinglePeakFixtu
     arrays = geometric_priors_to_arrays(priors)
 
     expected_keys = {
-        "apex_loc", "apex_scale",
+        "apex_loc", "apex_offset_scale",
         "w_left_loc", "w_left_scale",
         "w_right_loc", "w_right_scale",
         "window_lo", "window_hi",
@@ -426,7 +426,7 @@ def test_geometric_priors_to_arrays_shapes() -> None:
     arrays = geometric_priors_to_arrays(priors)
 
     n_peak = 3
-    for key in ("apex_loc", "apex_scale", "w_left_loc", "w_left_scale",
+    for key in ("apex_loc", "apex_offset_scale", "w_left_loc", "w_left_scale",
                 "w_right_loc", "w_right_scale", "window_lo", "window_hi"):
         assert arrays[key].shape == (n_peak,), f"{key}: expected ({n_peak},), got {arrays[key].shape}"
 

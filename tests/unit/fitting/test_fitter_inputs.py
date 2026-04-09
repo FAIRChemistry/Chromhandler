@@ -66,7 +66,7 @@ def _make_fitter(
 # ---------------------------------------------------------------------------
 
 _EXPECTED_PRIOR_KEYS = {
-    "apex_loc", "apex_scale",
+    "apex_loc", "apex_offset_scale",
     "w_left_loc", "w_left_scale",
     "w_right_loc", "w_right_scale",
     "window_lo", "window_hi",
