@@ -268,6 +268,7 @@ def model(
     # --- peak priors ---
     apex_loc: jax.Array,  # [n_peak]
     trace_shift_scale: jax.Array,  # scalar
+    apex_offset_scale: jax.Array,  # [n_peak]  — per-peak residual jitter std
     w_left_loc: jax.Array,  # [n_peak]
     w_left_scale: jax.Array,  # [n_peak]
     w_right_loc: jax.Array,  # [n_peak]
@@ -403,7 +404,14 @@ def model(
         sigma_y = numpyro.sample("sigma_y", dist.LogNormal(jnp.log(sigma_y_prior_loc), 0.5))
 
     trace_shift = trace_shift_scale * (trace_shift_raw - jnp.mean(trace_shift_raw))
-    apex = apex_loc[None, :] + trace_shift[:, None]  # [n_trace, n_peak]
+
+    # Per-peak independent apex offset (non-centered parameterization)
+    with numpyro.plate("traces_apex", n_trace, dim=-2):
+        with numpyro.plate("peaks_apex", n_peak, dim=-1):
+            apex_offset_raw = numpyro.sample("apex_offset_raw", dist.Normal(0.0, 1.0))
+    # [n_trace, n_peak]
+    apex_offset = apex_offset_scale[None, :] * apex_offset_raw
+    apex = apex_loc[None, :] + trace_shift[:, None] + apex_offset  # [n_trace, n_peak]
 
     # 7. Per-trace area sampling
     # NOTE: plates are given unique names and nested to avoid NumPyro misidentifying
@@ -512,6 +520,8 @@ def model(
             dist.Normal(mu_y, sigma_y[:, None]).mask(finite_mask),
             obs=jnp.where(finite_mask, y, 0.0),
         )
+    else:
+        numpyro.sample("y", dist.Normal(mu_y, sigma_y[:, None]))
 
 
 # ---------------------------------------------------------------------------
