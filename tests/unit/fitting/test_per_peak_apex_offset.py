@@ -74,7 +74,7 @@ def test_zero_scale_means_no_offset():
     """With apex_offset_scale=0, apex_offset_raw samples don't affect the signal."""
     n_trace = 4
     inputs_zero = _minimal_inputs(n_trace=n_trace, apex_offset_scale=0.0)
-    inputs_nonzero = _minimal_inputs(n_trace=n_trace, apex_offset_scale=0.1)
+    inputs_nonzero = _minimal_inputs(n_trace=n_trace, apex_offset_scale=0.05)
     predictive = Predictive(model.model, num_samples=50)
     rng = jax.random.PRNGKey(2)
     s_zero = predictive(rng, **inputs_zero)
