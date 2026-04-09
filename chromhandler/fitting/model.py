@@ -552,6 +552,7 @@ def compute_derived_quantities(
     nonfree_position = jnp.asarray(model_inputs["nonfree_position"], dtype=jnp.int32)
     artefact_side_v = jnp.asarray(model_inputs["artefact_side"], dtype=jnp.float32)
     apex_loc_arr = jnp.asarray(model_inputs["apex_loc"], dtype=jnp.float32)
+    apex_offset_scale_arr = jnp.asarray(model_inputs["apex_offset_scale"], dtype=jnp.float32)
     trace_shift_scale = float(jnp.asarray(model_inputs["trace_shift_scale"]).max())
     n_peak = int(apex_loc_arr.shape[0])
     n_artefact = int(artefact_idx.shape[0])
@@ -569,7 +570,9 @@ def compute_derived_quantities(
     trace_shift = trace_shift_scale * (
         trace_shift_raw - trace_shift_raw.mean(axis=1, keepdims=True)
     )  # [n_total, n_trace]
-    apex = apex_loc_arr[None, None, :] + trace_shift[:, :, None]  # [n_total, n_trace, n_peak]
+    apex_offset_raw = jnp.asarray(samples["apex_offset_raw"])  # [n_total, n_trace, n_peak]
+    apex_offset = apex_offset_scale_arr[None, None, :] * apex_offset_raw
+    apex = apex_loc_arr[None, None, :] + trace_shift[:, :, None] + apex_offset  # [n_total, n_trace, n_peak]
 
     # Second-component shapes
     sl_art: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)

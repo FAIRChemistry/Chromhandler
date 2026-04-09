@@ -43,6 +43,7 @@ def _minimal_model_inputs(
         "nonfree_position": jnp.array([0], dtype=jnp.int32),
         "apex_loc": jnp.array([apex_loc], dtype=jnp.float32),
         "trace_shift_scale": jnp.array(trace_shift_scale, dtype=jnp.float32),
+        "apex_offset_scale": jnp.array([0.005], dtype=jnp.float32),
         "w_left_loc": jnp.array([w_left_loc], dtype=jnp.float32),
         "w_left_scale": jnp.array([0.01], dtype=jnp.float32),
         "w_right_loc": jnp.array([w_right_loc], dtype=jnp.float32),
