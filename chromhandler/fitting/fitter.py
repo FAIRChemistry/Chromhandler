@@ -40,6 +40,12 @@ from rich import print
 
 from . import model
 from .baseline import BaselinePriors, estimate_baseline
+from .priors import (
+    GeometricPeakPriors,
+    build_peak_priors,
+    geometric_priors_to_arrays,
+    refine_apex_priors_with_trace_shift,
+)
 from .types import (
     PEAK_MODE_TO_CODE,
     ModelHyperparams,
@@ -47,12 +53,6 @@ from .types import (
     peak_is_free_mode,
 )
 from .utils import baseline_to_mask, pad_traces
-from .priors import (
-    GeometricPeakPriors,
-    build_peak_priors,
-    geometric_priors_to_arrays,
-    refine_apex_priors_with_trace_shift,
-)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -216,9 +216,7 @@ class Fitter:
 
         x_finite = x[np.isfinite(x)]
         apex_scale_floor = (
-            max(float(np.nanmedian(np.abs(np.diff(np.sort(x_finite))))), 1e-6)
-            if x_finite.size >= 2
-            else 1e-6
+            max(float(np.nanmedian(np.abs(np.diff(np.sort(x_finite))))), 1e-6) if x_finite.size >= 2 else 1e-6
         )
         return refine_apex_priors_with_trace_shift(
             priors,
@@ -585,8 +583,6 @@ class Fitter:
         Raises:
             RuntimeError: If :meth:`fit` has not been called.
         """
-        from scipy.special import ndtr as _ndtr
-
         if self._posterior is None:
             raise RuntimeError("posterior_curves() requires a fitted posterior. Call fit() first.")
 
@@ -605,7 +601,7 @@ class Fitter:
             raise ValueError("posterior_curves(): no traces matched the given trace_indices.")
 
         # Extract posterior arrays from self.samples (shape [n_total, n_trace, n_peak])
-        # where n_total = n_chains x n_draws.  Derived quantities (xi_l, sigma_l, ...)
+        # where n_total = n_chains x n_draws.  Derived quantities (apex_l, sl_l, ...)
         # were computed post-sampling by compute_derived_quantities() and merged into
         # self.samples, so they are available here without going through ArviZ.
         smp = self._get_view_samples()
@@ -614,26 +610,26 @@ class Fitter:
             """Fetch from samples and select the requested trace subset."""
             return np.asarray(smp[key], dtype=float)[:, local_idx]
 
-        xi_l: NDArray[np.float64] = _sel("xi_l")       # [n_total, n_sel, n_peak]
-        xi_r: NDArray[np.float64] = _sel("xi_r")
-        sigma_l: NDArray[np.float64] = _sel("sigma_l")
-        sigma_r: NDArray[np.float64] = _sel("sigma_r")
-        alpha_l: NDArray[np.float64] = _sel("alpha_l")
-        alpha_r: NDArray[np.float64] = _sel("alpha_r")
+        apex_l: NDArray[np.float64] = _sel("apex_l")  # [n_total, n_sel, n_peak]
+        apex_r: NDArray[np.float64] = _sel("apex_r")
+        sl_l: NDArray[np.float64] = _sel("sl_l")
+        sl_r: NDArray[np.float64] = _sel("sl_r")
+        sr_l: NDArray[np.float64] = _sel("sr_l")
+        sr_r: NDArray[np.float64] = _sel("sr_r")
         area_l: NDArray[np.float64] = _sel("area_l")
         area_r: NDArray[np.float64] = _sel("area_r")
         bl_int: NDArray[np.float64] = np.asarray(smp["baseline_intercept"], dtype=float)[:, local_idx]
         bl_slp: NDArray[np.float64] = np.asarray(smp["baseline_slope"], dtype=float)[:, local_idx]
 
-        n_total = xi_l.shape[0]
+        n_total = apex_l.shape[0]
 
         # Subsample draws
         if n_total > n_samples_max:
             rng = np.random.default_rng(0)
             idx = rng.choice(n_total, size=n_samples_max, replace=False)
-            xi_l, xi_r = xi_l[idx], xi_r[idx]
-            sigma_l, sigma_r = sigma_l[idx], sigma_r[idx]
-            alpha_l, alpha_r = alpha_l[idx], alpha_r[idx]
+            apex_l, apex_r = apex_l[idx], apex_r[idx]
+            sl_l, sl_r = sl_l[idx], sl_r[idx]
+            sr_l, sr_r = sr_l[idx], sr_r[idx]
             area_l, area_r = area_l[idx], area_r[idx]
             bl_int, bl_slp = bl_int[idx], bl_slp[idx]
             n_samp = n_samples_max
@@ -642,7 +638,7 @@ class Fitter:
 
         x_eval = np.asarray(x, dtype=float)  # [n_x]
         n_x = len(x_eval)
-        n_peak = xi_l.shape[2]
+        n_peak = apex_l.shape[2]
 
         # Merge sample x trace dims for vectorized PDF evaluation
         n_flat = n_samp * n_selected
@@ -650,37 +646,26 @@ class Fitter:
         def _merge(arr: NDArray[np.float64]) -> NDArray[np.float64]:
             return arr.reshape(n_flat, n_peak)
 
-        xi_l_f = _merge(xi_l)
-        xi_r_f = _merge(xi_r)
-        sigma_l_f = _merge(sigma_l)
-        sigma_r_f = _merge(sigma_r)
-        alpha_l_f = _merge(alpha_l)
-        alpha_r_f = _merge(alpha_r)
+        apex_l_f = _merge(apex_l)
+        apex_r_f = _merge(apex_r)
+        sl_l_f = _merge(sl_l)
+        sl_r_f = _merge(sl_r)
+        sr_l_f = _merge(sr_l)
+        sr_r_f = _merge(sr_r)
         area_l_f = _merge(area_l)
         area_r_f = _merge(area_r)
 
         # Broadcast x: [n_flat, n_x]
         x_flat = np.broadcast_to(x_eval[None, :], (n_flat, n_x)).copy()
+        x_jax = jnp.asarray(x_flat)
 
-        def _skew_normal_pdf(
-            x_2d: NDArray[np.float64],  # [n, n_x]
-            xi: NDArray[np.float64],  # [n, n_comp]
-            sigma: NDArray[np.float64],  # [n, n_comp]
-            alpha: NDArray[np.float64],  # [n, n_comp]
-        ) -> NDArray[np.float64]:  # [n, n_comp, n_x]
-            sig = np.maximum(sigma[:, :, None], 1e-6)
-            z = (x_2d[:, None, :] - xi[:, :, None]) / sig
-            log_pdf = (
-                np.log(2.0)
-                - np.log(sig)
-                - 0.5 * z**2
-                - 0.5 * np.log(2.0 * np.pi)
-                + np.log(np.clip(_ndtr(alpha[:, :, None] * z), 1e-300, None))
-            )
-            return np.exp(log_pdf)
-
-        pdf_l = _skew_normal_pdf(x_flat, xi_l_f, sigma_l_f, alpha_l_f)  # [n_flat, n_peak, n_x]
-        pdf_r = _skew_normal_pdf(x_flat, xi_r_f, sigma_r_f, alpha_r_f)
+        # Use model's canonical PDF — single source of truth for both MCMC and viz
+        pdf_l = np.array(jnp.exp(model.log_split_normal_pdf(
+            x_jax, jnp.asarray(apex_l_f), jnp.asarray(sl_l_f), jnp.asarray(sr_l_f),
+        )))  # [n_flat, n_peak, n_x]
+        pdf_r = np.array(jnp.exp(model.log_split_normal_pdf(
+            x_jax, jnp.asarray(apex_r_f), jnp.asarray(sl_r_f), jnp.asarray(sr_r_f),
+        )))
 
         comp_l_f = area_l_f[:, :, None] * pdf_l  # [n_flat, n_peak, n_x]
         comp_r_f = area_r_f[:, :, None] * pdf_r
@@ -766,16 +751,12 @@ class Fitter:
             If :meth:`fit` has not been called yet.
         """
         if self._posterior is None:
-            raise RuntimeError(
-                "save_summary() requires a fitted posterior. Call fit() first."
-            )
+            raise RuntimeError("save_summary() requires a fitted posterior. Call fit() first.")
 
         import arviz as az
 
         available_vars = list(self._posterior.posterior.data_vars)  # type: ignore[union-attr]
-        summary_vars = [
-            v for v in model.SUMMARY_PARAMETER_NAMES if v in available_vars
-        ]
+        summary_vars = [v for v in model.SUMMARY_PARAMETER_NAMES if v in available_vars]
         summary_df = az.summary(self._posterior, var_names=summary_vars or None)
         Path(path).write_text(summary_df.to_string(), encoding="utf-8")
 
@@ -804,9 +785,7 @@ class Fitter:
             If :meth:`fit` has not been called yet.
         """
         if self._posterior is None:
-            raise RuntimeError(
-                "plot_traces() requires a fitted posterior. Call fit() first."
-            )
+            raise RuntimeError("plot_traces() requires a fitted posterior. Call fit() first.")
 
         import matplotlib.pyplot as _plt
 
@@ -853,15 +832,11 @@ class Fitter:
                 trace_indices=trace_indices,
             )
             fitted_rows = (
-                trace_indices
-                if trace_indices is not None
-                else np.arange(self.n_traces, dtype=np.intp)
+                trace_indices if trace_indices is not None else np.arange(self.n_traces, dtype=np.intp)
             )
 
         chromatogram_ids: list[str] | None = (
-            list(self.trace_chromatogram_ids.astype(str))
-            if self.trace_chromatogram_ids is not None
-            else None
+            list(self.trace_chromatogram_ids.astype(str)) if self.trace_chromatogram_ids is not None else None
         )
 
         fig, axes = visualize.plot_fit(
@@ -1014,7 +989,9 @@ class Fitter:
         raw_samples: dict[str, Any] = mcmc.get_samples()
 
         derived = model.compute_derived_quantities(
-            raw_samples, model_inputs, self.hyperparams  # type: ignore[arg-type]
+            raw_samples,  # type: ignore[arg-type]
+            model_inputs,
+            self.hyperparams,  # type: ignore[arg-type]
         )
         self.samples = {**raw_samples, **derived}
 
@@ -1255,9 +1232,7 @@ class Fitter:
 
         mol_area = np.empty_like(area_l)
         for p_idx, peak in enumerate(peaks):
-            mol_area[..., p_idx] = Fitter._molecule_area_slice(
-                peak, area_l[..., p_idx], area_r[..., p_idx]
-            )
+            mol_area[..., p_idx] = Fitter._molecule_area_slice(peak, area_l[..., p_idx], area_r[..., p_idx])
 
         q_data = np.moveaxis(np.quantile(mol_area, quantiles, axis=0), 0, -1)  # [n_trace, n_peak, 3]
 

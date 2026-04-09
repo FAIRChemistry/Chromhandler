@@ -132,12 +132,10 @@ def test_samples_contain_derived_keys(fitted_fitter: tuple[Fitter, float]) -> No
         "area_r",
         "apex_l",
         "apex_r",
-        "xi_l",
-        "xi_r",
-        "sigma_l",
-        "sigma_r",
-        "alpha_l",
-        "alpha_r",
+        "sl_l",
+        "sl_r",
+        "sr_l",
+        "sr_r",
         "baseline_slope",
     }
     missing = required - set(fitter.samples.keys())
