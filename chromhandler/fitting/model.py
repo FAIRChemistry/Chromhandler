@@ -24,7 +24,6 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import numpyro
 import numpyro.distributions as dist
 
@@ -323,39 +322,33 @@ def model(
     )  # [n_peak]
     sl_base, sr_base = _halfwidths_to_split(log_w_left, log_w_right)  # type: ignore[arg-type]  # [n_peak]
 
-    # 4. Doublet second-component shape (artefact + free combined)
-    #    doublet order: artefact peaks first, free peaks after
-    n_doublet = n_artefact + n_free
+    # 4a. Artefact second-component shape: symmetric, constrained narrow
     sl_art: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
     sr_art: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
     sl_r_free: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
     sr_r_free: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
 
-    if n_doublet > 0:
-        # Build doublet index and prior centres at Python level
-        doublet_idx_np = np.concatenate(
-            [  # type: ignore[arg-type]
-                np.asarray(artefact_peak_index),
-                np.asarray(free_peak_index),
-            ]
-        ).astype(np.int32)
-        doublet_idx = jnp.asarray(doublet_idx_np)
+    if n_artefact > 0:
+        w_mean_art = 0.5 * (w_left_loc[artefact_idx] + w_right_loc[artefact_idx])
+        log_w_art = numpyro.sample(
+            "log_w_art",
+            dist.Normal(jnp.log(hp.art_w_prior_center_mult * w_mean_art), hp.art_w_log_scale),
+        )  # [n_artefact]
+        w_art = jnp.exp(log_w_art) / _HWHM_FACTOR  # type: ignore[arg-type]
+        sl_art = w_art
+        sr_art = w_art
 
-        # Prior: 0.6 * observed half-widths, wide log-scale
+    # 4b. Free doublet second-component shape: independent left/right
+    if n_free > 0:
         log_w_left_2 = numpyro.sample(
             "log_w_left_2",
-            dist.Normal(jnp.log(0.6 * w_left_loc[doublet_idx]), 0.5),
-        )  # [n_doublet]
+            dist.Normal(jnp.log(0.6 * w_left_loc[free_idx]), 0.5),
+        )  # [n_free]
         log_w_right_2 = numpyro.sample(
             "log_w_right_2",
-            dist.Normal(jnp.log(0.6 * w_right_loc[doublet_idx]), 0.5),
-        )  # [n_doublet]
-        sl_2, sr_2 = _halfwidths_to_split(log_w_left_2, log_w_right_2)  # type: ignore[arg-type]
-
-        sl_art = sl_2[:n_artefact]
-        sr_art = sr_2[:n_artefact]
-        sl_r_free = sl_2[n_artefact:]
-        sr_r_free = sr_2[n_artefact:]
+            dist.Normal(jnp.log(0.6 * w_right_loc[free_idx]), 0.5),
+        )  # [n_free]
+        sl_r_free, sr_r_free = _halfwidths_to_split(log_w_left_2, log_w_right_2)  # type: ignore[arg-type]
 
     # 5. Separation priors
     separation_artefact: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
@@ -558,8 +551,6 @@ def compute_derived_quantities(
     n_artefact = int(artefact_idx.shape[0])
     n_free = int(free_idx.shape[0])
     n_nonfree = int(nonfree_idx_in.shape[0])
-    n_doublet = n_artefact + n_free
-
     log_w_left = jnp.asarray(samples["log_w_left"])  # [n_total, n_peak]
     log_w_right = jnp.asarray(samples["log_w_right"])  # [n_total, n_peak]
     trace_shift_raw = jnp.asarray(samples["trace_shift_raw"])  # [n_total, n_trace]
@@ -582,14 +573,16 @@ def compute_derived_quantities(
     separation_artefact: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
     separation_free: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
 
-    if n_doublet > 0:
-        log_w_left_2 = jnp.asarray(samples["log_w_left_2"])  # [n_total, n_doublet]
+    if n_artefact > 0:
+        log_w_art = jnp.asarray(samples["log_w_art"])  # [n_total, n_artefact]
+        w_art = jnp.exp(log_w_art) / _HWHM_FACTOR
+        sl_art = w_art
+        sr_art = w_art
+
+    if n_free > 0:
+        log_w_left_2 = jnp.asarray(samples["log_w_left_2"])  # [n_total, n_free]
         log_w_right_2 = jnp.asarray(samples["log_w_right_2"])
-        sl_2, sr_2 = _halfwidths_to_split(log_w_left_2, log_w_right_2)
-        sl_art = sl_2[:, :n_artefact]
-        sr_art = sr_2[:, :n_artefact]
-        sl_r_free = sl_2[:, n_artefact:]
-        sr_r_free = sr_2[:, n_artefact:]
+        sl_r_free, sr_r_free = _halfwidths_to_split(log_w_left_2, log_w_right_2)
 
     if n_artefact > 0:
         separation_artefact = jnp.exp(
@@ -717,6 +710,7 @@ SUMMARY_PARAMETER_NAMES = (
     "apex",
     "log_w_left",
     "log_w_right",
+    "log_w_art",
     "log_w_left_2",
     "log_w_right_2",
     "log_separation_artefact",

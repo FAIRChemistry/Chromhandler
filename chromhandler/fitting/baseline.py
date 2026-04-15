@@ -11,13 +11,13 @@ import jax.numpy as jnp
 if TYPE_CHECKING:
     from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 
-_DEFAULT_PERCENTILE: Final = 5.0
+_DEFAULT_PERCENTILE: Final = 15.0
 _DEFAULT_EDGE_FRACTION: Final = 0.20
 _MIN_EDGE_POINTS: Final = 6
 _MIN_INTERCEPT_SCALE: Final = 1.0
 _MIN_SLOPE_SCALE: Final = 1e-3
-_PRIOR_SE_MULTIPLIER: Final = 2.5
-_GLOBAL_SCALE_CAP: Final = 2.0
+_PRIOR_SE_MULTIPLIER: Final = 4.5
+_GLOBAL_SCALE_CAP: Final = 3.0
 
 
 @dataclass(frozen=True)

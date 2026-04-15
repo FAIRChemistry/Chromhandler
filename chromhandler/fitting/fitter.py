@@ -675,7 +675,9 @@ class Fitter:
         comp_r = comp_r_f.reshape(n_samp, n_selected, n_peak, n_x)
 
         # Baseline: [n_samp, n_sel, n_x]
-        baseline_samps = bl_int[:, :, None] + bl_slp[:, :, None] * x_eval[None, None, :]
+        # Must match model centering: baseline = intercept + slope * (x - x_mid)
+        x_mid = 0.5 * (min(p.rt_min for p in self.peaks) + max(p.rt_max for p in self.peaks))
+        baseline_samps = bl_int[:, :, None] + bl_slp[:, :, None] * (x_eval[None, None, :] - x_mid)
 
         # Total: [n_samp, n_sel, n_x]
         total_samps = comp_l.sum(axis=2) + comp_r.sum(axis=2) + baseline_samps

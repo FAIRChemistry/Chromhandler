@@ -46,6 +46,8 @@ class ModelHyperparams:
     free_sep_log_sigma: float = 0.4
 
     art_sep_min_w_mult: float = 0.5  # min separation in half-width units
+    art_w_prior_center_mult: float = 0.4  # artefact width = 0.4 * mean primary HWHM
+    art_w_log_scale: float = 0.3  # log-space scale for artefact symmetric width prior
 
 
 def peak_component_count(mode: str) -> int:

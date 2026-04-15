@@ -61,13 +61,18 @@ def _minimal_model_inputs(
     }
 
 
-def _sample_separation(inputs: dict[str, Any], n_samples: int = 500) -> np.ndarray[Any, Any]:
-    """Run prior predictive and return log_separation_artefact samples."""
+def _sample_prior(inputs: dict[str, Any], n_samples: int = 500) -> dict[str, Any]:
+    """Run prior predictive and return all samples."""
     from numpyro.infer import Predictive
 
     predictive = Predictive(model.model, num_samples=n_samples)
     rng_key = jax.random.PRNGKey(42)
-    samples = predictive(rng_key, **inputs)
+    return predictive(rng_key, **inputs)
+
+
+def _sample_separation(inputs: dict[str, Any], n_samples: int = 500) -> np.ndarray[Any, Any]:
+    """Run prior predictive and return log_separation_artefact samples."""
+    samples = _sample_prior(inputs, n_samples)
     return np.asarray(samples["log_separation_artefact"])  # [n_samples, n_artefact]
 
 
@@ -117,4 +122,35 @@ def test_separation_above_min():
     expected_min = hp.art_sep_min_w_mult * min(w_left, w_right)
     assert np.all(sep_samples[:, 0] > expected_min), (
         f"separation {sep_samples.min():.6f} below sep_min={expected_min:.6f}"
+    )
+
+
+def test_artefact_width_is_symmetric():
+    """Artefact second component must have sl == sr (symmetric split-normal).
+
+    Default artefact_side=+1 (right), so artefact is the right component.
+    Check that sl_r == sr_r for peak index 0.
+    """
+    inputs = _minimal_model_inputs()
+    samples = _sample_prior(inputs)
+    derived = model.compute_derived_quantities(
+        samples, inputs, inputs["hyperparams"]
+    )
+    sl_art_vals = np.asarray(derived["sl_r"])[:, :, 0]
+    sr_art_vals = np.asarray(derived["sr_r"])[:, :, 0]
+    np.testing.assert_allclose(sl_art_vals, sr_art_vals, rtol=1e-5)
+
+
+def test_artefact_narrower_than_primary():
+    """Artefact width should be smaller than primary in >80% of samples."""
+    inputs = _minimal_model_inputs()
+    samples = _sample_prior(inputs)
+    log_w_art = np.asarray(samples["log_w_art"])  # [n_samples, n_artefact]
+    w_art = np.exp(log_w_art[:, 0])
+    w_primary_mean = 0.5 * (
+        float(inputs["w_left_loc"][0]) + float(inputs["w_right_loc"][0])
+    )
+    frac_narrower = np.mean(w_art < w_primary_mean)
+    assert frac_narrower > 0.80, (
+        f"Only {frac_narrower:.1%} of artefact widths narrower than primary"
     )
