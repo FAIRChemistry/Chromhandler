@@ -691,6 +691,36 @@ class Fitter:
             _plt.close(fig)
         return fig, axes
 
+    def plot_geometric_diagnostic(
+        self,
+        path: str | Path | None = None,
+        *,
+        k_mad: float = 3.0,
+    ) -> tuple[MplFigure, np.ndarray[Any, Any], list[int]]:
+        """Pre-fit per-trace ``(sigma_eff, alpha_asym)`` scatter with MAD bounds.
+
+        One subplot per peak window. Traces outside ``k_mad * MAD`` on
+        either axis are flagged as outliers. Returns ``(fig, axes,
+        outlier_trace_indices)``; the outlier list is the union across
+        peak windows and can be fed back to :meth:`fit` (via a subset)
+        to exclude cluster-outlier injections from MCMC.
+        """
+        import matplotlib.pyplot as _plt
+
+        from . import visualize
+
+        fig, axes, outliers = visualize.plot_geometric_diagnostic(
+            self.time,
+            self.signal,
+            self.peaks,
+            k_mad=k_mad,
+            chromatogram_ids=self._chromatogram_id_list(),
+        )
+        if path is not None:
+            fig.savefig(str(path), dpi=150, bbox_inches="tight")
+            _plt.close(fig)
+        return fig, axes, outliers
+
     # ------------------------------------------------------------------
     # Inference (MCMC)
     # ------------------------------------------------------------------

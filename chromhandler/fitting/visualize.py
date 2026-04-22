@@ -1,13 +1,15 @@
 """Posterior fit visualizations for :class:`Fitter`.
 
-Only two public entry points are provided:
+Public entry points:
 
-- :func:`plot_fit_peaks` — per-peak grid (rows = traces, cols = peaks).
-- :func:`plot_fit_combined` — combined view (rows = traces, one column).
+- :func:`plot_fit_peaks` — per-peak posterior grid (rows = traces, cols = peaks).
+- :func:`plot_fit_combined` — combined posterior view (rows = traces, one column).
+- :func:`plot_geometric_diagnostic` — pre-fit ``(sigma_eff, alpha_asym)``
+  scatter with MAD-based cluster-outlier flagging.
 
-Both methods drive posterior data directly off an ArviZ ``InferenceData``
-and use :func:`chromhandler.fitting.model.log_split_normal_pdf` as the
-single source of truth for the split-normal PDF.
+Posterior methods drive data directly off an ArviZ ``InferenceData`` and
+use :func:`chromhandler.fitting.model.log_split_normal_pdf` as the single
+source of truth for the split-normal PDF.
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ import arviz as az
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.stats import median_abs_deviation
 
 from . import model
+from .priors import _trace_fwhm_geometry, fwhm_geometry_to_sigma_alpha
 
 if TYPE_CHECKING:
     from arviz import InferenceData
@@ -345,3 +349,122 @@ def plot_fit_combined(
         axes[0, 0].legend(fontsize=7, loc="best")
     fig.tight_layout()
     return fig, axes
+
+
+# ---------------------------------------------------------------------------
+# Pre-fit geometric diagnostic
+# ---------------------------------------------------------------------------
+
+
+def plot_geometric_diagnostic(
+    time: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    peaks: list[PeakAnnotation],
+    *,
+    k_mad: float = 3.0,
+    chromatogram_ids: list[str] | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[Figure, np.ndarray[Any, Any], list[int]]:
+    """Pre-fit per-trace ``(sigma_eff, alpha_asym)`` scatter with MAD bounds.
+
+    One subplot per peak window. Traces whose ``(sigma_eff, alpha_asym)``
+    falls outside ``k_mad * MAD`` on either axis (computed per peak over
+    valid-FWHM traces) are marked as outliers. A trace is flagged overall
+    if it is an outlier in at least one peak window.
+
+    Returns ``(fig, axes, outlier_trace_indices)``. Works without a
+    posterior — this is a prior diagnostic.
+    """
+    time_arr = np.asarray(time, dtype=float)
+    signal_arr = np.asarray(signal, dtype=float)
+    n_trace = time_arr.shape[0]
+    n_peak = len(peaks)
+
+    if figsize is None:
+        figsize = (4 * max(n_peak, 1), 3.5)
+    fig, axes = plt.subplots(1, max(n_peak, 1), figsize=figsize, squeeze=False)
+
+    x_common = np.nanmedian(time_arr, axis=0)
+    outlier_set: set[int] = set()
+
+    for p, peak in enumerate(peaks):
+        ax = axes[0, p]
+        win = (x_common >= peak.rt_min) & (x_common <= peak.rt_max)
+        y_win = signal_arr[:, win]
+        x_win = x_common[win]
+
+        if x_win.size < 4:
+            ax.set_title(f"{peak.molecule_id} (window too narrow)", fontsize=9)
+            continue
+
+        geo = _trace_fwhm_geometry(x_win, y_win)
+        sigma_eff, alpha_asym = fwhm_geometry_to_sigma_alpha(geo)
+        valid = np.asarray(geo.fwhm_valid, dtype=bool)
+
+        if not valid.any():
+            ax.set_title(f"{peak.molecule_id} (no valid FWHM)", fontsize=9)
+            continue
+
+        sig_v = sigma_eff[valid]
+        alp_v = alpha_asym[valid]
+        med_s, med_a = float(np.median(sig_v)), float(np.median(alp_v))
+        mad_s = float(median_abs_deviation(sig_v, nan_policy="omit")) if sig_v.size >= 2 else 0.0  # pyright: ignore[reportUnknownArgumentType]
+        mad_a = float(median_abs_deviation(alp_v, nan_policy="omit")) if alp_v.size >= 2 else 0.0  # pyright: ignore[reportUnknownArgumentType]
+
+        outlier = np.zeros(n_trace, dtype=bool)
+        if mad_s > 0.0:
+            outlier |= np.abs(sigma_eff - med_s) > k_mad * mad_s
+        if mad_a > 0.0:
+            outlier |= np.abs(alpha_asym - med_a) > k_mad * mad_a
+        outlier &= valid
+
+        inlier = valid & ~outlier
+        invalid = ~valid
+
+        if inlier.any():
+            ax.scatter(
+                sigma_eff[inlier], alpha_asym[inlier],
+                s=30, color="C0", edgecolor="none", label="Inlier" if p == 0 else "",
+            )
+        if outlier.any():
+            ax.scatter(
+                sigma_eff[outlier], alpha_asym[outlier],
+                s=40, color="red", edgecolor="none", label="Outlier" if p == 0 else "",
+            )
+            for t in np.where(outlier)[0]:
+                ax.annotate(
+                    _trace_label(int(t), chromatogram_ids),
+                    (sigma_eff[t], alpha_asym[t]),
+                    fontsize=6, xytext=(3, 3), textcoords="offset points",
+                )
+                outlier_set.add(int(t))
+
+        ax.scatter(
+            [med_s], [med_a],
+            marker="x", color="black", s=60, linewidths=1.5,
+            label="Median" if p == 0 else "",
+        )
+        if mad_s > 0.0 and mad_a > 0.0:
+            ax.add_patch(plt.Rectangle(  # type: ignore[attr-defined]
+                (med_s - k_mad * mad_s, med_a - k_mad * mad_a),
+                2 * k_mad * mad_s, 2 * k_mad * mad_a,
+                fill=False, edgecolor="red", linestyle="--", linewidth=0.8,
+                label=f"±{k_mad:g}·MAD" if p == 0 else "",
+            ))
+
+        ax.set_title(
+            f"{peak.molecule_id}  (n={int(valid.sum())}"
+            f"{f', {int(invalid.sum())} invalid' if invalid.any() else ''})",
+            fontsize=9,
+        )
+        ax.set_xlabel("sigma_eff [min]", fontsize=8)
+        if p == 0:
+            ax.set_ylabel("alpha_asym", fontsize=8)
+        ax.axhline(0.0, color="gray", linewidth=0.5, alpha=0.5)
+        ax.grid(True, alpha=0.3, linestyle="--")
+        ax.tick_params(labelsize=7)
+
+    if n_peak > 0 and axes[0, 0].has_data():
+        axes[0, 0].legend(fontsize=7, loc="best")
+    fig.tight_layout()
+    return fig, axes, sorted(outlier_set)

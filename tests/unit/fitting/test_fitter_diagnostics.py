@@ -166,3 +166,54 @@ def test_plot_fit_combined_saves_png(tmp_path: Path) -> None:
     fig, _ = fitter.plot_fit_combined(path=out)
     assert out.exists()
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# plot_geometric_diagnostic
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_plot_geometric_diagnostic_runs_without_posterior() -> None:
+    """plot_geometric_diagnostic is a pre-fit tool — no posterior required."""
+    fitter = _make_fitter()
+    fig, axes, outliers = fitter.plot_geometric_diagnostic()
+    assert isinstance(fig, plt.Figure)  # type: ignore[reportPrivateImportUsage]
+    assert axes.shape == (1, len(fitter.peaks))
+    assert isinstance(outliers, list)
+    plt.close(fig)
+
+
+@pytest.mark.unit
+def test_plot_geometric_diagnostic_saves_png(tmp_path: Path) -> None:
+    fitter = _make_fitter()
+    out = tmp_path / "geom.png"
+    fig, _, _ = fitter.plot_geometric_diagnostic(path=out)
+    assert out.exists()
+    plt.close(fig)
+
+
+@pytest.mark.unit
+def test_plot_geometric_diagnostic_flags_synthetic_outlier() -> None:
+    """Injecting a 2x-broader peak in one trace flags that trace as an outlier."""
+    from chromhandler.fitting import Fitter
+
+    n_trace, n_time = 6, 300
+    x = np.linspace(2.5, 3.5, n_time)
+    rng = np.random.default_rng(1)
+    signal = np.stack([
+        _gaussian(x, 3.0, 0.05, 120.0) + rng.normal(0, 0.1, n_time)
+        for _ in range(n_trace - 1)
+    ])
+    wide = (_gaussian(x, 3.0, 0.12, 120.0) + rng.normal(0, 0.1, n_time))[None, :]
+    signal = np.concatenate([signal, wide], axis=0)
+    time = np.tile(x, (n_trace, 1))
+
+    fitter = Fitter(time, signal)
+    fitter.add_baseline_annotation(BaselineAnnotation(rt_min=2.5, rt_max=2.62))
+    fitter.add_baseline_annotation(BaselineAnnotation(rt_min=3.38, rt_max=3.5))
+    fitter.add_peak_annotation(PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=3.3, mode="single"))
+
+    fig, _, outliers = fitter.plot_geometric_diagnostic(k_mad=2.0)
+    assert n_trace - 1 in outliers
+    plt.close(fig)

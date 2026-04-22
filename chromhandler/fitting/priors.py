@@ -477,6 +477,29 @@ def _trace_fwhm_geometry(
     )
 
 
+def fwhm_geometry_to_sigma_alpha(
+    geo: _TraceFwhmGeometry,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Per-trace ``(sigma_eff, alpha_asym)`` from left/right HWHM geometry.
+
+    For a split-normal peak with left/right half-widths ``w_l``, ``w_r``:
+
+    - ``sigma_eff = (w_l + w_r) / (2 * sqrt(2 ln 2))`` - half the FWHM in
+      sigma units.
+    - ``alpha_asym = (w_r - w_l) / (w_r + w_l)`` in [-1, 1] - bounded,
+      dimensionless asymmetry (positive = right-tail heavier).
+
+    Both arrays are NaN where ``geo.fwhm_valid`` is False.
+    """
+    w_l = np.asarray(geo.w_left, dtype=np.float64)
+    w_r = np.asarray(geo.w_right, dtype=np.float64)
+    sigma_eff = (w_l + w_r) / (2.0 * _GAUSSIAN_HWHM_FACTOR)
+    total = w_l + w_r
+    with np.errstate(invalid="ignore", divide="ignore"):
+        alpha_asym = np.where(total > _FLOAT_MIN, (w_r - w_l) / total, np.nan)
+    return sigma_eff, alpha_asym
+
+
 def _halfwidth_priors(
     x_win: NDArray[np.float64],
     y_win: NDArray[np.float64],
