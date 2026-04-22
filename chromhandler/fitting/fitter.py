@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+    from chromhandler.handler import Handler
     from chromhandler.model import Peak
 
 import jax
@@ -307,7 +308,7 @@ class Fitter:
     @classmethod
     def from_handler(
         cls,
-        handler: object,
+        handler: Handler,
         sample_ids: list[str] | None = None,
     ) -> Fitter:
         """Construct a :class:`Fitter` from a :class:`~chromhandler.handler.Handler`.
@@ -340,7 +341,7 @@ class Fitter:
         """
         samples = [
             s
-            for s in handler.samples  # type: ignore[attr-defined]
+            for s in handler.samples
             if sample_ids is None or s.id in sample_ids
         ]
         if not samples:
@@ -353,12 +354,12 @@ class Fitter:
 
         time_arr, signal_arr = pad_traces(time_lists, signal_lists)
 
-        inherited_peaks = list(handler.peak_annotations.values())  # type: ignore[attr-defined]
+        inherited_peaks = list(handler.peak_annotations.values())
 
         return cls(
             time_arr,
             signal_arr,
-            peaks=inherited_peaks or None,  # type: ignore[arg-type]
+            peaks=inherited_peaks or None,
             baselines=None,
             trace_sample_ids=trace_sample_ids,
             trace_chromatogram_ids=trace_chrom_ids,
