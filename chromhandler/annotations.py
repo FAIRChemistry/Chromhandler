@@ -49,26 +49,35 @@ class PeakWindow(BaseModel):
 class PeakAnnotation(BaseModel):
     """A retention-time window annotation attached to a molecule.
 
+    Used by both :class:`~chromhandler.handler.Handler` (for molecule peak
+    assignment over reader-detected peaks) and
+    :class:`~chromhandler.fitting.fitter.Fitter` (for Bayesian peak fitting).
+
     Attributes:
         molecule_id: ID of the molecule this window belongs to.
         rt_min: Lower retention-time bound (minutes, inclusive).
         rt_max: Upper retention-time bound (minutes, inclusive).
-        mode: Peak shape assumption — ``"single"`` (one component),
+        mode: Peak shape assumption — ``"single"`` (default, one component),
             ``"free_doublet"`` (two independently positioned components),
             ``"artefact_doublet"`` (main peak + fixed-side artefact shoulder).
+            Ignored by handler-level peak assignment.
         artefact_side: Which side carries the shoulder; required when
             *mode* is ``"artefact_doublet"``, must be ``None`` otherwise.
         vary_separation: When ``True`` and *mode* is ``"free_doublet"``,
-            the separation is allowed to vary across traces via a per-peak
-            trace-scale hyperparameter.  When ``False`` (default) all traces
-            share a single common separation.
+            the separation is allowed to vary across traces.
         include_artefact_in_area: When ``True`` and *mode* is
             ``"artefact_doublet"``, the artefact shoulder area is summed
-            with the dominant component's area when computing molecule
-            concentration.  Defaults to ``False`` (artefact excluded).
+            with the dominant component's area.
+        wavelength: When set, :meth:`~chromhandler.handler.Handler.assign_molecules`
+            only considers chromatograms at this wavelength (nm). Ignored by
+            the fitter.
 
     Example::
 
+        # Handler-only usage (peak assignment over reader-detected peaks):
+        ann = PeakAnnotation(molecule_id="Ino", rt_min=2.8, rt_max=3.2)
+
+        # Fitter usage with an artefact shoulder:
         ann = PeakAnnotation(
             molecule_id="s0",
             rt_min=2.8,
@@ -83,10 +92,11 @@ class PeakAnnotation(BaseModel):
     molecule_id: str
     rt_min: float
     rt_max: float
-    mode: PeakMode
+    mode: PeakMode = "single"
     artefact_side: ArtefactSide | None = None
     vary_separation: bool = False
     include_artefact_in_area: bool = False
+    wavelength: float | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> PeakAnnotation:

@@ -159,3 +159,23 @@ def test_handler_subset_creates_independent_handler() -> None:
     child = parent.subset(["chrom_b"])
     assert len(child.samples) == 1
     assert child.samples[0].id == "sample_b"
+
+
+@pytest.mark.unit
+def test_peak_annotation_defaults_to_single_mode() -> None:
+    """PeakAnnotation.mode defaults to 'single' so handler-only users omit it."""
+    from chromhandler.annotations import PeakAnnotation
+
+    ann = PeakAnnotation(molecule_id="mol", rt_min=2.8, rt_max=3.2)
+    assert ann.mode == "single"
+    assert ann.artefact_side is None
+    assert ann.wavelength is None
+
+
+@pytest.mark.unit
+def test_peak_annotation_accepts_wavelength() -> None:
+    """PeakAnnotation carries an optional wavelength for handler filtering."""
+    from chromhandler.annotations import PeakAnnotation
+
+    ann = PeakAnnotation(molecule_id="mol", rt_min=2.8, rt_max=3.2, wavelength=280.0)
+    assert ann.wavelength == 280.0
