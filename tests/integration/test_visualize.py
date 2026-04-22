@@ -81,7 +81,7 @@ def handler_with_chromatograms() -> Handler:
 
     handler = Handler(samples=[sample_a, sample_b])
     handler.create_molecule(id="mol", pubchem_cid=1, name="Mol")
-    handler.add_peak_window("mol", 0.8, 1.2)
+    handler.add_peak_annotation("mol", 0.8, 1.2)
     return handler
 
 
@@ -182,7 +182,7 @@ def test_visualize_assigned_only_respects_chromatogram_filter(
 
 
 @pytest.mark.integration
-def test_visualize_uses_handler_peak_windows_when_filtering(
+def test_visualize_uses_handler_peak_annotations_when_filtering(
     handler_with_chromatograms: Handler,
 ) -> None:
     fig, ax = handler_with_chromatograms.visualize(

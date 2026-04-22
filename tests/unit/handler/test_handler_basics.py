@@ -116,32 +116,34 @@ def test_handler_samples_list_access() -> None:
 
 
 @pytest.mark.unit
-def test_handler_add_peak_window_requires_existing_molecule() -> None:
-    """Handler.add_peak_window() raises for unknown molecule."""
+def test_handler_add_peak_annotation_requires_existing_molecule() -> None:
+    """Handler.add_peak_annotation() raises for unknown molecule."""
     handler = Handler()
-    with pytest.raises(ValueError, match="unknown"):
-        handler.add_peak_window("unknown", 4.8, 5.2)
+    with pytest.raises(ValueError, match="Molecule unknown not found"):
+        handler.add_peak_annotation("unknown", 4.8, 5.2)
 
 
 @pytest.mark.unit
-def test_handler_add_peak_window_creates_window() -> None:
-    """Handler.add_peak_window() creates a peak window for known molecule."""
-    mol = _molecule("test_mol")
-    handler = Handler(molecules={mol.id: mol})
-    window = handler.add_peak_window("test_mol", 4.8, 5.2)
-    assert window.rt_min == 4.8
-    assert window.rt_max == 5.2
-    assert window.molecule_id == "test_mol"
+def test_handler_add_peak_annotation_creates_annotation() -> None:
+    """Handler.add_peak_annotation() creates a peak annotation for known molecule."""
+    handler = Handler()
+    handler.create_molecule(id="test_mol", pubchem_cid=123, name="Test")
+    ann = handler.add_peak_annotation("test_mol", 4.8, 5.2)
+    assert ann.molecule_id == "test_mol"
+    assert ann.rt_min == 4.8
+    assert ann.rt_max == 5.2
+    assert ann.mode == "single"
+    assert ann.wavelength is None
 
 
 @pytest.mark.unit
-def test_handler_peak_windows_property() -> None:
-    """Handler.peak_windows dict tracks added windows."""
-    mol = _molecule("test_mol")
-    handler = Handler(molecules={mol.id: mol})
-    window = handler.add_peak_window("test_mol", 4.8, 5.2)
-    assert "test_mol" in handler.peak_windows
-    assert handler.peak_windows["test_mol"] == window
+def test_handler_peak_annotations_property() -> None:
+    """Handler.peak_annotations dict tracks added annotations."""
+    handler = Handler()
+    handler.create_molecule(id="test_mol", pubchem_cid=123, name="Test")
+    ann = handler.add_peak_annotation("test_mol", 4.8, 5.2)
+    assert "test_mol" in handler.peak_annotations
+    assert handler.peak_annotations["test_mol"] == ann
 
 
 @pytest.mark.unit
