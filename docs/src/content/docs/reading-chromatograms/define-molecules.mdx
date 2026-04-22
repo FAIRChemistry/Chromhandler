@@ -12,7 +12,7 @@ After chromatograms are loaded, the next important step is to define which molec
 <Steps>
 1. Read chromatograms first so the handler already contains samples and chromatograms.
 2. Create or register the molecules you care about, such as substrate, product, or internal standard.
-3. Add peak windows for those molecules when you want Chromhandler to assign or integrate peaks by retention-time region.
+3. Add peak annotations for those molecules when you want Chromhandler to assign or integrate peaks by retention-time region.
 </Steps>
 
 ## ⚡ Minimal Example
@@ -25,14 +25,14 @@ handler = Handler.read("data/reaction_series", mode="timecourse")
 handler.create_molecule(id="ATP", name="ATP", pubchem_cid=5957)
 handler.create_molecule(id="ADP", name="ADP", pubchem_cid=6022)
 
-handler.add_peak_window("ATP", 4.8, 5.2)
-handler.add_peak_window("ADP", 5.8, 6.2)
+handler.add_peak_annotation("ATP", 4.8, 5.2)
+handler.add_peak_annotation("ADP", 5.8, 6.2)
 ```
 
 In this example:
 
 - `create_molecule(...)` registers the analytes on the handler
-- `add_peak_window(...)` defines where those analytes are expected in retention time
+- `add_peak_annotation(...)` defines where those analytes are expected in retention time
 - later assignment, fitting, and quantification steps can build on that information
 
 ## 📥 Register Molecules
@@ -112,7 +112,7 @@ When you register a molecule, you are typically defining:
 - whether it is constant or an internal standard
 - optional later calibration information
 
-When you add a peak window, you also define:
+When you add a peak annotation, you also define:
 
 - the retention-time region where that molecule is expected
 - the basis for later peak assignment or targeted integration
@@ -120,7 +120,7 @@ When you add a peak window, you also define:
 ## ⚠️ ID Rules
 
 <Aside type="caution" title="Use Stable Molecule IDs">
-Choose molecule IDs that are stable and machine-friendly. These IDs are used throughout the handler, in peak windows, initial conditions, calibration, and downstream export.
+Choose molecule IDs that are stable and machine-friendly. These IDs are used throughout the handler, in peak annotations, initial conditions, calibration, and downstream export.
 </Aside>
 
 In practice, that means the molecule ID should be something you are happy to reuse consistently, such as `ATP`, `ADP`, `substrate`, or `product`.
