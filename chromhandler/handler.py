@@ -3,14 +3,14 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 from dotted_dict import DottedDict
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import pretty, visualize
-from .annotations import PeakAnnotation, PeakWindow
+from .annotations import ArtefactSide, PeakAnnotation, PeakMode
 from .enzymeml import handler_to_enzymeml_document
 from .model import Chromatogram, InitialCondition, Peak, Sample
 from .molecule import Molecule
@@ -39,8 +39,8 @@ class Handler(BaseModel):
     Molecules and proteins are registered separately for peak annotation and
     downstream quantification, keyed by species id in
     ``DottedDict`` from ``dotted_dict`` (attribute access works when
-    the id is a valid Python identifier). :attr:`peak_windows` uses the same type,
-    keyed by molecule id.
+    the id is a valid Python identifier). :attr:`peak_annotations` uses the same
+    type, keyed by molecule id.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -57,9 +57,9 @@ class Handler(BaseModel):
         default_factory=list,
         description="Samples, each holding one or more chromatograms.",
     )
-    peak_windows: dict[str, PeakWindow] = Field(
+    peak_annotations: dict[str, PeakAnnotation] = Field(
         default_factory=DottedDict,
-        description="Retention-time peak windows keyed by molecule id.",
+        description="Peak annotations keyed by molecule id (retention-time windows).",
     )
 
     @model_validator(mode="after")
@@ -82,8 +82,8 @@ class Handler(BaseModel):
             self.molecules = DottedDict(self.molecules)
         if not isinstance(self.proteins, DottedDict):
             self.proteins = DottedDict(self.proteins)
-        if not isinstance(self.peak_windows, DottedDict):
-            self.peak_windows = DottedDict(self.peak_windows)
+        if not isinstance(self.peak_annotations, DottedDict):
+            self.peak_annotations = DottedDict(self.peak_annotations)
         return self
 
     # ------------------------------------------------------------------
@@ -981,28 +981,42 @@ class Handler(BaseModel):
 
         self.proteins[nu_prot.id] = nu_prot
 
-    def add_peak_window(
+    def add_peak_annotation(
         self,
         molecule_id: str,
         rt_min: float,
         rt_max: float,
         *,
+        mode: PeakMode = "single",
+        artefact_side: ArtefactSide | None = None,
+        vary_separation: bool = False,
+        include_artefact_in_area: bool = False,
         wavelength: float | None = None,
-    ) -> PeakWindow:
-        """Add or replace the peak window for *molecule_id* on this handler."""
+    ) -> PeakAnnotation:
+        """Add or replace the peak annotation for *molecule_id* on this handler.
+
+        Fitter-specific fields (``mode``, ``artefact_side``, ``vary_separation``,
+        ``include_artefact_in_area``) default to a plain single-peak window, so
+        handler-only workflows can ignore them entirely. They are honored when
+        the handler is passed to :meth:`~chromhandler.fitting.fitter.Fitter.from_handler`.
+        """
         if self.molecules.get(molecule_id) is None:
             raise ValueError(
                 f"Molecule {molecule_id} not found. Define the molecule first "
                 "with create_molecule() or register_molecule()."
             )
-        window = PeakWindow(
+        ann = PeakAnnotation(
             molecule_id=molecule_id,
             rt_min=rt_min,
             rt_max=rt_max,
+            mode=mode,
+            artefact_side=artefact_side,
+            vary_separation=vary_separation,
+            include_artefact_in_area=include_artefact_in_area,
             wavelength=wavelength,
         )
-        self.peak_windows[molecule_id] = window
-        return window
+        self.peak_annotations[molecule_id] = ann
+        return ann
 
     # ------------------------------------------------------------------
     # Peak assignment
@@ -1177,7 +1191,7 @@ class Handler(BaseModel):
 
         For each configured window, **every** chromatogram in each sample is
         considered (typical time-course: one sample, many traces at different
-        reaction times). If :attr:`~chromhandler.annotations.PeakWindow.wavelength`
+        reaction times). If :attr:`~chromhandler.annotations.PeakAnnotation.wavelength`
         is set, only chromatograms with that wavelength are used.
 
         A molecule is assigned when exactly one peak per chromatogram falls
@@ -1190,12 +1204,12 @@ class Handler(BaseModel):
             raise ValueError("min_amplitude must be non-negative.")
         if on_multiple not in {"raise", "skip"}:
             raise ValueError("on_multiple must be either 'raise' or 'skip'.")
-        self._validate_peak_windows()
+        self._validate_peak_annotations()
 
-        if not self.peak_windows:
+        if not self.peak_annotations:
             return
 
-        targeted_ids = set(self.peak_windows)
+        targeted_ids = set(self.peak_annotations)
         peak_targets: dict[tuple[str, int], str] = {}
         pending_assignments: list[tuple[str, int, str]] = []
         results: list[dict[str, Any]] = []
@@ -1203,7 +1217,7 @@ class Handler(BaseModel):
             chrom.id: chrom for sample in self.samples for chrom in sample.chromatograms
         }
 
-        for molecule_id, window in self.peak_windows.items():
+        for molecule_id, window in self.peak_annotations.items():
             molecule = self.molecules[molecule_id]
             assigned_peak_count = 0
             chromatograms_with_no_peaks: list[str] = []
@@ -1609,7 +1623,7 @@ class Handler(BaseModel):
         overlay: bool = False,
         share_y: bool = False,
         show_peak_annotations: bool = True,
-        peak_annotations: list[PeakAnnotation | PeakWindow] | None = None,
+        peak_annotations: list[PeakAnnotation] | None = None,
         chromatogram_ids: list[str] | None = None,
         show_legend: bool = True,
     ) -> tuple[Figure, Any]:
@@ -1621,12 +1635,12 @@ class Handler(BaseModel):
         Args:
             peak_annotations: Optional list of
                 window-like objects to overlay as shaded regions. When omitted,
-                the handler's stored :attr:`peak_windows` are shown.
+                the handler's stored :attr:`peak_annotations` are shown.
             chromatogram_ids: Chromatogram IDs to display. An empty list means
                 all chromatograms. Unknown IDs raise ``ValueError``.
         """
         if peak_annotations is None:
-            peak_annotations = list(self.peak_windows.values())
+            peak_annotations = list(self.peak_annotations.values())
         if chromatogram_ids is None:
             chromatogram_ids = []
         return visualize.visualize(
@@ -1642,7 +1656,7 @@ class Handler(BaseModel):
             overlay=overlay,
             share_y=share_y,
             show_peak_annotations=show_peak_annotations,
-            peak_annotations=cast("list[PeakAnnotation] | None", peak_annotations),
+            peak_annotations=peak_annotations,
             chromatogram_ids=chromatogram_ids,
             show_legend=show_legend,
         )
@@ -1677,17 +1691,17 @@ class Handler(BaseModel):
         self.samples.append(new_sample)
         return new_sample
 
-    def _validate_peak_windows(self) -> None:
+    def _validate_peak_annotations(self) -> None:
         molecule_ids = set(self.molecules.keys())
-        missing = sorted(set(self.peak_windows) - molecule_ids)
+        missing = sorted(set(self.peak_annotations) - molecule_ids)
         if missing:
             raise ValueError(
-                f"Peak windows reference unknown molecule ids: {missing}. "
-                "Define the molecules on the handler before assigning peak windows."
+                f"Peak annotations reference unknown molecule ids: {missing}. "
+                "Define the molecules on the handler before assigning peak annotations."
             )
 
     @staticmethod
-    def _chromatograms_for_peak_window(sample: Sample, window: PeakWindow) -> list[Chromatogram]:
+    def _chromatograms_for_peak_window(sample: Sample, window: PeakAnnotation) -> list[Chromatogram]:
         """Chromatograms in *sample* to search for peaks for this *window*."""
         if window.wavelength is not None:
             matching = [c for c in sample.chromatograms if c.wavelength == window.wavelength]
@@ -1703,7 +1717,7 @@ class Handler(BaseModel):
     @staticmethod
     def _peak_indices_in_window(
         chrom: Chromatogram,
-        window: PeakWindow,
+        window: PeakAnnotation,
         *,
         min_amplitude: float | None,
     ) -> list[int]:
