@@ -76,37 +76,6 @@ class AreaRecord:
     area_q95: float
 
 
-@dataclasses.dataclass(frozen=True)
-class PosteriorCurves:
-    """Precomputed posterior HDI curves for a fitted subset.
-
-    All arrays are plain numpy.  Shapes:
-
-    - ``x``: ``[n_x]`` — evaluation axis (minutes)
-    - ``total_*``, ``baseline_*``: ``[n_trace, n_x]``
-    - ``comp_l_*``, ``comp_r_*``: ``[n_trace, n_peak, n_x]``
-    - ``trace_indices``: ``[n_trace]`` — global indices into the parent fitter's
-      full trace array (result of :meth:`~Fitter.select_trace_indices`)
-    - ``chromatogram_ids``: per-trace labels (or ``None`` if unavailable)
-    """
-
-    x: NDArray[np.float64]  # [n_x]
-    total_median: NDArray[np.float64]  # [n_trace, n_x]
-    total_lower: NDArray[np.float64]  # [n_trace, n_x]
-    total_upper: NDArray[np.float64]  # [n_trace, n_x]
-    baseline_median: NDArray[np.float64]  # [n_trace, n_x]
-    baseline_lower: NDArray[np.float64]  # [n_trace, n_x]
-    baseline_upper: NDArray[np.float64]  # [n_trace, n_x]
-    comp_l_median: NDArray[np.float64]  # [n_trace, n_peak, n_x]
-    comp_l_lower: NDArray[np.float64]  # [n_trace, n_peak, n_x]
-    comp_l_upper: NDArray[np.float64]  # [n_trace, n_peak, n_x]
-    comp_r_median: NDArray[np.float64]  # [n_trace, n_peak, n_x]
-    comp_r_lower: NDArray[np.float64]  # [n_trace, n_peak, n_x]
-    comp_r_upper: NDArray[np.float64]  # [n_trace, n_peak, n_x]
-    trace_indices: NDArray[np.intp]  # [n_trace]
-    chromatogram_ids: list[str] | None
-
-
 class Fitter:
     """Chromatographic fitter for a pre-selected set of traces.
 
@@ -556,172 +525,6 @@ class Fitter:
         t = self.common_time()
         return (t >= float(rt_min)) & (t <= float(rt_max))
 
-    def posterior_curves(
-        self,
-        x: NDArray[np.float64],
-        *,
-        hdi_prob: float = 0.95,
-        trace_indices: NDArray[np.intp] | None = None,
-        n_samples_max: int = 2000,
-    ) -> PosteriorCurves:
-        """Evaluate posterior HDI curves on an arbitrary time grid.
-
-        Re-evaluates the skew-normal components at every point in *x* using
-        the stored posterior samples; no interpolation.
-
-        Args:
-            x: Evaluation axis, shape ``[n_x]`` (minutes).
-            hdi_prob: Credible-interval probability (default 0.95).
-            trace_indices: Indices of traces to include.  ``None`` = all traces.
-            n_samples_max: Maximum number of posterior draws to use (capped for
-                memory).  Default 2000.
-
-        Returns:
-            :class:`PosteriorCurves` with pre-computed median / lower / upper
-            for total signal, baseline, and per-component curves.
-
-        Raises:
-            RuntimeError: If :meth:`fit` has not been called.
-        """
-        if self._posterior is None:
-            raise RuntimeError("posterior_curves() requires a fitted posterior. Call fit() first.")
-
-        n_traces = self.n_traces
-
-        # Select requested traces
-        if trace_indices is None:
-            local_idx = np.arange(n_traces)
-            global_idx = np.arange(n_traces)
-        else:
-            global_idx = np.asarray(trace_indices, dtype=int)
-            local_idx = global_idx
-
-        n_selected = len(local_idx)
-        if n_selected == 0:
-            raise ValueError("posterior_curves(): no traces matched the given trace_indices.")
-
-        # Extract posterior arrays from self.samples (shape [n_total, n_trace, n_peak])
-        # where n_total = n_chains x n_draws.  Derived quantities (apex_l, sl_l, ...)
-        # were computed post-sampling by compute_derived_quantities() and merged into
-        # self.samples, so they are available here without going through ArviZ.
-        smp = self._get_view_samples()
-
-        def _sel(key: str) -> NDArray[np.float64]:
-            """Fetch from samples and select the requested trace subset."""
-            return np.asarray(smp[key], dtype=float)[:, local_idx]
-
-        apex_l: NDArray[np.float64] = _sel("apex_l")  # [n_total, n_sel, n_peak]
-        apex_r: NDArray[np.float64] = _sel("apex_r")
-        sl_l: NDArray[np.float64] = _sel("sl_l")
-        sl_r: NDArray[np.float64] = _sel("sl_r")
-        sr_l: NDArray[np.float64] = _sel("sr_l")
-        sr_r: NDArray[np.float64] = _sel("sr_r")
-        area_l: NDArray[np.float64] = _sel("area_l")
-        area_r: NDArray[np.float64] = _sel("area_r")
-        bl_int: NDArray[np.float64] = np.asarray(smp["baseline_intercept"], dtype=float)[:, local_idx]
-        bl_slp: NDArray[np.float64] = np.asarray(smp["baseline_slope"], dtype=float)[:, local_idx]
-
-        n_total = apex_l.shape[0]
-
-        # Subsample draws
-        if n_total > n_samples_max:
-            rng = np.random.default_rng(0)
-            idx = rng.choice(n_total, size=n_samples_max, replace=False)
-            apex_l, apex_r = apex_l[idx], apex_r[idx]
-            sl_l, sl_r = sl_l[idx], sl_r[idx]
-            sr_l, sr_r = sr_l[idx], sr_r[idx]
-            area_l, area_r = area_l[idx], area_r[idx]
-            bl_int, bl_slp = bl_int[idx], bl_slp[idx]
-            n_samp = n_samples_max
-        else:
-            n_samp = n_total
-
-        x_eval = np.asarray(x, dtype=float)  # [n_x]
-        n_x = len(x_eval)
-        n_peak = apex_l.shape[2]
-
-        # Merge sample x trace dims for vectorized PDF evaluation
-        n_flat = n_samp * n_selected
-
-        def _merge(arr: NDArray[np.float64]) -> NDArray[np.float64]:
-            return arr.reshape(n_flat, n_peak)
-
-        apex_l_f = _merge(apex_l)
-        apex_r_f = _merge(apex_r)
-        sl_l_f = _merge(sl_l)
-        sl_r_f = _merge(sl_r)
-        sr_l_f = _merge(sr_l)
-        sr_r_f = _merge(sr_r)
-        area_l_f = _merge(area_l)
-        area_r_f = _merge(area_r)
-
-        # Broadcast x: [n_flat, n_x]
-        x_flat = np.broadcast_to(x_eval[None, :], (n_flat, n_x)).copy()
-        x_jax = jnp.asarray(x_flat)
-
-        # Use model's canonical PDF — single source of truth for both MCMC and viz
-        pdf_l = np.array(jnp.exp(model.log_split_normal_pdf(
-            x_jax, jnp.asarray(apex_l_f), jnp.asarray(sl_l_f), jnp.asarray(sr_l_f),
-        )))  # [n_flat, n_peak, n_x]
-        pdf_r = np.array(jnp.exp(model.log_split_normal_pdf(
-            x_jax, jnp.asarray(apex_r_f), jnp.asarray(sl_r_f), jnp.asarray(sr_r_f),
-        )))
-
-        comp_l_f = area_l_f[:, :, None] * pdf_l  # [n_flat, n_peak, n_x]
-        comp_r_f = area_r_f[:, :, None] * pdf_r
-
-        # Reshape back to [n_samp, n_sel, n_peak, n_x]
-        comp_l = comp_l_f.reshape(n_samp, n_selected, n_peak, n_x)
-        comp_r = comp_r_f.reshape(n_samp, n_selected, n_peak, n_x)
-
-        # Baseline: [n_samp, n_sel, n_x]
-        # Must match model centering: baseline = intercept + slope * (x - x_mid)
-        x_mid = 0.5 * (min(p.rt_min for p in self.peaks) + max(p.rt_max for p in self.peaks))
-        baseline_samps = bl_int[:, :, None] + bl_slp[:, :, None] * (x_eval[None, None, :] - x_mid)
-
-        # Total: [n_samp, n_sel, n_x]
-        total_samps = comp_l.sum(axis=2) + comp_r.sum(axis=2) + baseline_samps
-
-        # HDI percentiles
-        lo_pct = 100.0 * (1.0 - hdi_prob) / 2.0
-        hi_pct = 100.0 - lo_pct
-
-        def _pct(
-            arr: NDArray[np.float64],
-        ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-            return (
-                np.percentile(arr, 50, axis=0),
-                np.percentile(arr, lo_pct, axis=0),
-                np.percentile(arr, hi_pct, axis=0),
-            )
-
-        t_med, t_lo, t_hi = _pct(total_samps)  # each [n_sel, n_x]
-        bl_med, bl_lo, bl_hi = _pct(baseline_samps)
-        cl_med, cl_lo, cl_hi = _pct(comp_l)  # each [n_sel, n_peak, n_x]
-        cr_med, cr_lo, cr_hi = _pct(comp_r)
-
-        chrom_ids: list[str] | None = (
-            list(self.trace_chromatogram_ids[global_idx]) if self.trace_chromatogram_ids is not None else None
-        )
-
-        return PosteriorCurves(
-            x=x_eval,
-            total_median=t_med,
-            total_lower=t_lo,
-            total_upper=t_hi,
-            baseline_median=bl_med,
-            baseline_lower=bl_lo,
-            baseline_upper=bl_hi,
-            comp_l_median=cl_med,
-            comp_l_lower=cl_lo,
-            comp_l_upper=cl_hi,
-            comp_r_median=cr_med,
-            comp_r_lower=cr_lo,
-            comp_r_upper=cr_hi,
-            trace_indices=global_idx,
-            chromatogram_ids=chrom_ids,
-        )
-
     # ------------------------------------------------------------------
     # Posteriors property
     # ------------------------------------------------------------------
@@ -738,6 +541,25 @@ class Fitter:
     # ------------------------------------------------------------------
     # Diagnostic outputs
     # ------------------------------------------------------------------
+
+    def _summary_vars(self) -> list[str]:
+        """Return posterior variable names suitable for ArviZ summary.
+
+        Excludes internal NCP variables and any variables with zero variance
+        across all draws (e.g. ``area_r`` for single peaks), which would cause
+        division-by-zero in Rhat / ESS diagnostics.
+        """
+        posterior = self._posterior.posterior  # type: ignore[union-attr]
+        available: list[str] = list(posterior.data_vars)  # type: ignore[arg-type]
+        out: list[str] = []
+        for v in available:
+            if v in model.INTERNAL_POSTERIOR_VARS:
+                continue
+            data: NDArray[Any] = np.asarray(posterior[v].values)  # type: ignore[arg-type]
+            if float(np.nanvar(data)) == 0.0:
+                continue
+            out.append(v)
+        return out
 
     def save_summary(self, path: str | Path) -> None:
         """Save ArviZ posterior summary to a text file.
@@ -757,8 +579,7 @@ class Fitter:
 
         import arviz as az
 
-        available_vars = list(self._posterior.posterior.data_vars)  # type: ignore[union-attr]
-        summary_vars = [v for v in available_vars if v not in model.INTERNAL_POSTERIOR_VARS]
+        summary_vars = self._summary_vars()
         summary_df = az.summary(self._posterior, var_names=summary_vars or None)
         Path(path).write_text(summary_df.to_string(), encoding="utf-8")
 
@@ -774,12 +595,8 @@ class Fitter:
         path : str, Path, or None
             If given, saves the figure to this path and closes it.
         var_names : list[str] or None
-            Parameters to plot. Defaults to all posterior variables except
-            internal NCP samples (``INTERNAL_POSTERIOR_VARS`` from ``model``).
-
-        Returns
-        -------
-        matplotlib.figure.Figure
+            Parameters to plot. Defaults to :meth:`_summary_vars` (excludes
+            internal NCP samples and zero-variance variables).
 
         Raises
         ------
@@ -789,66 +606,82 @@ class Fitter:
         if self._posterior is None:
             raise RuntimeError("plot_traces() requires a fitted posterior. Call fit() first.")
 
+        import arviz as az
         import matplotlib.pyplot as _plt
 
-        from . import visualize
-
-        fig = visualize.plot_trace(self._posterior, var_names=var_names)
+        available: list[str] = [str(v) for v in self._posterior.posterior.data_vars]  # type: ignore[union-attr]
+        if var_names is None:
+            names = self._summary_vars()
+        else:
+            names = [v for v in var_names if v in available]
+        if not names:
+            raise ValueError(
+                f"plot_traces: no available posterior variables. Available: {', '.join(available)}"
+            )
+        n_rows = (len(names) + 1) // 2
+        az.plot_trace(self._posterior, var_names=names, kind="trace", figsize=(12, 3.5 * n_rows))
+        fig = _plt.gcf()
+        fig.tight_layout()
         if path is not None:
             fig.savefig(str(path), dpi=150, bbox_inches="tight")
             _plt.close(fig)
         return fig
 
-    def plot_fit(
+    def _chromatogram_id_list(self) -> list[str] | None:
+        if self.trace_chromatogram_ids is None:
+            return None
+        return list(self.trace_chromatogram_ids.astype(str))
+
+    def plot_fit_peaks(
         self,
         path: str | Path | None = None,
         *,
         trace_indices: NDArray[np.intp] | None = None,
     ) -> tuple[MplFigure, np.ndarray[Any, Any]]:
-        """Plot raw data with posterior fit curves (or scatter-only before fit).
+        """Per-peak grid of raw data + posterior fit (or scatter-only).
 
-        Rows = traces, columns = one per peak window + optional combined column.
-
-        Parameters
-        ----------
-        path : str, Path, or None
-            If given, saves the figure to this path and closes it.
-        trace_indices : array of int or None
-            Which traces to build posterior curves for. ``None`` = all traces.
-
-        Returns
-        -------
-        fig : matplotlib.figure.Figure
-        axes : np.ndarray  shape [n_traces, n_col]
+        Rows = selected traces, cols = peak windows.
         """
         import matplotlib.pyplot as _plt
 
         from . import visualize
 
-        curves = None
-        fitted_rows: np.ndarray[Any, Any] | None = None
-
-        if self._posterior is not None:
-            curves = self.posterior_curves(
-                self.common_time(),
-                trace_indices=trace_indices,
-            )
-            fitted_rows = (
-                trace_indices if trace_indices is not None else np.arange(self.n_traces, dtype=np.intp)
-            )
-
-        chromatogram_ids: list[str] | None = (
-            list(self.trace_chromatogram_ids.astype(str)) if self.trace_chromatogram_ids is not None else None
-        )
-
-        fig, axes = visualize.plot_fit(
+        fig, axes = visualize.plot_fit_peaks(
             self.time,
             self.signal,
             self.peaks,
-            curves,
-            fitted_rows=fitted_rows,
+            self._posterior,
+            trace_indices=trace_indices,
+            chromatogram_ids=self._chromatogram_id_list(),
+        )
+        if path is not None:
+            fig.savefig(str(path), dpi=150, bbox_inches="tight")
+            _plt.close(fig)
+        return fig, axes
+
+    def plot_fit_combined(
+        self,
+        path: str | Path | None = None,
+        *,
+        trace_indices: NDArray[np.intp] | None = None,
+    ) -> tuple[MplFigure, np.ndarray[Any, Any]]:
+        """Combined-view raw data + posterior fit (or scatter-only).
+
+        One row per selected trace, single column spanning all peak +
+        baseline regions.
+        """
+        import matplotlib.pyplot as _plt
+
+        from . import visualize
+
+        fig, axes = visualize.plot_fit_combined(
+            self.time,
+            self.signal,
+            self.peaks,
+            self._posterior,
             baselines=self.baselines,
-            chromatogram_ids=chromatogram_ids,
+            trace_indices=trace_indices,
+            chromatogram_ids=self._chromatogram_id_list(),
         )
         if path is not None:
             fig.savefig(str(path), dpi=150, bbox_inches="tight")
@@ -1013,8 +846,7 @@ class Fitter:
             new_xr_vars[key] = xr.DataArray(shaped, dims=dims)
         self._posterior.posterior = self._posterior.posterior.assign(new_xr_vars)  # type: ignore[union-attr]
 
-        available_vars = list(self.posterior.posterior.data_vars)  # type: ignore[union-attr]
-        summary_vars = [v for v in available_vars if v not in model.INTERNAL_POSTERIOR_VARS]
+        summary_vars = self._summary_vars()
         summary_df = az.summary(self.posterior, var_names=summary_vars)
         print("\n" + "=" * 80)
         print("ArviZ Posterior Summary")

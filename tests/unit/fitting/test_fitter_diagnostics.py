@@ -1,6 +1,6 @@
 """Unit tests for Fitter diagnostic output methods.
 
-Tests save_summary(), plot_traces(), and plot_fit() without MCMC.
+Tests save_summary(), plot_traces(), plot_fit_peaks(), and plot_fit_combined() without MCMC.
 Fake ArviZ InferenceData built via az.from_dict() — no mocks.
 """
 from __future__ import annotations
@@ -126,25 +126,43 @@ def test_plot_traces_saves_png(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# plot_fit (Fitter method)
+# plot_fit_peaks / plot_fit_combined (Fitter methods)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_plot_fit_scatter_only_before_fit() -> None:
-    """plot_fit works without a posterior — scatter-only mode."""
+def test_plot_fit_peaks_scatter_only_before_fit() -> None:
+    """plot_fit_peaks works without a posterior — scatter-only mode."""
     fitter = _make_fitter()
-    fig, axes = fitter.plot_fit()
+    fig, axes = fitter.plot_fit_peaks()
     assert isinstance(fig, plt.Figure)  # type: ignore[reportPrivateImportUsage]
-    # 1 peak, no combined column → axes shape [n_traces, 1]
     assert axes.shape == (fitter.n_traces, 1)
     plt.close(fig)
 
 
 @pytest.mark.unit
-def test_plot_fit_saves_png(tmp_path: Path) -> None:
+def test_plot_fit_combined_scatter_only_before_fit() -> None:
+    """plot_fit_combined works without a posterior — scatter-only mode."""
     fitter = _make_fitter()
-    out = tmp_path / "fit.png"
-    fig, _ = fitter.plot_fit(path=out)
+    fig, axes = fitter.plot_fit_combined()
+    assert isinstance(fig, plt.Figure)  # type: ignore[reportPrivateImportUsage]
+    assert axes.shape == (fitter.n_traces, 1)
+    plt.close(fig)
+
+
+@pytest.mark.unit
+def test_plot_fit_peaks_saves_png(tmp_path: Path) -> None:
+    fitter = _make_fitter()
+    out = tmp_path / "fit_peaks.png"
+    fig, _ = fitter.plot_fit_peaks(path=out)
+    assert out.exists()
+    plt.close(fig)
+
+
+@pytest.mark.unit
+def test_plot_fit_combined_saves_png(tmp_path: Path) -> None:
+    fitter = _make_fitter()
+    out = tmp_path / "fit_combined.png"
+    fig, _ = fitter.plot_fit_combined(path=out)
     assert out.exists()
     plt.close(fig)

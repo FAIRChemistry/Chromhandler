@@ -12,7 +12,7 @@ Sub-modules
 - ``utils``: Array utility functions.
 """
 
-from .fitter import AreaRecord, Fitter, PosteriorCurves
+from .fitter import AreaRecord, Fitter
 from .types import ModelHyperparams
 
-__all__ = ["AreaRecord", "Fitter", "ModelHyperparams", "PosteriorCurves"]
+__all__ = ["AreaRecord", "Fitter", "ModelHyperparams"]
