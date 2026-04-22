@@ -17,35 +17,6 @@ PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
 ArtefactSide = Literal["left", "right"]
 
 
-class PeakWindow(BaseModel):
-    """A handler-level retention-time window for one molecule.
-
-    Attributes:
-        molecule_id: ID of the molecule this window belongs to.
-        rt_min: Lower retention-time bound (minutes, inclusive).
-        rt_max: Upper retention-time bound (minutes, inclusive).
-        wavelength: When set, :meth:`~chromhandler.handler.Handler.assign_molecules`
-            only considers chromatograms at this wavelength (nm). When ``None``,
-            every chromatogram in the sample is considered (e.g. time-course
-            traces at one wavelength).
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    molecule_id: str
-    rt_min: float
-    rt_max: float
-    wavelength: float | None = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> PeakWindow:
-        if self.rt_max <= self.rt_min:
-            raise ValueError(
-                f"rt_max ({self.rt_max}) must be greater than rt_min ({self.rt_min})."
-            )
-        return self
-
-
 class PeakAnnotation(BaseModel):
     """A retention-time window annotation attached to a molecule.
 

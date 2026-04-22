@@ -3,7 +3,7 @@ from __future__ import annotations
 import warnings as _warnings
 from typing import Any
 
-from .annotations import BaselineAnnotation, PeakAnnotation, PeakWindow
+from .annotations import BaselineAnnotation, PeakAnnotation
 from .calibration import CalibrationMethod, LinearCalibration
 from .handler import Handler
 from .molecule import Molecule
@@ -62,7 +62,6 @@ __all__ = [
     "LinearCalibration",
     "Molecule",
     "PeakAnnotation",
-    "PeakWindow",
     "Protein",
 ]
 
