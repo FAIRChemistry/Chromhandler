@@ -16,8 +16,6 @@ _DEFAULT_EDGE_FRACTION: Final = 0.20
 _MIN_EDGE_POINTS: Final = 6
 _MIN_INTERCEPT_SCALE: Final = 1.0
 _MIN_SLOPE_SCALE: Final = 1e-3
-_PRIOR_SE_MULTIPLIER: Final = 4.5
-_GLOBAL_SCALE_CAP: Final = 3.0
 
 
 @dataclass(frozen=True)
@@ -86,19 +84,8 @@ def estimate_baseline(
     )
     intercept, slope, se_intercept, se_slope = _fit_line(time, signal, anchor_mask)
 
-    global_intercept_scale = _robust_scale(intercept, floor=_MIN_INTERCEPT_SCALE)
-    global_slope_scale = _robust_scale(slope, floor=_MIN_SLOPE_SCALE)
-
-    intercept_scale = jnp.clip(
-        _scale_from_se(se_intercept, floor=_MIN_INTERCEPT_SCALE),
-        _MIN_INTERCEPT_SCALE,
-        _GLOBAL_SCALE_CAP * global_intercept_scale,
-    )
-    slope_scale = jnp.clip(
-        _scale_from_se(se_slope, floor=_MIN_SLOPE_SCALE),
-        _MIN_SLOPE_SCALE,
-        _GLOBAL_SCALE_CAP * global_slope_scale,
-    )
+    intercept_scale = _scale_from_se(se_intercept, floor=_MIN_INTERCEPT_SCALE)
+    slope_scale = _scale_from_se(se_slope, floor=_MIN_SLOPE_SCALE)
 
     return BaselinePriors(
         intercept=intercept,
@@ -254,22 +241,11 @@ def _fit_line(
 
 
 def _scale_from_se(se: jax.Array, *, floor: float) -> jax.Array:
-    """Convert OLS standard errors to prior scales."""
-    raw = _PRIOR_SE_MULTIPLIER * se
-    finite = raw[jnp.isfinite(raw) & (raw > 0.0)]
+    """Use OLS standard errors directly as prior scales, with a floor."""
+    finite = se[jnp.isfinite(se) & (se > 0.0)]
     fallback = max(float(jnp.nanmedian(finite)), float(floor)) if int(finite.size) > 0 else float(floor)
     return jnp.where(
-        jnp.isfinite(raw) & (raw > 0.0),
-        jnp.maximum(raw, floor),
-        jnp.asarray(fallback, dtype=raw.dtype),
+        jnp.isfinite(se) & (se > 0.0),
+        jnp.maximum(se, floor),
+        jnp.asarray(fallback, dtype=se.dtype),
     )
-
-
-def _robust_scale(values: jax.Array, *, floor: float) -> jax.Array:
-    """Robust across-trace spread (MAD-based) with floor."""
-    finite = values[jnp.isfinite(values)]
-    if int(finite.size) <= 1:
-        return jnp.asarray(floor, dtype=values.dtype)
-    med = jnp.median(finite)
-    mad = jnp.median(jnp.abs(finite - med))
-    return jnp.asarray(max(float(1.4826 * mad), float(floor)), dtype=values.dtype)

@@ -1608,11 +1608,11 @@ def plot_trace(
 
     import arviz as az
 
+    from .model import INTERNAL_POSTERIOR_VARS
+
     available_vars = list(posterior.posterior.data_vars)
     if var_names is None:
-        from .model import TRACE_PARAMETER_NAMES
-
-        var_names = [name for name in TRACE_PARAMETER_NAMES if name in available_vars]
+        var_names = [v for v in available_vars if v not in INTERNAL_POSTERIOR_VARS]
         if not var_names:
             var_names = available_vars
     else:

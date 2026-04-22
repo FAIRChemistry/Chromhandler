@@ -11,6 +11,7 @@ from numpyro.infer import Predictive
 
 from chromhandler.fitting import model
 from chromhandler.fitting.types import ModelHyperparams
+from tests.unit.fitting.conftest import w_min_from_dt
 
 
 def _minimal_inputs(
@@ -21,7 +22,11 @@ def _minimal_inputs(
     n_time: int = 30,
 ) -> dict[str, Any]:
     """Minimal single-peak model inputs with apex_offset_scale."""
-    x = jnp.tile(jnp.linspace(2.8, 3.2, n_time)[None, :], (n_trace, 1))
+    window_lo, window_hi = 2.8, 3.2
+    x = jnp.tile(jnp.linspace(window_lo, window_hi, n_time)[None, :], (n_trace, 1))
+    dt = (window_hi - window_lo) / (n_time - 1)
+    w_min_val = w_min_from_dt(dt)
+    w_max_val = (window_hi - window_lo) / 4.0
     return {
         "x": x,
         "y": None,
@@ -39,11 +44,14 @@ def _minimal_inputs(
         "w_left_scale": jnp.array([0.005], dtype=jnp.float32),
         "w_right_loc": jnp.array([0.04], dtype=jnp.float32),
         "w_right_scale": jnp.array([0.005], dtype=jnp.float32),
+        "w_min": jnp.array([w_min_val], dtype=jnp.float32),
+        "w_max": jnp.array([w_max_val], dtype=jnp.float32),
+        "dt": jnp.array([dt], dtype=jnp.float32),
+        "n_valid": jnp.array([float(n_trace)], dtype=jnp.float32),
         "area_gaussian_pt": jnp.ones((n_trace, 1), dtype=jnp.float32) * 500.0,
         "area_art_shared": jnp.zeros((0,), dtype=jnp.float32),
-        "snr_per_trace": jnp.ones((n_trace, 1), dtype=jnp.float32) * 20.0,
-        "window_lo": jnp.array([2.8], dtype=jnp.float32),
-        "window_hi": jnp.array([3.2], dtype=jnp.float32),
+        "window_lo": jnp.array([window_lo], dtype=jnp.float32),
+        "window_hi": jnp.array([window_hi], dtype=jnp.float32),
         "baseline_intercept_loc": jnp.zeros(n_trace, dtype=jnp.float32),
         "baseline_intercept_scale": jnp.ones(n_trace, dtype=jnp.float32) * 50.0,
         "baseline_slope_loc": jnp.zeros(n_trace, dtype=jnp.float32),
@@ -105,8 +113,13 @@ def test_apex_offset_independent_per_peak():
     inputs["w_left_scale"] = jnp.array([0.005, 0.005], dtype=jnp.float32)
     inputs["w_right_loc"] = jnp.array([0.04, 0.04], dtype=jnp.float32)
     inputs["w_right_scale"] = jnp.array([0.005, 0.005], dtype=jnp.float32)
+    dt2 = (3.1 - 2.7) / 39
+    w_min2 = w_min_from_dt(dt2)
+    inputs["w_min"] = jnp.array([w_min2, w_min2], dtype=jnp.float32)
+    inputs["w_max"] = jnp.array([0.1, 0.1], dtype=jnp.float32)
+    inputs["dt"] = jnp.array([dt2, dt2], dtype=jnp.float32)
+    inputs["n_valid"] = jnp.array([float(n_trace), float(n_trace)], dtype=jnp.float32)
     inputs["area_gaussian_pt"] = jnp.ones((n_trace, 2), dtype=jnp.float32) * 500.0
-    inputs["snr_per_trace"] = jnp.ones((n_trace, 2), dtype=jnp.float32) * 20.0
     inputs["window_lo"] = jnp.array([2.7, 3.1], dtype=jnp.float32)
     inputs["window_hi"] = jnp.array([3.1, 3.5], dtype=jnp.float32)
     inputs["x"] = x

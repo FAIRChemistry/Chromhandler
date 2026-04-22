@@ -758,7 +758,7 @@ class Fitter:
         import arviz as az
 
         available_vars = list(self._posterior.posterior.data_vars)  # type: ignore[union-attr]
-        summary_vars = [v for v in model.SUMMARY_PARAMETER_NAMES if v in available_vars]
+        summary_vars = [v for v in available_vars if v not in model.INTERNAL_POSTERIOR_VARS]
         summary_df = az.summary(self._posterior, var_names=summary_vars or None)
         Path(path).write_text(summary_df.to_string(), encoding="utf-8")
 
@@ -774,8 +774,8 @@ class Fitter:
         path : str, Path, or None
             If given, saves the figure to this path and closes it.
         var_names : list[str] or None
-            Parameters to plot. Defaults to ``TRACE_PARAMETER_NAMES`` from
-            ``model``, filtered to variables present in the posterior.
+            Parameters to plot. Defaults to all posterior variables except
+            internal NCP samples (``INTERNAL_POSTERIOR_VARS`` from ``model``).
 
         Returns
         -------
@@ -924,6 +924,10 @@ class Fitter:
             "w_left_scale": 1e-6,
             "w_right_loc": 1e-6,
             "w_right_scale": 1e-6,
+            "w_min": 1e-9,
+            "w_max": 1e-6,
+            "dt": 1e-9,
+            "n_valid": 1.0,
             "area_gaussian_pt": 1e-8,
             "area_trapz_pt": 1e-8,
             "area_art_shared": 1e-8,
@@ -1010,7 +1014,7 @@ class Fitter:
         self._posterior.posterior = self._posterior.posterior.assign(new_xr_vars)  # type: ignore[union-attr]
 
         available_vars = list(self.posterior.posterior.data_vars)  # type: ignore[union-attr]
-        summary_vars = [v for v in model.SUMMARY_PARAMETER_NAMES if v in available_vars]
+        summary_vars = [v for v in available_vars if v not in model.INTERNAL_POSTERIOR_VARS]
         summary_df = az.summary(self.posterior, var_names=summary_vars)
         print("\n" + "=" * 80)
         print("ArviZ Posterior Summary")

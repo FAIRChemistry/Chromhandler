@@ -396,9 +396,10 @@ def test_geometric_priors_to_arrays_keys(synthetic_single_peak: _SinglePeakFixtu
         "apex_loc", "apex_offset_scale",
         "w_left_loc", "w_left_scale",
         "w_right_loc", "w_right_scale",
+        "w_min", "w_max", "dt", "n_valid",
         "window_lo", "window_hi",
         "area_gaussian_pt", "area_trapz_pt",
-        "area_art_shared", "snr_per_trace",
+        "area_art_shared", "area_art_per_trace",
     }
     assert set(arrays.keys()) == expected_keys
 
@@ -427,10 +428,18 @@ def test_geometric_priors_to_arrays_shapes() -> None:
 
     n_peak = 3
     for key in ("apex_loc", "apex_offset_scale", "w_left_loc", "w_left_scale",
-                "w_right_loc", "w_right_scale", "window_lo", "window_hi"):
+                "w_right_loc", "w_right_scale", "w_min", "w_max", "dt", "n_valid",
+                "window_lo", "window_hi"):
         assert arrays[key].shape == (n_peak,), f"{key}: expected ({n_peak},), got {arrays[key].shape}"
 
-    for key in ("area_gaussian_pt", "area_trapz_pt", "snr_per_trace"):
+    # Structural invariants (fixture sampling may violate w_loc > w_min for
+    # unresolved peaks — that's exactly why the model truncates to [w_min, w_max]).
+    assert np.all(arrays["w_min"] > 0.0)
+    assert np.all(arrays["w_max"] > arrays["w_min"])
+    assert np.all(arrays["dt"] > 0.0)
+    assert np.all(arrays["n_valid"] >= 1.0)
+
+    for key in ("area_gaussian_pt", "area_trapz_pt"):
         assert arrays[key].shape == (n_trace, n_peak), (
             f"{key}: expected ({n_trace}, {n_peak}), got {arrays[key].shape}"
         )

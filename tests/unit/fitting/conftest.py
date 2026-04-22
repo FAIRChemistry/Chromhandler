@@ -8,9 +8,20 @@ Fixtures for testing fitting module components in isolation:
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import numpy.typing as npt
 import pytest
+
+
+def w_min_from_dt(dt: float) -> float:
+    """Nyquist-like HWHM floor — mirrors ``chromhandler.fitting.priors``.
+
+    One source of truth for the formula so test fixtures can't drift from
+    ``build_peak_priors`` if the bound rule ever changes.
+    """
+    return 8.0 * dt / math.sqrt(8.0 * math.log(2.0))
 
 
 @pytest.fixture

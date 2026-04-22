@@ -69,9 +69,10 @@ _EXPECTED_PRIOR_KEYS = {
     "apex_loc", "apex_offset_scale",
     "w_left_loc", "w_left_scale",
     "w_right_loc", "w_right_scale",
+    "w_min", "w_max", "dt", "n_valid",
     "window_lo", "window_hi",
     "area_gaussian_pt", "area_trapz_pt",
-    "area_art_shared", "snr_per_trace",
+    "area_art_shared",
     "trace_shift_scale",
 }
 
@@ -116,7 +117,6 @@ def test_compute_model_inputs_shapes_single_peak() -> None:
     assert inputs["w_left_loc"].shape == (n_peak,)
     assert inputs["w_right_loc"].shape == (n_peak,)
     assert inputs["area_gaussian_pt"].shape == (n_trace, n_peak)
-    assert inputs["snr_per_trace"].shape == (n_trace, n_peak)
     assert inputs["baseline_intercept_loc"].shape == (n_trace,)
     assert inputs["sigma_y_prior_loc"].shape == (n_trace,)
     # Single peak → no artefact, no free
@@ -132,6 +132,26 @@ def test_compute_model_inputs_shapes_artefact_peak() -> None:
     inputs = fitter.compute_model_inputs()
     assert inputs["artefact_peak_index"].shape == (1,)
     assert inputs["free_peak_index"].shape == (0,)
+
+
+@pytest.mark.unit
+def test_compute_model_inputs_width_bounds_ordering() -> None:
+    """w_min < w_loc < w_max must hold per peak; dt and n_valid populated."""
+    fitter = _make_fitter()
+    inputs = fitter.compute_model_inputs()
+    w_min = np.asarray(inputs["w_min"])
+    w_max = np.asarray(inputs["w_max"])
+    w_left = np.asarray(inputs["w_left_loc"])
+    w_right = np.asarray(inputs["w_right_loc"])
+    dt = np.asarray(inputs["dt"])
+    n_valid = np.asarray(inputs["n_valid"])
+
+    assert np.all(w_min > 0.0)
+    assert np.all(dt > 0.0)
+    assert np.all(n_valid >= 1.0)
+    assert np.all(w_min < w_max)
+    assert np.all(w_left > w_min) and np.all(w_left < w_max)
+    assert np.all(w_right > w_min) and np.all(w_right < w_max)
 
 
 @pytest.mark.unit

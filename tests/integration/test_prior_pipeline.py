@@ -107,7 +107,6 @@ def test_prior_pipeline_on_real_data() -> None:
     # Shape checks
     assert arrays["w_left_loc"].shape == (n_peak,)
     assert arrays["w_right_loc"].shape == (n_peak,)
-    assert arrays["snr_per_trace"].shape == (n_trace, n_peak)
     assert arrays["area_gaussian_pt"].shape == (n_trace, n_peak)
     assert arrays["area_art_shared"].shape == (2,)  # 2 artefact peaks
 
@@ -116,7 +115,6 @@ def test_prior_pipeline_on_real_data() -> None:
     assert np.all(arrays["w_right_loc"] > 0), "w_right_loc contains non-positive values"
     assert np.all(arrays["area_gaussian_pt"] > 0), "area_gaussian_pt contains non-positive values"
     assert np.all(arrays["area_trapz_pt"] > 0), "area_trapz_pt contains non-positive values"
-    assert np.all(arrays["snr_per_trace"] >= 0), "snr_per_trace contains negative values"
     assert np.all(arrays["area_art_shared"] > 0), "area_art_shared contains non-positive values"
 
     # Half-widths must be smaller than window widths

@@ -7,7 +7,7 @@ All priors are derived from directly observable FWHM half-width geometry:
 - **Gaussian area from height*sigma** → area_gaussian_pt
 - **Trapezoid window integration**    → area_trapz_pt
 - **Residual integration**            → area_art_shared (artefact peaks only)
-- **Signal-to-noise ratio**           → snr_per_trace (for adaptive area prior width)
+- **Signal-to-noise ratio**           → snr_per_trace (diagnostic only, on GeometricPeakPriors)
 
 Pipeline
 --------
@@ -94,15 +94,31 @@ class GeometricPeakPriors:
     area_art_shared:
         Median positive residual area across traces (``max(trapz - gaussian, 0)``).
         ``0.0`` unless ``mode == "artefact_doublet"``.
+    area_art_per_trace:
+        Per-trace residual area ``max(trapz - gaussian, 0)``, shape ``[n_trace]``.
+        Entries are ``NaN`` where the residual was at or below ``_FLOAT_MIN`` or for
+        non-artefact peaks.  Useful as a diagnostic (e.g. ``np.nanstd(np.log(...))``
+        to gauge inter-trace spread before choosing ``area_art_trace_log_scale``).
+        The model itself does **not** use this as a per-trace prior centre — that
+        would double-dip on the data.  ``0.0`` unless ``mode == "artefact_doublet"``.
     snr_per_trace:
         Per-trace signal-to-noise ratio (apex height / noise estimate),
-        shape ``[n_trace]``.  Used by the model for adaptive area prior width.
+        shape ``[n_trace]``.  Diagnostic only — not passed to the model.
     window_lo:
         Lower bound of the peak window [time units].
     window_hi:
         Upper bound of the peak window [time units].
     n_valid_traces:
         Number of traces that contributed a valid FWHM measurement.
+    dt:
+        Robust median sampling interval inside the window [time units].
+    w_min:
+        Nyquist-like lower bound on HWHM: ``8*dt / sqrt(8*ln2)``.  Any HWHM
+        narrower than this is not resolvable by the instrument cadence.
+    w_max:
+        Geometry-derived upper bound on HWHM: ``(window_hi - window_lo)/4``.
+        Roughly 2 HWHM on each side of the apex fits inside the annotated
+        window; wider peaks would bleed outside.
     """
 
     mode: PeakMode
@@ -115,10 +131,14 @@ class GeometricPeakPriors:
     area_gaussian_pt: NDArray[np.float64]
     area_trapz_pt: NDArray[np.float64]
     area_art_shared: float
+    area_art_per_trace: NDArray[np.float64]
     snr_per_trace: NDArray[np.float64]
     window_lo: float
     window_hi: float
     n_valid_traces: int
+    dt: float
+    w_min: float
+    w_max: float
 
     @property
     def n_components(self) -> int:
@@ -629,6 +649,11 @@ def build_peak_priors(
         x_win = x[mask]  # [n_win]
         y_win = signal_corrected[:, mask]  # [n_trace, n_win]
 
+        # --- Instrument-geometry-derived HWHM bounds ---
+        dt = _median_dt(x_win)
+        w_min = 8.0 * dt / _GAUSSIAN_FWHM_FACTOR  # 8*dt / sqrt(8*ln2)  = 8*dt / (2*sqrt(2*ln2))
+        w_max = max((hi - lo) / 4.0, w_min * 2.0)  # guard against pathological tiny windows
+
         # --- Apex position priors ---
         apex_loc, apex_scale, n_valid = _height_weighted_apex(x_win, y_win)
 
@@ -656,8 +681,10 @@ def build_peak_priors(
             residual = np.maximum(area_trapz_pt - np.asarray(area_gaussian_pt, dtype=float), 0.0)
             valid_residual = residual[residual > _FLOAT_MIN]
             area_art_shared = float(np.median(valid_residual)) if valid_residual.size > 0 else _FLOAT_MIN
+            area_art_per_trace = np.where(residual > _FLOAT_MIN, residual, np.nan)
         else:
             area_art_shared = 0.0
+            area_art_per_trace = np.full(n_trace, np.nan)
 
         # --- Signal-to-noise ratio ---
         snr_per_trace = _estimate_snr(y_win, geometry.apex_height)
@@ -681,10 +708,14 @@ def build_peak_priors(
                 area_gaussian_pt=area_gaussian_pt,
                 area_trapz_pt=area_trapz_pt,
                 area_art_shared=area_art_shared,
+                area_art_per_trace=area_art_per_trace,
                 snr_per_trace=snr_per_trace,
                 window_lo=lo,
                 window_hi=hi,
                 n_valid_traces=n_valid,
+                dt=dt,
+                w_min=w_min,
+                w_max=w_max,
             )
         )
 
@@ -777,12 +808,17 @@ def geometric_priors_to_arrays(
     - ``w_left_scale``       [n_peak]          — left HWHM prior scales.
     - ``w_right_loc``        [n_peak]          — right HWHM prior centres.
     - ``w_right_scale``      [n_peak]          — right HWHM prior scales.
+    - ``w_min``              [n_peak]          — Nyquist-like HWHM lower bound.
+    - ``w_max``              [n_peak]          — geometry-derived HWHM upper bound.
+    - ``dt``                 [n_peak]          — median sampling interval per window.
+    - ``n_valid``            [n_peak]          — valid-trace count per window.
     - ``window_lo``          [n_peak]          — window lower bounds.
     - ``window_hi``          [n_peak]          — window upper bounds.
     - ``area_gaussian_pt``   [n_trace, n_peak] — per-trace Gaussian area estimates.
     - ``area_trapz_pt``      [n_trace, n_peak] — per-trace trapezoid areas.
     - ``area_art_shared``    [n_artefact]      — shared artefact area prior centres.
-    - ``snr_per_trace``      [n_trace, n_peak] — per-trace signal-to-noise ratio.
+    - ``area_art_per_trace`` [n_trace, n_artefact] — per-trace residual areas (NaN where
+      absent); diagnostic only, not consumed by model().
     """
     return {
         "apex_loc": np.array([p.apex_loc for p in priors], dtype=np.float64),
@@ -791,6 +827,10 @@ def geometric_priors_to_arrays(
         "w_left_scale": np.array([p.w_left_scale for p in priors], dtype=np.float64),
         "w_right_loc": np.array([p.w_right_loc for p in priors], dtype=np.float64),
         "w_right_scale": np.array([p.w_right_scale for p in priors], dtype=np.float64),
+        "w_min": np.array([p.w_min for p in priors], dtype=np.float64),
+        "w_max": np.array([p.w_max for p in priors], dtype=np.float64),
+        "dt": np.array([p.dt for p in priors], dtype=np.float64),
+        "n_valid": np.array([p.n_valid_traces for p in priors], dtype=np.float64),
         "window_lo": np.array([p.window_lo for p in priors], dtype=np.float64),
         "window_hi": np.array([p.window_hi for p in priors], dtype=np.float64),
         "area_gaussian_pt": np.column_stack(
@@ -803,9 +843,13 @@ def geometric_priors_to_arrays(
             [p.area_art_shared for p in priors if p.mode == "artefact_doublet"],
             dtype=np.float64,
         ),
-        "snr_per_trace": np.column_stack(
-            [p.snr_per_trace for p in priors]
-        ).astype(np.float64) if priors else np.empty((0, 0), dtype=np.float64),
+        "area_art_per_trace": (
+            np.column_stack(
+                [p.area_art_per_trace for p in priors if p.mode == "artefact_doublet"]
+            ).astype(np.float64)
+            if any(p.mode == "artefact_doublet" for p in priors)
+            else np.empty((0, 0), dtype=np.float64)
+        ),
     }
 
 

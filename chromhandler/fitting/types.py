@@ -28,26 +28,21 @@ class ModelHyperparams:
     analysis or domain-specific tuning.
     """
 
-    # Half-width prior scale floor (log-space CV)
-    w_prior_log_scale: float = 0.15
+    # Area prior log-space SD (multiplicative uncertainty on prior centre).
+    # e^0.4 ~ 1.5 — the 68 % CI spans roughly /1.5 to *1.5 around the
+    # Gaussian-approximation area estimate.  Fixed rather than S/N-adaptive:
+    # at high S/N the likelihood dominates regardless; at low S/N a fixed
+    # moderate width is no worse than an empirical-Bayes adaptive one.
+    area_log_sigma: float = 0.4
 
-    # Area prior spread — S/N-dependent linear interpolation
-    area_log_sigma_high_snr: float = 0.3  # tight for clear peaks (S/N > threshold_high)
-    area_log_sigma_low_snr: float = 0.8  # wide for ambiguous peaks (S/N < threshold_low)
-    area_snr_threshold_high: float = 10.0
-    area_snr_threshold_low: float = 3.0
+    # Artefact area — hierarchical model: shared mean + per-trace offset
+    area_art_log_sigma: float = 0.3  # log-space SD on the population mean (hyperprior width)
+    area_art_trace_log_scale: float = 0.15  # log-space SD of per-trace deviations from mean
+    # Interpretation: at 0.15, each trace can deviate ~+-15% (1 SD) from the shared mean.
+    # Larger values = weaker pooling (more per-trace freedom); smaller = stricter sharing.
 
-    # Artefact area
-    area_art_log_sigma: float = 0.3  # shared artefact area CV ~30%
-    area_art_trace_log_scale: float = 0.15  # per-trace artefact multiplicative noise
-
-    # Separation priors (LogNormal in log-space)
-    free_sep_loc_mult: float = 1.5  # typical separation in sigma units
+    # Free-doublet separation prior (LogNormal in log-space)
     free_sep_log_sigma: float = 0.4
-
-    art_sep_min_w_mult: float = 1.5  # min separation in half-width units
-    art_w_prior_center_mult: float = 0.4  # artefact width = 0.4 * mean primary HWHM
-    art_w_log_scale: float = 0.1  # log-space scale for artefact symmetric width prior
 
 
 def peak_component_count(mode: str) -> int:

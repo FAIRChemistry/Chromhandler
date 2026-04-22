@@ -9,7 +9,8 @@ Supports three peak modes:
 Parameterization: the model samples ``(log_w_left, log_w_right)`` — log of the
 left and right half-widths at half-maximum (HWHM).  These are orthogonal and
 directly observable, giving NUTS well-conditioned geometry.  The half-sigmas
-``(sl, sr)`` are recovered deterministically via ``sl = HWHM_left / sqrt(2*ln2)``.
+``(sigma_left, sigma_right)`` are recovered deterministically via
+``sigma = HWHM / sqrt(2*ln2)``.
 
 Location geometry: ``apex[t, p] = apex_loc[p] + trace_shift[t]``.
 
@@ -20,7 +21,8 @@ to reconstruct them from the raw posterior samples.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -34,8 +36,33 @@ numpyro.set_host_device_count(8)
 _HWHM_FACTOR: float = float(jnp.sqrt(2.0 * jnp.log(2.0)))
 
 
+def _w_log_scale(
+    w_scale: jax.Array,
+    w_loc: jax.Array,
+    dt: jax.Array,
+    n_valid: jax.Array,
+) -> jax.Array:
+    """Unified data-derived log-scale for every width prior.
+
+    Takes the maximum of three principled lower bounds:
+
+    - ``w_scale / w_loc``      — cross-trace FWHM variability (empirical).
+    - ``dt / w_loc``           — Nyquist precision (can't know FWHM tighter than one sample period).
+    - ``1 / sqrt(n_valid)``    — statistical pooling precision (mean of ``n_valid`` measurements).
+
+    No free hyperparameters.  Works elementwise on ``[n_peak]``-shaped arrays
+    or on sliced subsets (e.g. ``w_loc[artefact_idx]``).
+    """
+    w_loc_safe = jnp.maximum(w_loc, 1e-9)
+    n_valid_safe = jnp.maximum(n_valid, 1.0)
+    return jnp.maximum(
+        jnp.maximum(w_scale / w_loc_safe, dt / w_loc_safe),
+        1.0 / jnp.sqrt(n_valid_safe),
+    )
+
+
 # ---------------------------------------------------------------------------
-# Half-width → (s_left, s_right) conversion
+# Half-width → (sigma_left, sigma_right) conversion
 # ---------------------------------------------------------------------------
 
 
@@ -43,13 +70,13 @@ def _halfwidths_to_split(
     log_w_left: jax.Array,
     log_w_right: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """Convert log HWHM to (s_left, s_right): half-sigma for each side.
+    """Convert log HWHM to (sigma_left, sigma_right): half-sigma for each side of the mode.
 
-    s = HWHM / sqrt(2*ln2).  Works on any batch shape.
+    sigma = HWHM / sqrt(2*ln2).  Works on any batch shape.
     """
-    s_left = jnp.exp(log_w_left) / _HWHM_FACTOR
-    s_right = jnp.exp(log_w_right) / _HWHM_FACTOR
-    return s_left, s_right
+    sigma_left = jnp.exp(log_w_left) / _HWHM_FACTOR
+    sigma_right = jnp.exp(log_w_right) / _HWHM_FACTOR
+    return sigma_left, sigma_right
 
 
 # ---------------------------------------------------------------------------
@@ -58,27 +85,29 @@ def _halfwidths_to_split(
 
 
 def log_split_normal_pdf(
-    x: jax.Array,     # [n_trace, n_time]
+    x: jax.Array,  # [n_trace, n_time]
     apex: jax.Array,  # [n_trace, n_comp]  — exact mode location
-    sl: jax.Array,    # [n_trace, n_comp]  — left half-sigma
-    sr: jax.Array,    # [n_trace, n_comp]  — right half-sigma
-) -> jax.Array:       # [n_trace, n_comp, n_time]
+    sigma_left: jax.Array,  # [n_trace, n_comp]  — half-sigma on the left side of the mode
+    sigma_right: jax.Array,  # [n_trace, n_comp]  — half-sigma on the right side of the mode
+) -> jax.Array:  # [n_trace, n_comp, n_time]
     """Numerically stable log split-normal density.
 
     The mode is exactly at ``apex``.  Normalisation constant is
-    ``2 / (sl + sr)`` — identical from both sides, so the density is
-    continuous at the mode.
+    ``2 / (sigma_left + sigma_right)`` — identical from both sides, so the
+    density is continuous at the mode.
 
     Returns shape ``[n_trace, n_comp, n_time]``.
     """
-    sl_s = jnp.maximum(sl, 1e-6)
-    sr_s = jnp.maximum(sr, 1e-6)
+    sigma_left_safe = jnp.maximum(sigma_left, 1e-6)
+    sigma_right_safe = jnp.maximum(sigma_right, 1e-6)
     left_mask = x[:, None, :] <= apex[:, :, None]
-    sigma = jnp.where(left_mask, sl_s[:, :, None], sr_s[:, :, None])
+    sigma = jnp.where(
+        left_mask, sigma_left_safe[:, :, None], sigma_right_safe[:, :, None]
+    )
     z = (x[:, None, :] - apex[:, :, None]) / sigma
     log_norm = (
         jnp.log(2.0)
-        - jnp.log(sl_s + sr_s)[:, :, None]
+        - jnp.log(sigma_left_safe + sigma_right_safe)[:, :, None]
         - 0.5 * jnp.log(2.0 * jnp.pi)
     )
     return log_norm - 0.5 * z**2
@@ -87,25 +116,25 @@ def log_split_normal_pdf(
 def split_normal_pdf(
     x: jax.Array,
     apex: jax.Array,
-    sl: jax.Array,
-    sr: jax.Array,
+    sigma_left: jax.Array,
+    sigma_right: jax.Array,
 ) -> jax.Array:
     """Split-normal density. Same shape convention as ``log_split_normal_pdf``."""
-    return jnp.exp(log_split_normal_pdf(x, apex, sl, sr))
+    return jnp.exp(log_split_normal_pdf(x, apex, sigma_left, sigma_right))
 
 
 def mixture_signal(
-    x: jax.Array,     # [n_trace, n_time]
+    x: jax.Array,  # [n_trace, n_time]
     apex: jax.Array,  # [n_trace, n_comp]
-    sl: jax.Array,    # [n_trace, n_comp]
-    sr: jax.Array,    # [n_trace, n_comp]
+    sigma_left: jax.Array,  # [n_trace, n_comp]
+    sigma_right: jax.Array,  # [n_trace, n_comp]
     area: jax.Array,  # [n_trace, n_comp]
 ) -> jax.Array:
     """Area-scaled split-normal mixture, summed over components.
 
     Returns shape ``[n_trace, n_time]``.
     """
-    pdf = split_normal_pdf(x, apex, sl, sr)       # [n_trace, n_comp, n_time]
+    pdf = split_normal_pdf(x, apex, sigma_left, sigma_right)  # [n_trace, n_comp, n_time]
     return jnp.sum(area[:, :, None] * pdf, axis=1)
 
 
@@ -120,127 +149,496 @@ def _stack_left_right(left: Any, right: Any) -> jax.Array:
     return jnp.stack([left_arr, jnp.asarray(right)], axis=-1).reshape(left_arr.shape[0], -1)
 
 
-_CompArrays = tuple[
-    jax.Array,  # apex_l  — left  component mode location  [n_trace, n_peak]
-    jax.Array,  # apex_r  — right component mode location  [n_trace, n_peak]
-    jax.Array,  # sl_l    — left  component left  half-sigma
-    jax.Array,  # sl_r    — right component left  half-sigma
-    jax.Array,  # sr_l    — left  component right half-sigma
-    jax.Array,  # sr_r    — right component right half-sigma
-    jax.Array,  # area_l
-    jax.Array,  # area_r
-]
+@dataclass(frozen=True)
+class SplitGeometry:
+    """Per-component split-normal geometry, shape ``[..., n_trace, n_peak]``.
+
+    Each split-normal peak has a left and a right component (for doublets;
+    singles store identical values in both).  Each component in turn has two
+    half-sigmas — one for the left side of its mode, one for the right —
+    encoding split-normal asymmetry.  That's two orthogonal left/right axes,
+    which the field names spell out rather than hiding in positional letters.
+    """
+
+    apex_left:            jax.Array  # mode location of the left  component
+    apex_right:           jax.Array  # mode location of the right component
+    sigma_left_of_left:   jax.Array  # left  half-sigma of the left  component
+    sigma_left_of_right:  jax.Array  # left  half-sigma of the right component
+    sigma_right_of_left:  jax.Array  # right half-sigma of the left  component
+    sigma_right_of_right: jax.Array  # right half-sigma of the right component
+    area_left:            jax.Array
+    area_right:           jax.Array
+
+    def flatten_to_mixture(
+        self,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Interleave left/right components along the mixture-component axis.
+
+        Returns ``(apex, sigma_left, sigma_right, area)`` each shaped
+        ``[n_trace, 2*n_peak]``, ready for :func:`mixture_signal`.
+        """
+        return (
+            _stack_left_right(self.apex_left, self.apex_right),
+            _stack_left_right(self.sigma_left_of_left, self.sigma_left_of_right),
+            _stack_left_right(self.sigma_right_of_left, self.sigma_right_of_right),
+            _stack_left_right(self.area_left, self.area_right),
+        )
+
+    @classmethod
+    def zeros(cls, shape: tuple[int, ...]) -> SplitGeometry:
+        """Build a zero-initialised geometry with every field set to ``jnp.zeros(shape)``."""
+        z = jnp.zeros(shape, dtype=jnp.float32)
+        return cls(z, z, z, z, z, z, z, z)
+
+
+def _broadcast_to_trace_axis(
+    per_peak: Any,  # [..., n_peak_slice]
+    target_shape: tuple[int, ...],  # [..., n_trace, n_peak_slice]
+) -> jax.Array:
+    """Insert a trace axis at ``axis=-2`` and broadcast to ``target_shape``.
+
+    Works for any leading-batch shape: ``per_peak`` of shape ``[n_slice]``
+    broadcasts to ``[n_trace, n_slice]``; ``[n_total, n_slice]`` broadcasts
+    to ``[n_total, n_trace, n_slice]``.  Single source of truth shared by
+    :func:`model` (2D geometry) and :func:`compute_derived_quantities` (3D).
+    """
+    return jnp.broadcast_to(jnp.expand_dims(per_peak, axis=-2), target_shape)
 
 
 def _assemble_nonfree(
-    lr: _CompArrays,
-    apex: Any,          # [n_trace, n_peak]
-    sl_base: Any,       # [n_peak]
-    sr_base: Any,       # [n_peak]
-    area_dominant: Any, # [n_trace, n_nonfree]
-    nonfree_idx: Any,   # [n_nonfree]
-    n_trace: int,
-) -> _CompArrays:
-    """Fill left/right matrices for single and artefact_doublet (nonfree) peaks."""
-    apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r = lr
-    sl_nf = jnp.broadcast_to(sl_base[None, nonfree_idx], (n_trace, nonfree_idx.shape[0]))
-    sr_nf = jnp.broadcast_to(sr_base[None, nonfree_idx], (n_trace, nonfree_idx.shape[0]))
-    apex_nf = apex[:, nonfree_idx]
-    apex_l = apex_l.at[:, nonfree_idx].set(apex_nf)
-    apex_r = apex_r.at[:, nonfree_idx].set(apex_nf)
-    sl_l = sl_l.at[:, nonfree_idx].set(sl_nf)
-    sl_r = sl_r.at[:, nonfree_idx].set(sl_nf)
-    sr_l = sr_l.at[:, nonfree_idx].set(sr_nf)
-    sr_r = sr_r.at[:, nonfree_idx].set(sr_nf)
-    area_l = area_l.at[:, nonfree_idx].set(area_dominant)
-    return apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r
+    geom: SplitGeometry,
+    apex: Any,  # [..., n_trace, n_peak]
+    primary_sigma_left: Any,  # [..., n_peak]
+    primary_sigma_right: Any,  # [..., n_peak]
+    area_dominant: Any,  # [..., n_trace, n_nonfree]
+    nonfree_idx: Any,  # [n_nonfree]
+) -> SplitGeometry:
+    """Fill left/right components for single and artefact_doublet (nonfree) peaks.
+
+    Singles share the same apex and sigmas across both "components" — the
+    left-component and right-component values coincide, collapsing the pair
+    to a single split-normal peak.  Only ``area_left`` is written;
+    ``area_right`` is intentionally left at zero so the right "component"
+    contributes nothing to the mixture signal for singles.  Artefact doublets
+    overwrite both areas later in :func:`_assemble_artefact`.
+    """
+    target_shape = (*geom.apex_left.shape[:-1], nonfree_idx.shape[0])
+    primary_sigma_left_bcast = _broadcast_to_trace_axis(
+        primary_sigma_left[..., nonfree_idx], target_shape
+    )
+    primary_sigma_right_bcast = _broadcast_to_trace_axis(
+        primary_sigma_right[..., nonfree_idx], target_shape
+    )
+    apex_nonfree = apex[..., nonfree_idx]
+    return replace(
+        geom,
+        apex_left=geom.apex_left.at[..., nonfree_idx].set(apex_nonfree),
+        apex_right=geom.apex_right.at[..., nonfree_idx].set(apex_nonfree),
+        sigma_left_of_left=geom.sigma_left_of_left.at[..., nonfree_idx].set(primary_sigma_left_bcast),
+        sigma_left_of_right=geom.sigma_left_of_right.at[..., nonfree_idx].set(primary_sigma_left_bcast),
+        sigma_right_of_left=geom.sigma_right_of_left.at[..., nonfree_idx].set(primary_sigma_right_bcast),
+        sigma_right_of_right=geom.sigma_right_of_right.at[..., nonfree_idx].set(primary_sigma_right_bcast),
+        area_left=geom.area_left.at[..., nonfree_idx].set(area_dominant),
+    )
 
 
 def _assemble_artefact(
-    lr: _CompArrays,
-    apex: Any,                  # [n_trace, n_peak]
-    sl_base: Any,               # [n_peak]
-    sr_base: Any,               # [n_peak]
-    sl_art: Any,                # [n_artefact]
-    sr_art: Any,                # [n_artefact]
-    area_dominant: Any,         # [n_trace, n_nonfree]
-    area_artefact: Any,         # [n_trace, n_artefact]
-    separation_artefact: Any,   # [n_artefact]
-    artefact_idx: Any,          # [n_artefact]
-    nonfree_position: Any,      # [n_peak]
-    artefact_side_v: Any,       # [n_peak] float: -1=left, 0=none, +1=right
-    n_trace: int,
-) -> _CompArrays:
-    """Overwrite artefact_doublet columns with two-component geometry."""
-    apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r = lr
+    geom: SplitGeometry,
+    apex: Any,  # [..., n_trace, n_peak]
+    primary_sigma_left: Any,  # [..., n_peak]
+    primary_sigma_right: Any,  # [..., n_peak]
+    artefact_sigma_left: Any,  # [..., n_artefact]
+    artefact_sigma_right: Any,  # [..., n_artefact]
+    area_dominant: Any,  # [..., n_trace, n_nonfree]
+    area_artefact: Any,  # [..., n_trace, n_artefact]
+    separation_artefact: Any,  # [..., n_artefact]
+    artefact_idx: Any,  # [n_artefact]
+    nonfree_position: Any,  # [n_peak]
+    artefact_side_sign: Any,  # [n_peak] float: -1=left, 0=none, +1=right
+) -> SplitGeometry:
+    """Overwrite artefact_doublet columns with two-component geometry.
 
-    artefact_nonfree_idx = nonfree_position[artefact_idx]
-    n_art = artefact_idx.shape[0]
-    apex_art = apex[:, artefact_idx]
-    sl_dom = jnp.broadcast_to(sl_base[None, artefact_idx], (n_trace, n_art))
-    sr_dom = jnp.broadcast_to(sr_base[None, artefact_idx], (n_trace, n_art))
-    sl_a = jnp.broadcast_to(sl_art[None, :], (n_trace, n_art))
-    sr_a = jnp.broadcast_to(sr_art[None, :], (n_trace, n_art))
-    area_dom = area_dominant[:, artefact_nonfree_idx]
-    sep = jnp.broadcast_to(separation_artefact[None, :], (n_trace, n_art))
+    Primary on one side, artefact on the other — ``artefact_side_sign`` selects
+    which.  Artefact sigmas are symmetric (left-half-sigma == right-half-sigma);
+    the primary keeps its measured asymmetry.
+    """
+    target_shape = (*geom.apex_left.shape[:-1], artefact_idx.shape[0])
+    apex_artefact = apex[..., artefact_idx]
+    primary_sigma_left_bcast = _broadcast_to_trace_axis(
+        primary_sigma_left[..., artefact_idx], target_shape
+    )
+    primary_sigma_right_bcast = _broadcast_to_trace_axis(
+        primary_sigma_right[..., artefact_idx], target_shape
+    )
+    artefact_sigma_left_bcast = _broadcast_to_trace_axis(artefact_sigma_left, target_shape)
+    artefact_sigma_right_bcast = _broadcast_to_trace_axis(artefact_sigma_right, target_shape)
+    area_primary_at_artefacts = area_dominant[..., nonfree_position[artefact_idx]]
+    separation_bcast = _broadcast_to_trace_axis(separation_artefact, target_shape)
 
-    art_left = artefact_side_v[artefact_idx] < 0.0
-    apex_l_art = jnp.where(art_left[None, :], apex_art - sep, apex_art)
-    apex_r_art = jnp.where(art_left[None, :], apex_art, apex_art + sep)
-    sl_l_art = jnp.where(art_left[None, :], sl_a, sl_dom)
-    sl_r_art = jnp.where(art_left[None, :], sl_dom, sl_a)
-    sr_l_art = jnp.where(art_left[None, :], sr_a, sr_dom)
-    sr_r_art = jnp.where(art_left[None, :], sr_dom, sr_a)
-    area_l_art = jnp.where(art_left[None, :], area_artefact, area_dom)
-    area_r_art = jnp.where(art_left[None, :], area_dom, area_artefact)
+    artefact_is_left = jnp.broadcast_to(
+        artefact_side_sign[artefact_idx] < 0.0, target_shape
+    )
+    new_apex_left = jnp.where(artefact_is_left, apex_artefact - separation_bcast, apex_artefact)
+    new_apex_right = jnp.where(artefact_is_left, apex_artefact, apex_artefact + separation_bcast)
+    new_sigma_left_of_left = jnp.where(
+        artefact_is_left, artefact_sigma_left_bcast, primary_sigma_left_bcast
+    )
+    new_sigma_left_of_right = jnp.where(
+        artefact_is_left, primary_sigma_left_bcast, artefact_sigma_left_bcast
+    )
+    new_sigma_right_of_left = jnp.where(
+        artefact_is_left, artefact_sigma_right_bcast, primary_sigma_right_bcast
+    )
+    new_sigma_right_of_right = jnp.where(
+        artefact_is_left, primary_sigma_right_bcast, artefact_sigma_right_bcast
+    )
+    new_area_left = jnp.where(artefact_is_left, area_artefact, area_primary_at_artefacts)
+    new_area_right = jnp.where(artefact_is_left, area_primary_at_artefacts, area_artefact)
 
-    apex_l = apex_l.at[:, artefact_idx].set(apex_l_art)
-    apex_r = apex_r.at[:, artefact_idx].set(apex_r_art)
-    sl_l = sl_l.at[:, artefact_idx].set(sl_l_art)
-    sl_r = sl_r.at[:, artefact_idx].set(sl_r_art)
-    sr_l = sr_l.at[:, artefact_idx].set(sr_l_art)
-    sr_r = sr_r.at[:, artefact_idx].set(sr_r_art)
-    area_l = area_l.at[:, artefact_idx].set(area_l_art)
-    area_r = area_r.at[:, artefact_idx].set(area_r_art)
-    return apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r
+    return replace(
+        geom,
+        apex_left=geom.apex_left.at[..., artefact_idx].set(new_apex_left),
+        apex_right=geom.apex_right.at[..., artefact_idx].set(new_apex_right),
+        sigma_left_of_left=geom.sigma_left_of_left.at[..., artefact_idx].set(new_sigma_left_of_left),
+        sigma_left_of_right=geom.sigma_left_of_right.at[..., artefact_idx].set(new_sigma_left_of_right),
+        sigma_right_of_left=geom.sigma_right_of_left.at[..., artefact_idx].set(new_sigma_right_of_left),
+        sigma_right_of_right=geom.sigma_right_of_right.at[..., artefact_idx].set(new_sigma_right_of_right),
+        area_left=geom.area_left.at[..., artefact_idx].set(new_area_left),
+        area_right=geom.area_right.at[..., artefact_idx].set(new_area_right),
+    )
 
 
 def _assemble_free(
-    lr: _CompArrays,
-    apex: Any,              # [n_trace, n_peak]
-    sl_base: Any,           # [n_peak]
-    sr_base: Any,           # [n_peak]
-    sl_r_free: Any,         # [n_free] — left half-sigma for right free component
-    sr_r_free: Any,         # [n_free] — right half-sigma for right free component
-    area_total_free: Any,   # [n_trace, n_free]
-    area_frac_left_free: Any,   # [n_trace, n_free]
-    separation_free: Any,   # [n_free]
-    free_idx: Any,          # [n_free]
+    geom: SplitGeometry,
+    apex: Any,  # [..., n_trace, n_peak]
+    primary_sigma_left: Any,  # [..., n_peak]
+    primary_sigma_right: Any,  # [..., n_peak]
+    free_second_sigma_left: Any,  # [..., n_free] — left  half-sigma of the right (2nd) free component
+    free_second_sigma_right: Any,  # [..., n_free] — right half-sigma of the right (2nd) free component
+    area_total_free: Any,  # [..., n_trace, n_free]
+    area_frac_left_free: Any,  # [..., n_trace, n_free]
+    separation_free: Any,  # [..., n_free]
+    free_idx: Any,  # [n_free]
+) -> SplitGeometry:
+    """Fill free_doublet columns with two-component geometry.
+
+    Primary keeps its left-component slot; the 2nd (right) component carries
+    ``free_second_sigma_*`` — a separately-sampled pair of half-sigmas.
+    """
+    target_shape = (*geom.apex_left.shape[:-1], free_idx.shape[0])
+    primary_sigma_left_bcast = _broadcast_to_trace_axis(
+        primary_sigma_left[..., free_idx], target_shape
+    )
+    primary_sigma_right_bcast = _broadcast_to_trace_axis(
+        primary_sigma_right[..., free_idx], target_shape
+    )
+    free_second_sigma_left_bcast = _broadcast_to_trace_axis(free_second_sigma_left, target_shape)
+    free_second_sigma_right_bcast = _broadcast_to_trace_axis(free_second_sigma_right, target_shape)
+    apex_free = apex[..., free_idx]
+    half_sep = 0.5 * _broadcast_to_trace_axis(separation_free, target_shape)
+
+    return replace(
+        geom,
+        apex_left=geom.apex_left.at[..., free_idx].set(apex_free - half_sep),
+        apex_right=geom.apex_right.at[..., free_idx].set(apex_free + half_sep),
+        sigma_left_of_left=geom.sigma_left_of_left.at[..., free_idx].set(primary_sigma_left_bcast),
+        sigma_left_of_right=geom.sigma_left_of_right.at[..., free_idx].set(free_second_sigma_left_bcast),
+        sigma_right_of_left=geom.sigma_right_of_left.at[..., free_idx].set(primary_sigma_right_bcast),
+        sigma_right_of_right=geom.sigma_right_of_right.at[..., free_idx].set(free_second_sigma_right_bcast),
+        area_left=geom.area_left.at[..., free_idx].set(area_total_free * area_frac_left_free),
+        area_right=geom.area_right.at[..., free_idx].set(area_total_free * (1.0 - area_frac_left_free)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prior-sampling sub-functions
+#
+# Each helper owns one coherent chunk of the prior and returns narrowly-typed
+# outputs.  ``numpyro.sample(...)`` call strings are part of the model's
+# external API — tests, visualize.py, and fitter.py all read posterior samples
+# by these names — so they stay byte-identical.
+# ---------------------------------------------------------------------------
+
+
+class _PerTraceParams(NamedTuple):
+    """Per-trace scalars sampled together in the ``"traces"`` plate.
+
+    Field types are ``Any`` because ``numpyro.sample`` returns ``ArrayLike``,
+    not ``jax.Array`` — declaring the fields narrower forces spurious casts.
+    """
+
+    trace_shift_raw: Any   # [n_trace]  — unit-Normal, scaled later
+    baseline_intercept: Any
+    baseline_slope: Any
+    sigma_y: Any
+
+
+def _sample_log_w(
+    name: str,
+    log_centre: jax.Array,
+    w_scale: jax.Array,
+    w_loc_for_scale: jax.Array,
+    w_min: jax.Array,
+    w_max: jax.Array,
+    dt: jax.Array,
+    n_valid: jax.Array,
+) -> jax.Array:
+    """Sample one log-HWHM from a truncated-normal on ``[log w_min, log w_max]``.
+
+    Centre and scale are computed upstream; this helper owns the uniform
+    truncation rule and the ``_w_log_scale`` combination so the five width
+    priors in this module share a single shape.
+    """
+    return numpyro.sample(  # type: ignore[return-value]
+        name,
+        dist.TruncatedNormal(
+            log_centre,
+            _w_log_scale(w_scale, w_loc_for_scale, dt, n_valid),
+            low=jnp.log(w_min),
+            high=jnp.log(w_max),
+        ),
+    )
+
+
+def _sample_primary_widths(
+    w_left_loc: jax.Array,
+    w_left_scale: jax.Array,
+    w_right_loc: jax.Array,
+    w_right_scale: jax.Array,
+    w_min: jax.Array,
+    w_max: jax.Array,
+    dt: jax.Array,
+    n_valid: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Sample the primary component's left/right HWHM priors.
+
+    Truncated to [w_min, w_max] — Nyquist floor and window-size ceiling.
+    Returns ``(primary_sigma_left, primary_sigma_right)``, both shape ``[n_peak]``.
+    """
+    log_w_left = _sample_log_w(
+        "log_w_left", jnp.log(w_left_loc), w_left_scale, w_left_loc,
+        w_min, w_max, dt, n_valid,
+    )
+    log_w_right = _sample_log_w(
+        "log_w_right", jnp.log(w_right_loc), w_right_scale, w_right_loc,
+        w_min, w_max, dt, n_valid,
+    )
+    return _halfwidths_to_split(log_w_left, log_w_right)
+
+
+def _sample_artefact_width(
+    w_left_loc: jax.Array,
+    w_left_scale: jax.Array,
+    w_right_loc: jax.Array,
+    w_right_scale: jax.Array,
+    w_min: jax.Array,
+    w_max: jax.Array,
+    dt: jax.Array,
+    n_valid: jax.Array,
+    artefact_idx: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Sample the artefact component's (symmetric) HWHM prior.
+
+    HWHM centre: geometric mean of ``w_min`` and the primary envelope FWHM —
+    the max-entropy choice for a log-scale parameter bounded in
+    ``[w_min, w_primary]``, consistent across resolved / overlapping cases.
+
+    Returns ``(sigma_left, sigma_right, log_w_art)``.  The two sigmas are
+    identical (split-normal is symmetric for artefacts) but returned separately
+    to match the downstream interface.
+    """
+    w_mean_primary = 0.5 * (w_left_loc[artefact_idx] + w_right_loc[artefact_idx])
+    w_art_centre = jnp.sqrt(w_min[artefact_idx] * w_mean_primary)
+    w_scale_art = 0.5 * (w_left_scale[artefact_idx] + w_right_scale[artefact_idx])
+    log_w_art = _sample_log_w(
+        "log_w_art", jnp.log(w_art_centre), w_scale_art, w_mean_primary,
+        w_min[artefact_idx], w_max[artefact_idx], dt[artefact_idx], n_valid[artefact_idx],
+    )
+    sigma_art = jnp.exp(log_w_art) / _HWHM_FACTOR
+    return sigma_art, sigma_art, log_w_art
+
+
+def _sample_free_second_widths(
+    w_left_loc: jax.Array,
+    w_left_scale: jax.Array,
+    w_right_loc: jax.Array,
+    w_right_scale: jax.Array,
+    w_min: jax.Array,
+    w_max: jax.Array,
+    dt: jax.Array,
+    n_valid: jax.Array,
+    free_idx: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Sample the 2nd (right) component HWHMs of a free doublet.
+
+    Centre at ``sqrt(w_min * w_loc)`` — same auxiliary-component rule as the
+    artefact — and truncate to ``[w_min, w_max]`` like the primary.
+    """
+    w_left_loc_free = w_left_loc[free_idx]
+    w_right_loc_free = w_right_loc[free_idx]
+    w_min_free = w_min[free_idx]
+    w_max_free = w_max[free_idx]
+    dt_free = dt[free_idx]
+    n_valid_free = n_valid[free_idx]
+    log_w_left_2 = _sample_log_w(
+        "log_w_left_2", jnp.log(jnp.sqrt(w_min_free * w_left_loc_free)),
+        w_left_scale[free_idx], w_left_loc_free,
+        w_min_free, w_max_free, dt_free, n_valid_free,
+    )
+    log_w_right_2 = _sample_log_w(
+        "log_w_right_2", jnp.log(jnp.sqrt(w_min_free * w_right_loc_free)),
+        w_right_scale[free_idx], w_right_loc_free,
+        w_min_free, w_max_free, dt_free, n_valid_free,
+    )
+    return _halfwidths_to_split(log_w_left_2, log_w_right_2)
+
+
+def _sample_artefact_separation(
+    log_w_art: jax.Array,
+    artefact_side: jax.Array,
+    apex_loc: jax.Array,
+    window_lo: jax.Array,
+    window_hi: jax.Array,
+    trace_shift_scale: jax.Array,
+    artefact_idx: jax.Array,
+) -> jax.Array:
+    """Sample artefact apex separation, bounded by window room and HWHM.
+
+    Identifiability lower bound ``sep_min = exp(log_w_art)`` — the artefact is
+    unresolvable if it sits closer to the primary than its own HWHM.  Clamped
+    so ``sep_min`` can't force the apex outside the window.
+
+    Returns ``separation_artefact`` shape ``[n_artefact]``.
+    """
+    art_side = artefact_side[artefact_idx].astype(jnp.float32)
+    room = jnp.where(
+        art_side > 0,
+        window_hi[artefact_idx] - apex_loc[artefact_idx] - trace_shift_scale,
+        apex_loc[artefact_idx] - window_lo[artefact_idx] - trace_shift_scale,
+    )
+    sep_min = jnp.minimum(jnp.exp(log_w_art), room * 0.5)
+    log_separation_artefact = numpyro.sample(
+        "log_separation_artefact",
+        dist.Uniform(jnp.log(sep_min), jnp.log(room)),
+    )
+    return jnp.exp(log_separation_artefact)  # type: ignore[return-value]
+
+
+def _sample_free_separation(
+    w_left_loc: jax.Array,
+    free_idx: jax.Array,
+    free_sep_log_sigma: float,
+) -> jax.Array:
+    """Sample free-doublet apex separation around twice the primary left HWHM."""
+    sep_loc_free = 2.0 * w_left_loc[free_idx]
+    log_separation_free = numpyro.sample(
+        "log_separation_free",
+        dist.Normal(jnp.log(sep_loc_free), free_sep_log_sigma),
+    )
+    return jnp.exp(log_separation_free)  # type: ignore[return-value]
+
+
+def _sample_per_trace_params(
     n_trace: int,
-) -> _CompArrays:
-    """Fill free_doublet columns with two-component geometry."""
-    apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r = lr
-    n_free = free_idx.shape[0]
+    baseline_mid_loc: jax.Array,
+    baseline_mid_scale: jax.Array,
+    baseline_slope_loc: jax.Array,
+    baseline_slope_scale: jax.Array,
+    sigma_y_prior_loc: jax.Array,
+) -> _PerTraceParams:
+    """Plate-sample the per-trace scalars (shift, baseline, noise)."""
+    with numpyro.plate("traces", n_trace):
+        trace_shift_raw = numpyro.sample("trace_shift_raw", dist.Normal(0.0, 1.0))
+        baseline_intercept = numpyro.sample(
+            "baseline_intercept", dist.Normal(baseline_mid_loc, baseline_mid_scale)
+        )
+        baseline_slope = numpyro.sample(
+            "baseline_slope", dist.Normal(baseline_slope_loc, baseline_slope_scale)
+        )
+        sigma_y = numpyro.sample("sigma_y", dist.LogNormal(jnp.log(sigma_y_prior_loc), 0.5))
+    return _PerTraceParams(trace_shift_raw, baseline_intercept, baseline_slope, sigma_y)
 
-    sl_dom = jnp.broadcast_to(sl_base[None, free_idx], (n_trace, n_free))
-    sr_dom = jnp.broadcast_to(sr_base[None, free_idx], (n_trace, n_free))
-    sl_rf = jnp.broadcast_to(sl_r_free[None, :], (n_trace, n_free))
-    sr_rf = jnp.broadcast_to(sr_r_free[None, :], (n_trace, n_free))
-    apex_free = apex[:, free_idx]
-    apex_l_free = apex_free - 0.5 * separation_free[None, :]
-    apex_r_free = apex_free + 0.5 * separation_free[None, :]
-    area_l_free = area_total_free * area_frac_left_free
-    area_r_free = area_total_free * (1.0 - area_frac_left_free)
 
-    apex_l = apex_l.at[:, free_idx].set(apex_l_free)
-    apex_r = apex_r.at[:, free_idx].set(apex_r_free)
-    sl_l = sl_l.at[:, free_idx].set(sl_dom)
-    sl_r = sl_r.at[:, free_idx].set(sl_rf)
-    sr_l = sr_l.at[:, free_idx].set(sr_dom)
-    sr_r = sr_r.at[:, free_idx].set(sr_rf)
-    area_l = area_l.at[:, free_idx].set(area_l_free)
-    area_r = area_r.at[:, free_idx].set(area_r_free)
-    return apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r
+def _sample_apex_offsets(
+    n_trace: int,
+    n_peak: int,
+    apex_offset_scale: jax.Array,
+) -> jax.Array:
+    """Non-centred per-peak apex jitter, returned scaled.
+
+    Shape ``[n_trace, n_peak]``.
+    """
+    with numpyro.plate("traces_apex", n_trace, dim=-2):
+        with numpyro.plate("peaks_apex", n_peak, dim=-1):
+            apex_offset_raw = numpyro.sample("apex_offset_raw", dist.Normal(0.0, 1.0))
+    return apex_offset_scale[None, :] * apex_offset_raw
+
+
+def _sample_nonfree_areas(
+    n_trace: int,
+    n_nonfree: int,
+    area_gaussian_pt_nonfree: jax.Array,
+    area_log_sigma: float,
+) -> jax.Array:
+    """Plate-sample dominant-component areas for single & artefact_doublet peaks."""
+    with numpyro.plate("traces_nonfree", n_trace, dim=-2):
+        with numpyro.plate("nonfree_peaks", n_nonfree, dim=-1):
+            area_dominant = numpyro.sample(
+                "area_dominant",
+                dist.LogNormal(
+                    jnp.log(jnp.maximum(area_gaussian_pt_nonfree, 1e-6)),
+                    area_log_sigma,
+                ),
+            )
+    return area_dominant  # type: ignore[return-value]
+
+
+def _sample_artefact_areas(
+    n_trace: int,
+    n_artefact: int,
+    area_art_shared: jax.Array,
+    area_art_log_sigma: float,
+    area_art_trace_log_scale: float,
+) -> jax.Array:
+    """Hierarchical artefact area: shared mean + non-centred per-trace offset.
+
+    Non-centred parameterisation keeps NUTS geometry well-conditioned when
+    traces are consistent (``area_art_trace_log_scale`` small → offsets weakly
+    identified from data, but raw ~ Normal(0, 1) is always well-conditioned).
+
+    Returns ``area_artefact`` shape ``[n_trace, n_artefact]``.
+    """
+    log_area_art_mean = numpyro.sample(
+        "log_area_art_mean",
+        dist.Normal(jnp.log(jnp.maximum(area_art_shared, 1e-6)), area_art_log_sigma),
+    )
+    with numpyro.plate("traces_art", n_trace, dim=-2):
+        with numpyro.plate("artefact_peaks_art", n_artefact, dim=-1):
+            log_area_art_raw = numpyro.sample("log_area_art_raw", dist.Normal(0.0, 1.0))
+    return jnp.exp(log_area_art_mean[None, :] + area_art_trace_log_scale * log_area_art_raw)
+
+
+def _sample_free_areas(
+    n_trace: int,
+    n_free: int,
+    area_gaussian_pt_free: jax.Array,
+    area_log_sigma: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Plate-sample total area and left-fraction for free-doublet peaks."""
+    with numpyro.plate("traces_free", n_trace, dim=-2):
+        with numpyro.plate("free_peaks", n_free, dim=-1):
+            area_total_free = numpyro.sample(
+                "area_total_free",
+                dist.LogNormal(
+                    jnp.log(jnp.maximum(area_gaussian_pt_free, 1e-6)),
+                    area_log_sigma,
+                ),
+            )
+            area_frac_left_free = numpyro.sample(
+                "area_frac_left_free",
+                dist.Beta(2.0, 2.0),
+            )
+    return area_total_free, area_frac_left_free  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -253,268 +651,172 @@ _MODE_FREE_DOUBLET = 2
 
 
 def model(
+    # --- Data ---
     x: jax.Array,  # [n_trace, n_time]
     y: jax.Array | None,  # [n_trace, n_time] or None (prior predictive)
-    # --- hyperparameters ---
+    # --- Hyperparameters ---
     hyperparams: ModelHyperparams,
-    # --- peak structure ---
+    # --- Peak structure indices ---
     peak_mode_code: jax.Array,  # [n_peak]
     artefact_side: jax.Array,  # [n_peak]  int: -1=left, 0=none, +1=right
     artefact_peak_index: jax.Array,  # [n_artefact]
     free_peak_index: jax.Array,  # [n_free]
     nonfree_idx: jax.Array,  # [n_nonfree]
     nonfree_position: jax.Array,  # [n_peak]
-    # --- peak priors ---
+    # --- Location priors ---
     apex_loc: jax.Array,  # [n_peak]
     trace_shift_scale: jax.Array,  # scalar
     apex_offset_scale: jax.Array,  # [n_peak]  — per-peak residual jitter std
+    # --- Width priors ---
     w_left_loc: jax.Array,  # [n_peak]
     w_left_scale: jax.Array,  # [n_peak]
     w_right_loc: jax.Array,  # [n_peak]
     w_right_scale: jax.Array,  # [n_peak]
+    w_min: jax.Array,  # [n_peak]  — Nyquist-like HWHM lower bound (per peak window)
+    w_max: jax.Array,  # [n_peak]  — geometry-derived HWHM upper bound (per peak window)
+    dt: jax.Array,  # [n_peak]  — median sampling interval per peak window
+    n_valid: jax.Array,  # [n_peak]  — valid-trace count per peak window
+    # --- Area priors ---
     area_gaussian_pt: jax.Array,  # [n_trace, n_peak]
     area_art_shared: jax.Array,  # [n_artefact]
-    snr_per_trace: jax.Array,  # [n_trace, n_peak]
-    # --- peak window bounds ---
+    # --- Window bounds ---
     window_lo: jax.Array,  # [n_peak]
     window_hi: jax.Array,  # [n_peak]
-    # --- baseline priors ---
+    # --- Baseline priors ---
     baseline_intercept_loc: jax.Array,  # [n_trace]
     baseline_intercept_scale: jax.Array,  # [n_trace]
     baseline_slope_loc: jax.Array,  # [n_trace]
     baseline_slope_scale: jax.Array,  # [n_trace]
-    # --- noise prior ---
+    # --- Noise prior ---
     sigma_y_prior_loc: jax.Array,  # [n_trace]
 ) -> None:
     """Bayesian skew-normal peak model using (log_w_left, log_w_right) parameterization.
 
     All input arrays are pre-validated float32 by ``Fitter._prepare_model_inputs()``.
     """
-    # 1. Shape constants
+    # --- Shape constants ---
     n_trace, _ = x.shape
     n_peak = int(apex_loc.shape[0])
     n_artefact = int(artefact_peak_index.shape[0])
     n_free = int(free_peak_index.shape[0])
     n_nonfree = int(nonfree_idx.shape[0])
 
-    artefact_side_v = artefact_side.astype(jnp.float32)
+    artefact_side_sign = artefact_side.astype(jnp.float32)
     artefact_idx = artefact_peak_index
     free_idx = free_peak_index
-
-    # 2. S/N-dependent area spread [n_trace, n_peak]
     hp = hyperparams
-    snr_frac = jnp.clip(
-        (snr_per_trace - hp.area_snr_threshold_low)
-        / (hp.area_snr_threshold_high - hp.area_snr_threshold_low),
-        0.0,
-        1.0,
-    )
-    area_log_sigma = hp.area_log_sigma_low_snr - snr_frac * (
-        hp.area_log_sigma_low_snr - hp.area_log_sigma_high_snr
-    )  # [n_trace, n_peak]
 
-    # 3. Primary half-width priors (one per peak, shared across traces)
-    w_left_log_scale = jnp.maximum(w_left_scale / jnp.maximum(w_left_loc, 1e-9), hp.w_prior_log_scale)
-    w_right_log_scale = jnp.maximum(w_right_scale / jnp.maximum(w_right_loc, 1e-9), hp.w_prior_log_scale)
-    log_w_left = numpyro.sample("log_w_left", dist.Normal(jnp.log(w_left_loc), w_left_log_scale))  # [n_peak]
-    log_w_right = numpyro.sample(
-        "log_w_right", dist.Normal(jnp.log(w_right_loc), w_right_log_scale)
-    )  # [n_peak]
-    sl_base, sr_base = _halfwidths_to_split(log_w_left, log_w_right)  # type: ignore[arg-type]  # [n_peak]
+    # --- Width priors ---
+    primary_sigma_left, primary_sigma_right = _sample_primary_widths(
+        w_left_loc, w_left_scale, w_right_loc, w_right_scale,
+        w_min, w_max, dt, n_valid,
+    )  # [n_peak], [n_peak]
 
-    # 4a. Artefact second-component shape: symmetric, constrained narrow
-    sl_art: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
-    sr_art: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
-    sl_r_free: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
-    sr_r_free: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
-
-    if n_artefact > 0:
-        w_mean_art = 0.5 * (w_left_loc[artefact_idx] + w_right_loc[artefact_idx])
-        log_w_art = numpyro.sample(
-            "log_w_art",
-            dist.Normal(jnp.log(hp.art_w_prior_center_mult * w_mean_art), hp.art_w_log_scale),
-        )  # [n_artefact]
-        w_art = jnp.exp(log_w_art) / _HWHM_FACTOR  # type: ignore[arg-type]
-        sl_art = w_art
-        sr_art = w_art
-
-    # 4b. Free doublet second-component shape: independent left/right
-    if n_free > 0:
-        log_w_left_2 = numpyro.sample(
-            "log_w_left_2",
-            dist.Normal(jnp.log(0.6 * w_left_loc[free_idx]), 0.5),
-        )  # [n_free]
-        log_w_right_2 = numpyro.sample(
-            "log_w_right_2",
-            dist.Normal(jnp.log(0.6 * w_right_loc[free_idx]), 0.5),
-        )  # [n_free]
-        sl_r_free, sr_r_free = _halfwidths_to_split(log_w_left_2, log_w_right_2)  # type: ignore[arg-type]
-
-    # 5. Separation priors
+    # Placeholder zero-arrays let pyright see every name is bound before the
+    # `_assemble_*` calls read them; each guard below overwrites the relevant
+    # subset for its peak mode.
+    artefact_sigma_left: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
+    artefact_sigma_right: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
+    free_second_sigma_left: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
+    free_second_sigma_right: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
+    log_w_art: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
     separation_artefact: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
     separation_free: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
 
     if n_artefact > 0:
-        # Window room on the artefact side, minus trace_shift_scale safety margin.
-        # artefact_side[artefact_idx]: +1 = right, -1 = left
-        art_side = artefact_side[artefact_idx].astype(jnp.float32)  # [n_artefact]
-        room = jnp.where(
-            art_side > 0,
-            window_hi[artefact_idx] - apex_loc[artefact_idx] - trace_shift_scale,
-            apex_loc[artefact_idx] - window_lo[artefact_idx] - trace_shift_scale,
-        )  # [n_artefact]
-        sep_min = hp.art_sep_min_w_mult * jnp.minimum(
-            w_left_loc[artefact_idx], w_right_loc[artefact_idx]
-        )  # [n_artefact]
-        room = jnp.maximum(room, sep_min * 2.0)
-        log_separation_artefact = numpyro.sample(
-            "log_separation_artefact",
-            dist.Uniform(jnp.log(sep_min), jnp.log(room)),
-        )  # [n_artefact]
-        separation_artefact = jnp.exp(log_separation_artefact)  # type: ignore[assignment]
+        artefact_sigma_left, artefact_sigma_right, log_w_art = _sample_artefact_width(
+            w_left_loc, w_left_scale, w_right_loc, w_right_scale,
+            w_min, w_max, dt, n_valid, artefact_idx,
+        )
+        separation_artefact = _sample_artefact_separation(
+            log_w_art, artefact_side, apex_loc,
+            window_lo, window_hi, trace_shift_scale, artefact_idx,
+        )
 
     if n_free > 0:
-        sep_loc_free = 2.0 * w_left_loc[free_idx]
-        log_separation_free = numpyro.sample(
-            "log_separation_free",
-            dist.Normal(jnp.log(sep_loc_free), hp.free_sep_log_sigma),
-        )  # [n_free]
-        separation_free = jnp.exp(log_separation_free)  # type: ignore[assignment]
-
-    # 6. Per-trace parameters
-    x_mid = 0.5 * (jnp.min(window_lo) + jnp.max(window_hi))
-    baseline_mid_loc = baseline_intercept_loc + baseline_slope_loc * x_mid
-    baseline_mid_scale = jnp.sqrt(baseline_intercept_scale**2 + (x_mid * baseline_slope_scale) ** 2)
-
-    with numpyro.plate("traces", n_trace):
-        trace_shift_raw = numpyro.sample("trace_shift_raw", dist.Normal(0.0, 1.0))
-        baseline_intercept = numpyro.sample(
-            "baseline_intercept", dist.Normal(baseline_mid_loc, baseline_mid_scale)
+        free_second_sigma_left, free_second_sigma_right = _sample_free_second_widths(
+            w_left_loc, w_left_scale, w_right_loc, w_right_scale,
+            w_min, w_max, dt, n_valid, free_idx,
         )
-        baseline_slope = numpyro.sample(
-            "baseline_slope", dist.Normal(baseline_slope_loc, baseline_slope_scale)
+        separation_free = _sample_free_separation(
+            w_left_loc, free_idx, hp.free_sep_log_sigma,
         )
-        sigma_y = numpyro.sample("sigma_y", dist.LogNormal(jnp.log(sigma_y_prior_loc), 0.5))
 
-    trace_shift = trace_shift_scale * (trace_shift_raw - jnp.mean(trace_shift_raw))
+    # --- Per-trace parameters ---
+    window_midpoint_x = 0.5 * (jnp.min(window_lo) + jnp.max(window_hi))
+    baseline_mid_loc = baseline_intercept_loc + baseline_slope_loc * window_midpoint_x
+    baseline_mid_scale = jnp.sqrt(
+        baseline_intercept_scale**2 + (window_midpoint_x * baseline_slope_scale) ** 2
+    )
 
-    # Per-peak independent apex offset (non-centered parameterization)
-    with numpyro.plate("traces_apex", n_trace, dim=-2):
-        with numpyro.plate("peaks_apex", n_peak, dim=-1):
-            apex_offset_raw = numpyro.sample("apex_offset_raw", dist.Normal(0.0, 1.0))
-    # [n_trace, n_peak]
-    apex_offset = apex_offset_scale[None, :] * apex_offset_raw
+    trace_params = _sample_per_trace_params(
+        n_trace, baseline_mid_loc, baseline_mid_scale,
+        baseline_slope_loc, baseline_slope_scale, sigma_y_prior_loc,
+    )
+    trace_shift = trace_shift_scale * (
+        trace_params.trace_shift_raw - jnp.mean(trace_params.trace_shift_raw)
+    )
+    apex_offset = _sample_apex_offsets(n_trace, n_peak, apex_offset_scale)
     apex = apex_loc[None, :] + trace_shift[:, None] + apex_offset  # [n_trace, n_peak]
 
-    # 7. Per-trace area sampling
-    # NOTE: plates are given unique names and nested to avoid NumPyro misidentifying
-    # the trace vs. peak dimensions when pmap-vectorising over chains.
+    # --- Area priors ---
     area_dominant: jax.Array = jnp.zeros((n_trace, 0), dtype=jnp.float32)
     area_artefact: jax.Array = jnp.zeros((n_trace, 0), dtype=jnp.float32)
     area_total_free: jax.Array = jnp.zeros((n_trace, 0), dtype=jnp.float32)
     area_frac_left_free: jax.Array = jnp.zeros((n_trace, 0), dtype=jnp.float32)
 
     if n_nonfree > 0:
-        with numpyro.plate("traces_nonfree", n_trace, dim=-2):
-            with numpyro.plate("nonfree_peaks", n_nonfree, dim=-1):
-                area_dominant = numpyro.sample(  # type: ignore[assignment]
-                    "area_dominant",
-                    dist.LogNormal(
-                        jnp.log(jnp.maximum(area_gaussian_pt[:, nonfree_idx], 1e-6)),
-                        area_log_sigma[:, nonfree_idx],
-                    ),
-                )  # [n_trace, n_nonfree]
-
+        area_dominant = _sample_nonfree_areas(
+            n_trace, n_nonfree, area_gaussian_pt[:, nonfree_idx], hp.area_log_sigma,
+        )
     if n_artefact > 0:
-        # Artefact peaks are systematic (column chemistry); area is constant across
-        # traces.  Sampling a single shared value per artefact type is sufficient
-        # and avoids the per-trace offset plate that caused plate-name conflicts.
-        area_artefact_typical = numpyro.sample(
-            "area_artefact_typical",
-            dist.LogNormal(jnp.log(jnp.maximum(area_art_shared, 1e-6)), hp.area_art_log_sigma),
-        )  # [n_artefact]
-        area_artefact = jnp.broadcast_to(  # type: ignore[assignment]
-            area_artefact_typical[None, :], (n_trace, n_artefact)
-        )  # [n_trace, n_artefact]
-
+        area_artefact = _sample_artefact_areas(
+            n_trace, n_artefact, area_art_shared,
+            hp.area_art_log_sigma, hp.area_art_trace_log_scale,
+        )
     if n_free > 0:
-        with numpyro.plate("traces_free", n_trace, dim=-2):
-            with numpyro.plate("free_peaks", n_free, dim=-1):
-                area_total_free = numpyro.sample(  # type: ignore[assignment]
-                    "area_total_free",
-                    dist.LogNormal(
-                        jnp.log(jnp.maximum(area_gaussian_pt[:, free_idx], 1e-6)),
-                        area_log_sigma[:, free_idx],
-                    ),
-                )  # [n_trace, n_free]
-                area_frac_left_free = numpyro.sample(  # type: ignore[assignment]
-                    "area_frac_left_free",
-                    dist.Beta(2.0, 2.0),
-                )  # [n_trace, n_free]
+        area_total_free, area_frac_left_free = _sample_free_areas(
+            n_trace, n_free, area_gaussian_pt[:, free_idx], hp.area_log_sigma,
+        )
 
-    # 8. Left/right canonical assembly
-    lr: _CompArrays = (
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # apex_l
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # apex_r
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # sl_l
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # sl_r
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # sr_l
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # sr_r
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # area_l
-        jnp.zeros((n_trace, n_peak), dtype=jnp.float32),  # area_r
-    )
+    # --- Left/right canonical assembly ---
+    geom = SplitGeometry.zeros((n_trace, n_peak))
     if n_nonfree > 0:
-        lr = _assemble_nonfree(lr, apex, sl_base, sr_base, area_dominant, nonfree_idx, n_trace)
+        geom = _assemble_nonfree(
+            geom, apex, primary_sigma_left, primary_sigma_right,
+            area_dominant, nonfree_idx,
+        )
     if n_artefact > 0:
-        lr = _assemble_artefact(
-            lr,
-            apex,
-            sl_base,
-            sr_base,
-            sl_art,
-            sr_art,
-            area_dominant,
-            area_artefact,
-            separation_artefact,
-            artefact_idx,
-            nonfree_position,
-            artefact_side_v,
-            n_trace,
+        geom = _assemble_artefact(
+            geom, apex, primary_sigma_left, primary_sigma_right,
+            artefact_sigma_left, artefact_sigma_right,
+            area_dominant, area_artefact, separation_artefact,
+            artefact_idx, nonfree_position, artefact_side_sign,
         )
     if n_free > 0:
-        lr = _assemble_free(
-            lr,
-            apex,
-            sl_base,
-            sr_base,
-            sl_r_free,
-            sr_r_free,
-            area_total_free,
-            area_frac_left_free,
-            separation_free,
+        geom = _assemble_free(
+            geom, apex, primary_sigma_left, primary_sigma_right,
+            free_second_sigma_left, free_second_sigma_right,
+            area_total_free, area_frac_left_free, separation_free,
             free_idx,
-            n_trace,
         )
 
-    apex_l, apex_r, sl_l, sl_r, sr_l, sr_r, area_l, area_r = lr
-
-    apex_flat = _stack_left_right(apex_l, apex_r)
-    sl_flat = _stack_left_right(sl_l, sl_r)
-    sr_flat = _stack_left_right(sr_l, sr_r)
-    area_flat = _stack_left_right(area_l, area_r)
-
-    # 9. Baseline and likelihood
-    baseline = baseline_intercept[:, None] + baseline_slope[:, None] * (x - x_mid)
-    mu_y = mixture_signal(x, apex_flat, sl_flat, sr_flat, area_flat) + baseline
+    # --- Baseline and likelihood ---
+    apex_flat, sigma_left_flat, sigma_right_flat, area_flat = geom.flatten_to_mixture()
+    baseline = (
+        trace_params.baseline_intercept[:, None]
+        + trace_params.baseline_slope[:, None] * (x - window_midpoint_x)
+    )
+    mu_y = mixture_signal(x, apex_flat, sigma_left_flat, sigma_right_flat, area_flat) + baseline
     if y is not None:
         finite_mask = jnp.isfinite(y)
         numpyro.sample(
             "y",
-            dist.Normal(mu_y, sigma_y[:, None]).mask(finite_mask),
+            dist.Normal(mu_y, trace_params.sigma_y[:, None]).mask(finite_mask),
             obs=jnp.where(finite_mask, y, 0.0),
         )
     else:
-        numpyro.sample("y", dist.Normal(mu_y, sigma_y[:, None]))
+        numpyro.sample("y", dist.Normal(mu_y, trace_params.sigma_y[:, None]))
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +845,7 @@ def compute_derived_quantities(
     free_idx = jnp.asarray(model_inputs["free_peak_index"], dtype=jnp.int32)
     nonfree_idx_in = jnp.asarray(model_inputs["nonfree_idx"], dtype=jnp.int32)
     nonfree_position = jnp.asarray(model_inputs["nonfree_position"], dtype=jnp.int32)
-    artefact_side_v = jnp.asarray(model_inputs["artefact_side"], dtype=jnp.float32)
+    artefact_side_sign = jnp.asarray(model_inputs["artefact_side"], dtype=jnp.float32)
     apex_loc_arr = jnp.asarray(model_inputs["apex_loc"], dtype=jnp.float32)
     apex_offset_scale_arr = jnp.asarray(model_inputs["apex_offset_scale"], dtype=jnp.float32)
     trace_shift_scale = float(jnp.asarray(model_inputs["trace_shift_scale"]).max())
@@ -557,7 +859,8 @@ def compute_derived_quantities(
 
     n_total, n_trace = trace_shift_raw.shape
 
-    sl_base, sr_base = _halfwidths_to_split(log_w_left, log_w_right)  # [n_total, n_peak]
+    # [n_total, n_peak]
+    primary_sigma_left, primary_sigma_right = _halfwidths_to_split(log_w_left, log_w_right)
     trace_shift = trace_shift_scale * (
         trace_shift_raw - trace_shift_raw.mean(axis=1, keepdims=True)
     )  # [n_total, n_trace]
@@ -565,163 +868,130 @@ def compute_derived_quantities(
     apex_offset = apex_offset_scale_arr[None, None, :] * apex_offset_raw
     apex = apex_loc_arr[None, None, :] + trace_shift[:, :, None] + apex_offset  # [n_total, n_trace, n_peak]
 
-    # Second-component shapes
-    sl_art: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
-    sr_art: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
-    sl_r_free: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
-    sr_r_free: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
+    artefact_sigma_left: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
+    artefact_sigma_right: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
+    free_second_sigma_left: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
+    free_second_sigma_right: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
     separation_artefact: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
     separation_free: jax.Array = jnp.zeros((n_total, 0), dtype=jnp.float32)
 
     if n_artefact > 0:
         log_w_art = jnp.asarray(samples["log_w_art"])  # [n_total, n_artefact]
         w_art = jnp.exp(log_w_art) / _HWHM_FACTOR
-        sl_art = w_art
-        sr_art = w_art
+        artefact_sigma_left = w_art
+        artefact_sigma_right = w_art
 
     if n_free > 0:
         log_w_left_2 = jnp.asarray(samples["log_w_left_2"])  # [n_total, n_free]
         log_w_right_2 = jnp.asarray(samples["log_w_right_2"])
-        sl_r_free, sr_r_free = _halfwidths_to_split(log_w_left_2, log_w_right_2)
+        free_second_sigma_left, free_second_sigma_right = _halfwidths_to_split(
+            log_w_left_2, log_w_right_2
+        )
+
+    area_dominant = (
+        jnp.asarray(samples["area_dominant"])
+        if n_nonfree > 0
+        else jnp.zeros((n_total, n_trace, 0), dtype=jnp.float32)
+    )  # [n_total, n_trace, n_nonfree]
 
     if n_artefact > 0:
         separation_artefact = jnp.exp(
             jnp.asarray(samples["log_separation_artefact"])
         )  # [n_total, n_artefact]
 
-        area_artefact_typical = jnp.asarray(samples["area_artefact_typical"])
-        # Artefact areas are constant across traces (no per-trace offset in model).
-        area_artefact = jnp.broadcast_to(
-            area_artefact_typical[:, None, :], (n_total, n_trace, n_artefact)
+        log_area_art_mean = jnp.asarray(samples["log_area_art_mean"])  # [n_total, n_artefact]
+        log_area_art_raw = jnp.asarray(samples["log_area_art_raw"])  # [n_total, n_trace, n_artefact]
+        area_artefact = jnp.exp(
+            log_area_art_mean[:, None, :] + hyperparams.area_art_trace_log_scale * log_area_art_raw
         )  # [n_total, n_trace, n_artefact]
     else:
         area_artefact = jnp.zeros((n_total, n_trace, 0), dtype=jnp.float32)
 
     if n_free > 0:
         separation_free = jnp.exp(jnp.asarray(samples["log_separation_free"]))  # [n_total, n_free]
+        area_total_free = jnp.asarray(samples["area_total_free"])  # [n_total, n_trace, n_free]
+        area_frac_left_free = jnp.asarray(samples["area_frac_left_free"])
+    else:
+        area_total_free = jnp.zeros((n_total, n_trace, 0), dtype=jnp.float32)
+        area_frac_left_free = jnp.zeros((n_total, n_trace, 0), dtype=jnp.float32)
 
     baseline_slope = jnp.asarray(samples["baseline_slope"])  # [n_total, n_trace]
 
-    # Left/right assembly: [n_total, n_trace, n_peak]
-    apex_l: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    apex_r: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    sl_l: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    sl_r: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    sr_l: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    sr_r: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    area_l: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    area_r: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-    separation_out: jax.Array = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
-
+    geom = SplitGeometry.zeros((n_total, n_trace, n_peak))
     if n_nonfree > 0:
-        area_dominant = jnp.asarray(samples["area_dominant"])  # [n_total, n_trace, n_nonfree]
-        sl_nf = jnp.broadcast_to(sl_base[:, None, nonfree_idx_in], (n_total, n_trace, n_nonfree))
-        sr_nf = jnp.broadcast_to(sr_base[:, None, nonfree_idx_in], (n_total, n_trace, n_nonfree))
-        apex_l = apex_l.at[:, :, nonfree_idx_in].set(apex[:, :, nonfree_idx_in])
-        apex_r = apex_r.at[:, :, nonfree_idx_in].set(apex[:, :, nonfree_idx_in])
-        sl_l = sl_l.at[:, :, nonfree_idx_in].set(sl_nf)
-        sl_r = sl_r.at[:, :, nonfree_idx_in].set(sl_nf)
-        sr_l = sr_l.at[:, :, nonfree_idx_in].set(sr_nf)
-        sr_r = sr_r.at[:, :, nonfree_idx_in].set(sr_nf)
-        area_l = area_l.at[:, :, nonfree_idx_in].set(area_dominant)
-
+        geom = _assemble_nonfree(
+            geom, apex, primary_sigma_left, primary_sigma_right,
+            area_dominant, nonfree_idx_in,
+        )
     if n_artefact > 0:
-        artefact_nonfree_idx = nonfree_position[artefact_idx]
-        n_art = int(artefact_idx.shape[0])
-        apex_art_s = apex[:, :, artefact_idx]
-        sl_dom = jnp.broadcast_to(sl_base[:, None, artefact_idx], (n_total, n_trace, n_art))
-        sr_dom = jnp.broadcast_to(sr_base[:, None, artefact_idx], (n_total, n_trace, n_art))
-        sl_a_bc = jnp.broadcast_to(sl_art[:, None, :], (n_total, n_trace, n_art))
-        sr_a_bc = jnp.broadcast_to(sr_art[:, None, :], (n_total, n_trace, n_art))
-        area_dom_art = jnp.asarray(samples["area_dominant"])[:, :, artefact_nonfree_idx]
-        sep_art_bc = jnp.broadcast_to(separation_artefact[:, None, :], (n_total, n_trace, n_art))
-
-        art_left = artefact_side_v[artefact_idx] < 0.0
-        apex_l_art = jnp.where(art_left[None, None, :], apex_art_s - sep_art_bc, apex_art_s)
-        apex_r_art = jnp.where(art_left[None, None, :], apex_art_s, apex_art_s + sep_art_bc)
-        sl_l_art = jnp.where(art_left[None, None, :], sl_a_bc, sl_dom)
-        sl_r_art = jnp.where(art_left[None, None, :], sl_dom, sl_a_bc)
-        sr_l_art = jnp.where(art_left[None, None, :], sr_a_bc, sr_dom)
-        sr_r_art = jnp.where(art_left[None, None, :], sr_dom, sr_a_bc)
-        area_l_art = jnp.where(art_left[None, None, :], area_artefact, area_dom_art)
-        area_r_art = jnp.where(art_left[None, None, :], area_dom_art, area_artefact)
-
-        apex_l = apex_l.at[:, :, artefact_idx].set(apex_l_art)
-        apex_r = apex_r.at[:, :, artefact_idx].set(apex_r_art)
-        sl_l = sl_l.at[:, :, artefact_idx].set(sl_l_art)
-        sl_r = sl_r.at[:, :, artefact_idx].set(sl_r_art)
-        sr_l = sr_l.at[:, :, artefact_idx].set(sr_l_art)
-        sr_r = sr_r.at[:, :, artefact_idx].set(sr_r_art)
-        area_l = area_l.at[:, :, artefact_idx].set(area_l_art)
-        area_r = area_r.at[:, :, artefact_idx].set(area_r_art)
-        separation_out = separation_out.at[:, :, artefact_idx].set(sep_art_bc)
-
+        geom = _assemble_artefact(
+            geom, apex, primary_sigma_left, primary_sigma_right,
+            artefact_sigma_left, artefact_sigma_right,
+            area_dominant, area_artefact, separation_artefact,
+            artefact_idx, nonfree_position, artefact_side_sign,
+        )
     if n_free > 0:
-        n_free_int = int(free_idx.shape[0])
-        sl_dom_free = jnp.broadcast_to(sl_base[:, None, free_idx], (n_total, n_trace, n_free_int))
-        sr_dom_free = jnp.broadcast_to(sr_base[:, None, free_idx], (n_total, n_trace, n_free_int))
-        sl_rf_bc = jnp.broadcast_to(sl_r_free[:, None, :], (n_total, n_trace, n_free_int))
-        sr_rf_bc = jnp.broadcast_to(sr_r_free[:, None, :], (n_total, n_trace, n_free_int))
-        area_total_free_s = jnp.asarray(samples["area_total_free"])
-        area_frac_left = jnp.asarray(samples["area_frac_left_free"])
-        apex_free = apex[:, :, free_idx]
-        sep_free_bc = jnp.broadcast_to(separation_free[:, None, :], (n_total, n_trace, n_free_int))
+        geom = _assemble_free(
+            geom, apex, primary_sigma_left, primary_sigma_right,
+            free_second_sigma_left, free_second_sigma_right,
+            area_total_free, area_frac_left_free, separation_free,
+            free_idx,
+        )
 
-        apex_l_free = apex_free - 0.5 * sep_free_bc
-        apex_r_free = apex_free + 0.5 * sep_free_bc
-        area_l_free = area_total_free_s * area_frac_left
-        area_r_free = area_total_free_s * (1.0 - area_frac_left)
-
-        apex_l = apex_l.at[:, :, free_idx].set(apex_l_free)
-        apex_r = apex_r.at[:, :, free_idx].set(apex_r_free)
-        sl_l = sl_l.at[:, :, free_idx].set(sl_dom_free)
-        sl_r = sl_r.at[:, :, free_idx].set(sl_rf_bc)
-        sr_l = sr_l.at[:, :, free_idx].set(sr_dom_free)
-        sr_r = sr_r.at[:, :, free_idx].set(sr_rf_bc)
-        area_l = area_l.at[:, :, free_idx].set(area_l_free)
-        area_r = area_r.at[:, :, free_idx].set(area_r_free)
-        separation_out = separation_out.at[:, :, free_idx].set(sep_free_bc)
+    # Per-peak separation array — CDQ-specific diagnostic, not part of the mixture signal.
+    separation_out = jnp.zeros((n_total, n_trace, n_peak), dtype=jnp.float32)
+    if n_artefact > 0:
+        separation_out = separation_out.at[..., artefact_idx].set(
+            _broadcast_to_trace_axis(
+                separation_artefact, (n_total, n_trace, artefact_idx.shape[0])
+            )
+        )
+    if n_free > 0:
+        separation_out = separation_out.at[..., free_idx].set(
+            _broadcast_to_trace_axis(
+                separation_free, (n_total, n_trace, free_idx.shape[0])
+            )
+        )
 
     return {
-        "sl_base": sl_base,
-        "sr_base": sr_base,
+        # Dict keys are an external API (fitter.py + tests read them) — preserve byte-for-byte.
+        "sl_base": primary_sigma_left,
+        "sr_base": primary_sigma_right,
         "trace_shift": trace_shift,
         "apex": apex,
         "baseline_slope": baseline_slope,
-        "apex_l": apex_l,
-        "apex_r": apex_r,
-        "sl_l": sl_l,
-        "sl_r": sl_r,
-        "sr_l": sr_l,
-        "sr_r": sr_r,
-        "area_l": area_l,
-        "area_r": area_r,
-        "area_total": area_l + area_r,
+        "apex_l": geom.apex_left,
+        "apex_r": geom.apex_right,
+        "sl_l": geom.sigma_left_of_left,
+        "sl_r": geom.sigma_left_of_right,
+        "sr_l": geom.sigma_right_of_left,
+        "sr_r": geom.sigma_right_of_right,
+        "area_l": geom.area_left,
+        "area_r": geom.area_right,
+        "area_total": geom.area_left + geom.area_right,
         "separation": separation_out,
     }
 
 
 # ---------------------------------------------------------------------------
-# Summary parameter names (for ArviZ / posterior extraction)
+# Posterior variable filtering
 # ---------------------------------------------------------------------------
 
-SUMMARY_PARAMETER_NAMES = (
-    "trace_shift",
-    "apex",
-    "log_w_left",
-    "log_w_right",
-    "log_w_art",
-    "log_w_left_2",
-    "log_w_right_2",
-    "log_separation_artefact",
-    "log_separation_free",
-    "area_l",
-    "area_r",
-    "area_total",
-    "area_artefact_typical",
-    "baseline_intercept",
-    "baseline_slope",
-    "sigma_y",
-)
-
-TRACE_PARAMETER_NAMES = SUMMARY_PARAMETER_NAMES
+# Variables that are never interpretable on their own and should be excluded
+# from ArviZ summary tables and trace plots.  Everything else in the posterior
+# is shown automatically — no allowlist to maintain.
+INTERNAL_POSTERIOR_VARS: frozenset[str] = frozenset({
+    # Non-centred parameterisation raw unit-Normal samples
+    "trace_shift_raw",
+    "apex_offset_raw",
+    "log_area_art_raw",
+    # Intermediate geometric arrays (half-sigma per component, per-side apex)
+    "sl_base",
+    "sr_base",
+    "apex_l",
+    "apex_r",
+    "sl_l",
+    "sl_r",
+    "sr_l",
+    "sr_r",
+})

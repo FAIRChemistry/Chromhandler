@@ -33,25 +33,11 @@ def test_model_hyperparams_defaults_all_finite_positive() -> None:
 
 
 @pytest.mark.unit
-def test_model_hyperparams_snr_thresholds_ordered() -> None:
-    """S/N thresholds: low < high."""
-    hp = ModelHyperparams()
-    assert hp.area_snr_threshold_low < hp.area_snr_threshold_high
-
-
-@pytest.mark.unit
-def test_model_hyperparams_area_log_sigma_ordered() -> None:
-    """Area prior spread: high-SNR < low-SNR (tight < wide)."""
-    hp = ModelHyperparams()
-    assert hp.area_log_sigma_high_snr < hp.area_log_sigma_low_snr
-
-
-@pytest.mark.unit
 def test_model_hyperparams_custom_override() -> None:
     """Custom values are stored correctly."""
-    hp = ModelHyperparams(w_prior_log_scale=0.6, area_log_sigma_high_snr=0.2)
-    assert hp.w_prior_log_scale == 0.6
-    assert hp.area_log_sigma_high_snr == 0.2
+    hp = ModelHyperparams(area_log_sigma=0.2, free_sep_log_sigma=0.5)
+    assert hp.area_log_sigma == 0.2
+    assert hp.free_sep_log_sigma == 0.5
 
 
 # ---------------------------------------------------------------------------
