@@ -47,7 +47,7 @@ def create_overview_panel(handler: Handler) -> Panel:
     total_chromatograms = sum(len(sample.chromatograms) for sample in handler.samples)
     overview_content.append(f"[bold]Samples:[/bold] {len(handler.samples)}")
     overview_content.append(f"[bold]Chromatograms:[/bold] {total_chromatograms}")
-    overview_content.append(f"[bold]Peak Windows:[/bold] {len(handler.peak_windows)}")
+    overview_content.append(f"[bold]Peak Annotations:[/bold] {len(handler.peak_annotations)}")
     if total_peaks > 0:
         assignment_rate = (assigned_peaks / total_peaks) * 100
         overview_content.append(

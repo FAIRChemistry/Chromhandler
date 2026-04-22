@@ -1187,7 +1187,7 @@ class Handler(BaseModel):
         on_multiple: Literal["raise", "skip"] = "raise",
         silent: bool = False,
     ) -> None:
-        """Assign molecules to existing peaks using the handler's peak windows.
+        """Assign molecules to existing peaks using the handler's peak annotations.
 
         For each configured window, **every** chromatogram in each sample is
         considered (typical time-course: one sample, many traces at different
