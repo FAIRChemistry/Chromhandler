@@ -316,9 +316,11 @@ class Fitter:
         then NaN-padded to a common length so the resulting arrays are
         rectangular.
 
-        The returned fitter has **no peak or baseline annotations** registered.
-        Use :meth:`add_baseline_annotation` and :meth:`add_peak_annotation` (or
-        :meth:`add_subset`) to attach annotations before calling :meth:`fit`.
+        Any :attr:`~chromhandler.handler.Handler.peak_annotations` registered on
+        the handler are inherited verbatim — the user does **not** need to
+        re-register them on the fitter. Baseline annotations are not inherited
+        (they are fitter-local); attach them via
+        :meth:`add_baseline_annotation` before :meth:`fit`.
 
         Args:
             handler: A :class:`~chromhandler.handler.Handler` instance.
@@ -326,16 +328,14 @@ class Fitter:
                 all samples are used.
 
         Returns:
-            A fully initialised :class:`Fitter` with no annotations.
+            A fully initialised :class:`Fitter` with peak annotations inherited
+            from the handler.
 
         Example::
 
+            handler.add_peak_annotation("s0", 2.8, 3.2)
             fitter = Fitter.from_handler(handler)
             fitter.add_baseline_annotation(BaselineAnnotation(rt_min=0.5, rt_max=1.0))
-            fitter.add_peak_annotation(
-                PeakAnnotation(molecule_id="s0", rt_min=2.8, rt_max=3.2, mode="single")
-            )
-            fitter.align()
             fitter.fit()
         """
         samples = [
@@ -353,10 +353,12 @@ class Fitter:
 
         time_arr, signal_arr = pad_traces(time_lists, signal_lists)
 
+        inherited_peaks = list(handler.peak_annotations.values())  # type: ignore[attr-defined]
+
         return cls(
             time_arr,
             signal_arr,
-            peaks=None,
+            peaks=inherited_peaks or None,  # type: ignore[arg-type]
             baselines=None,
             trace_sample_ids=trace_sample_ids,
             trace_chromatogram_ids=trace_chrom_ids,
