@@ -33,3 +33,28 @@ def test_der_snr_unaffected_by_linear_baseline() -> None:
     stats = compute_trace_statistics(time, signal)
 
     assert stats.sigma_noise == pytest.approx(true_sigma, rel=0.07)
+
+
+def test_rejects_non_1d_signal() -> None:
+    with pytest.raises(ValueError, match="1-D"):
+        compute_trace_statistics(np.zeros((4, 4)), np.zeros((4, 4)))
+
+
+def test_rejects_too_short_signal() -> None:
+    with pytest.raises(ValueError, match="at least 3"):
+        compute_trace_statistics(np.array([0.0, 1.0]), np.array([0.0, 1.0]))
+
+
+def test_tolerates_interior_nans() -> None:
+    """NaNs in the signal drop out of the 2nd-difference median, not crash."""
+    rng = np.random.default_rng(42)
+    n = 5000
+    y = 10.0 + rng.normal(0.0, 1.5, size=n)
+    y[1000:1010] = np.nan
+    stats = compute_trace_statistics(np.linspace(0, 1, n), y)
+    assert stats.sigma_noise == pytest.approx(1.5, rel=0.07)
+
+
+def test_rejects_all_nan_signal() -> None:
+    with pytest.raises(ValueError, match="No finite"):
+        compute_trace_statistics(np.linspace(0, 1, 100), np.full(100, np.nan))
