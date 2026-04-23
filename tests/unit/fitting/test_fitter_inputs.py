@@ -260,3 +260,40 @@ def test_fitter_1d_input_raises() -> None:
     signal = np.ones(100)
     with pytest.raises(ValueError, match="2-D"):
         Fitter(time, signal)
+
+
+@pytest.mark.unit
+def test_from_handler_populates_trace_stats_if_missing() -> None:
+    """Users who never call cut_chromatograms still get trace_stats."""
+    from chromhandler.fitting.fitter import Fitter
+    from chromhandler.handler import Handler
+    from chromhandler.model import Chromatogram, Sample
+
+    rng = np.random.default_rng(7)
+    n = 4000
+    handler = Handler()
+    for i in range(2):
+        time = np.linspace(0.0, 10.0, n)
+        signal = 100.0 + rng.normal(0.0, 0.8, size=n)
+        handler.samples.append(
+            Sample(
+                id=f"s{i}",
+                chromatograms=[
+                    Chromatogram(
+                        id=f"c{i}", sample_id=f"s{i}",
+                        time=time.tolist(), signal=signal.tolist(),
+                    )
+                ],
+            )
+        )
+
+    assert all(
+        c.trace_stats is None for s in handler.samples for c in s.chromatograms
+    )
+
+    _ = Fitter.from_handler(handler)
+
+    for sample in handler.samples:
+        for chrom in sample.chromatograms:
+            assert chrom.trace_stats is not None
+            assert chrom.trace_stats.sigma_noise == pytest.approx(0.8, rel=0.1)

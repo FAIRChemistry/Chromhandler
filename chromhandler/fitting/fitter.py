@@ -339,6 +339,10 @@ class Fitter:
             fitter.add_baseline_annotation(BaselineAnnotation(rt_min=0.5, rt_max=1.0))
             fitter.fit()
         """
+        # Ensure every chromatogram has full-trace stats before we read
+        # signal arrays. No-op if already populated.
+        handler.compute_trace_statistics(overwrite=False)
+
         samples = [
             s
             for s in handler.samples
