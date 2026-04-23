@@ -236,6 +236,7 @@ class Fitter:
                 jnp.asarray(self.signal),
                 peaks=self.peaks,
                 baselines=self.baselines,
+                sigma_noise=jnp.asarray(self.trace_sigma_noise),
             )
         return self._bp_direct
 

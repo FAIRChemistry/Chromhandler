@@ -14,8 +14,6 @@ if TYPE_CHECKING:
 _DEFAULT_PERCENTILE: Final = 15.0
 _DEFAULT_EDGE_FRACTION: Final = 0.20
 _MIN_EDGE_POINTS: Final = 6
-_MIN_INTERCEPT_SCALE: Final = 1.0
-_MIN_SLOPE_SCALE: Final = 1e-3
 
 
 @dataclass(frozen=True)
@@ -33,6 +31,7 @@ def estimate_baseline(
     signal: jax.Array,
     *,
     peaks: list[PeakAnnotation],
+    sigma_noise: jax.Array,
     baselines: list[BaselineAnnotation] | None = None,
     edge_fraction: float = _DEFAULT_EDGE_FRACTION,
     percentile: float = _DEFAULT_PERCENTILE,
@@ -49,13 +48,16 @@ def estimate_baseline(
       window is too narrow for edge extraction.
 
     A per-trace OLS line is then fitted through the anchor points.
-    Prior scales are derived from the OLS standard errors, capped at
-    twice the across-trace robust spread.
+    Prior scales are derived from the OLS standard errors, floored at a
+    per-trace physical scale: intercept floor = ``sigma_noise``, slope
+    floor = ``sigma_noise / time_span`` (falling back to ``sigma_noise``
+    when ``time_span <= 0``).
 
     Args:
         time:          ``[n_trace, n_time]`` retention-time axis.
         signal:        ``[n_trace, n_time]`` signal matrix.
         peaks:         Peak window annotations.
+        sigma_noise:   ``[n_trace]`` per-trace noise estimate (DER_SNR).
         baselines:     Optional explicit baseline region annotations.
         edge_fraction: Fraction of each window to use for edge anchors.
         percentile:    Signal percentile threshold for anchor selection.
@@ -67,6 +69,11 @@ def estimate_baseline(
         raise ValueError("time and signal must be 2-D [n_trace, n_time].")
     if time.shape != signal.shape:
         raise ValueError("time and signal shape mismatch.")
+    sigma_noise = jnp.asarray(sigma_noise)
+    if sigma_noise.shape != (time.shape[0],):
+        raise ValueError(
+            f"sigma_noise must have shape [n_trace]={time.shape[0]}, got {sigma_noise.shape}."
+        )
     if not (0.0 < float(percentile) <= 100.0):
         raise ValueError("percentile must satisfy 0 < percentile <= 100.")
     if not (0.0 < float(edge_fraction) <= 0.5):
@@ -84,8 +91,16 @@ def estimate_baseline(
     )
     intercept, slope, se_intercept, se_slope = _fit_line(time, signal, anchor_mask)
 
-    intercept_scale = _scale_from_se(se_intercept, floor=_MIN_INTERCEPT_SCALE)
-    slope_scale = _scale_from_se(se_slope, floor=_MIN_SLOPE_SCALE)
+    # Per-trace time span for slope floor. Fall back to sigma_noise when span <= 0.
+    time_span = time[:, -1] - time[:, 0]
+    slope_floor = jnp.where(
+        time_span > 0.0,
+        sigma_noise / jnp.where(time_span > 0.0, time_span, 1.0),
+        sigma_noise,
+    )
+
+    intercept_scale = _scale_from_se(se_intercept, floor=sigma_noise)
+    slope_scale = _scale_from_se(se_slope, floor=slope_floor)
 
     return BaselinePriors(
         intercept=intercept,
@@ -240,12 +255,15 @@ def _fit_line(
     return intercept, slope, se_intercept, se_slope
 
 
-def _scale_from_se(se: jax.Array, *, floor: float) -> jax.Array:
-    """Use OLS standard errors directly as prior scales, with a floor."""
-    finite = se[jnp.isfinite(se) & (se > 0.0)]
-    fallback = max(float(jnp.nanmedian(finite)), float(floor)) if int(finite.size) > 0 else float(floor)
+def _scale_from_se(se: jax.Array, *, floor: jax.Array) -> jax.Array:
+    """Use OLS standard errors as prior scales, with a per-trace floor.
+
+    Args:
+        se:    ``[n_trace]`` standard errors (may contain NaN for degenerate fits).
+        floor: ``[n_trace]`` per-trace minimum scale, strictly positive.
+    """
     return jnp.where(
         jnp.isfinite(se) & (se > 0.0),
         jnp.maximum(se, floor),
-        jnp.asarray(fallback, dtype=se.dtype),
+        floor,
     )
