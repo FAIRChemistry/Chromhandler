@@ -38,6 +38,11 @@ _SinglePeakFixture = tuple[list[PeakAnnotation], _Arr, _Arr, _Arr]
 _HWHM_FACTOR = math.sqrt(2.0 * math.log(2.0))
 
 
+def _default_sigma(n_trace: int) -> npt.NDArray[np.float64]:
+    """Small constant per-trace sigma_noise for unit tests."""
+    return np.full(n_trace, 1.0, dtype=np.float64)
+
+
 def _gaussian(
     x: npt.NDArray[np.float64], apex: float, sigma: float, area: float
 ) -> npt.NDArray[np.float64]:
@@ -181,15 +186,15 @@ def test_snr_per_trace_known_signal() -> None:
     from chromhandler.fitting.priors import _estimate_snr, _trace_fwhm_geometry
 
     geo = _trace_fwhm_geometry(x, y)
-    snr = _estimate_snr(y, geo.apex_height)
+    snr = _estimate_snr(geo.apex_height, _default_sigma(y.shape[0]))
 
     # Peak height ≈ area / (sigma * sqrt(2π))
     expected_height = area / (sigma * math.sqrt(2 * math.pi))
     for t in range(5):
         # SNR should be > 1 for a clear peak
         assert snr[t] > 1.0, f"Trace {t}: SNR={snr[t]:.2f} unexpectedly low"
-        # Should be in a reasonable range of expected_height / noise_std
-        assert snr[t] < 10 * (expected_height / noise_std), f"Trace {t}: SNR={snr[t]:.2f} implausibly high"
+        # snr == apex_height / 1.0 → bounded by true peak height (within sampling)
+        assert snr[t] < 10 * expected_height, f"Trace {t}: SNR={snr[t]:.2f} implausibly high"
 
 
 @pytest.mark.unit
@@ -202,10 +207,34 @@ def test_snr_per_trace_all_noise_no_crash() -> None:
     from chromhandler.fitting.priors import _estimate_snr, _trace_fwhm_geometry
 
     geo = _trace_fwhm_geometry(x, y)
-    snr = _estimate_snr(y, geo.apex_height)
+    snr = _estimate_snr(geo.apex_height, _default_sigma(y.shape[0]))
 
     assert np.all(np.isfinite(snr)), "SNR contains NaN/Inf for pure noise"
     assert np.all(snr >= 0.0), "SNR contains negative values"
+
+
+@pytest.mark.unit
+def test_estimate_snr_uses_supplied_sigma_noise() -> None:
+    """_estimate_snr returns apex_height / sigma_noise, elementwise."""
+    from chromhandler.fitting.priors import _estimate_snr
+
+    apex_height = np.array([100.0, 200.0, 50.0])
+    sigma_noise = np.array([2.0, 4.0, 1.0])
+    snr = _estimate_snr(apex_height, sigma_noise)
+    np.testing.assert_allclose(snr, [50.0, 50.0, 50.0])
+
+
+@pytest.mark.unit
+def test_build_peak_priors_requires_sigma_noise_kwarg() -> None:
+    """build_peak_priors' sigma_noise kwarg is required (no default)."""
+    from chromhandler.fitting.priors import build_peak_priors
+
+    x = np.linspace(0.0, 10.0, 200)
+    signal = np.full((1, 200), 100.0) + np.exp(-((x - 5.0) ** 2))[None, :]
+    baseline = np.full((1, 200), 100.0)
+    peaks = [PeakAnnotation(molecule_id="m", rt_min=4.0, rt_max=6.0)]
+    with pytest.raises(TypeError, match="sigma_noise"):
+        build_peak_priors(peaks, x, signal, baseline)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +303,7 @@ def test_build_peak_priors_single_mode_fields(
 ) -> None:
     """build_peak_priors returns correct field types and shapes for single mode."""
     peaks, x, signal, baseline = synthetic_single_peak
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
 
     assert len(priors) == 1
     p = priors[0]
@@ -304,7 +333,7 @@ def test_build_peak_priors_apex_near_true_value(
 ) -> None:
     """Apex loc should be within 10% of the window width from the true apex."""
     peaks, x, signal, baseline = synthetic_single_peak
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     p = priors[0]
 
     true_apex = 3.0
@@ -318,7 +347,7 @@ def test_build_peak_priors_halfwidths_near_true(
 ) -> None:
     """w_left_loc and w_right_loc should recover true HWHM within 20%."""
     peaks, x, signal, baseline = synthetic_single_peak
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     p = priors[0]
 
     true_sigma = 0.04
@@ -347,7 +376,7 @@ def test_build_peak_priors_artefact_mode_area_art_shared() -> None:
             mode="artefact_doublet", artefact_side="right",
         )
     ]
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     assert priors[0].area_art_shared > 0.0
 
 
@@ -365,7 +394,7 @@ def test_build_peak_priors_free_doublet_mode() -> None:
     ])
     baseline = np.zeros_like(signal)
     peaks = [PeakAnnotation(molecule_id="AB", rt_min=2.75, rt_max=3.25, mode="free_doublet")]
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     assert priors[0].n_components == 2
 
 
@@ -377,7 +406,7 @@ def test_build_peak_priors_empty_window_raises() -> None:
     baseline = np.zeros((3, 100))
     peaks = [PeakAnnotation(molecule_id="X", rt_min=5.0, rt_max=6.0, mode="single")]
     with pytest.raises(ValueError, match="no finite data points"):
-        build_peak_priors(peaks, x, signal, baseline)
+        build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +418,7 @@ def test_build_peak_priors_empty_window_raises() -> None:
 def test_geometric_priors_to_arrays_keys(synthetic_single_peak: _SinglePeakFixture) -> None:
     """Output dict has exactly the expected keys."""
     peaks, x, signal, baseline = synthetic_single_peak
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     arrays = geometric_priors_to_arrays(priors)
 
     expected_keys = {
@@ -423,7 +452,7 @@ def test_geometric_priors_to_arrays_shapes() -> None:
         PeakAnnotation(molecule_id="B", rt_min=2.2, rt_max=2.8, mode="single"),
         PeakAnnotation(molecule_id="C", rt_min=3.7, rt_max=4.3, mode="single"),
     ]
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     arrays = geometric_priors_to_arrays(priors)
 
     n_peak = 3
@@ -462,7 +491,7 @@ def test_geometric_priors_to_arrays_artefact_shared_shape() -> None:
         PeakAnnotation(molecule_id="A", rt_min=0.7, rt_max=1.3,
                        mode="artefact_doublet", artefact_side="right"),
     ]
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     arrays = geometric_priors_to_arrays(priors)
     assert arrays["area_art_shared"].shape == (1,)
 
@@ -494,7 +523,9 @@ def test_refine_apex_with_trace_shift_detects_drift() -> None:
     ])
     baseline = np.zeros_like(signal)
     peaks = [PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=3.3, mode="single")]
-    priors, apex_traces = build_peak_priors(peaks, x, signal, baseline)
+    priors, apex_traces = build_peak_priors(
+        peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0])
+    )
     refined, trace_shift_scale = refine_apex_priors_with_trace_shift(priors, apex_traces)
 
     assert trace_shift_scale > 0.0
@@ -523,7 +554,7 @@ def test_refine_apex_empty_priors() -> None:
 def test_summarise_priors_format(synthetic_single_peak: _SinglePeakFixture) -> None:
     """summarise_priors returns a non-empty string with header and data rows."""
     peaks, x, signal, baseline = synthetic_single_peak
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     summary = summarise_priors(priors)
 
     assert isinstance(summary, str)

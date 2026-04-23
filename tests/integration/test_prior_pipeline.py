@@ -28,6 +28,10 @@ DATA_DIR = Path("/Users/max/code/sahh-kinetics-hplc/data")
 _HWHM_FACTOR = math.sqrt(2.0 * math.log(2.0))
 
 
+def _default_sigma(n_trace: int) -> npt.NDArray[np.float64]:
+    return np.full(n_trace, 1.0, dtype=np.float64)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -148,7 +152,7 @@ def test_prior_pipeline_recovers_symmetric_hwhm() -> None:
     baseline = np.zeros_like(signal)
     peaks = [PeakAnnotation(molecule_id="A", rt_min=2.75, rt_max=3.25, mode="single")]
 
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     p = priors[0]
 
     assert abs(p.w_left_loc - true_hwhm) < 0.15 * true_hwhm, (
@@ -175,7 +179,7 @@ def test_prior_pipeline_recovers_asymmetric_hwhm() -> None:
     baseline = np.zeros_like(signal)
     peaks = [PeakAnnotation(molecule_id="A", rt_min=2.75, rt_max=3.25, mode="single")]
 
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     p = priors[0]
 
     # Direction: right-tailing → w_right > w_left
@@ -210,8 +214,9 @@ def test_prior_pipeline_snr_scales_with_signal_amplitude() -> None:
     ])
     baseline = np.zeros((n_trace, n_time))
 
-    priors_low, _ = build_peak_priors(peaks, x, signal_low, baseline)
-    priors_high, _ = build_peak_priors(peaks, x, signal_high, baseline)
+    sigma_noise = _default_sigma(signal_low.shape[0])
+    priors_low, _ = build_peak_priors(peaks, x, signal_low, baseline, sigma_noise=sigma_noise)
+    priors_high, _ = build_peak_priors(peaks, x, signal_high, baseline, sigma_noise=sigma_noise)
 
     snr_low = float(np.median(priors_low[0].snr_per_trace))
     snr_high = float(np.median(priors_high[0].snr_per_trace))
@@ -235,7 +240,7 @@ def test_prior_pipeline_area_gaussian_reasonable_magnitude() -> None:
     baseline = np.zeros_like(signal)
     peaks = [PeakAnnotation(molecule_id="A", rt_min=2.75, rt_max=3.25, mode="single")]
 
-    priors, _ = build_peak_priors(peaks, x, signal, baseline)
+    priors, _ = build_peak_priors(peaks, x, signal, baseline, sigma_noise=_default_sigma(signal.shape[0]))
     area_est = np.median(priors[0].area_gaussian_pt)
 
     assert abs(area_est - area_true) < 0.5 * area_true, (

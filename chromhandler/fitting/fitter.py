@@ -212,7 +212,9 @@ class Fitter:
         x = self.common_time()
         baseline = self.baseline_signal()  # cached; compute_model_inputs hits the same cache
 
-        priors, apex_traces = build_peak_priors(self.peaks, x, self.signal, baseline)
+        priors, apex_traces = build_peak_priors(
+            self.peaks, x, self.signal, baseline, sigma_noise=self.trace_sigma_noise
+        )
 
         x_finite = x[np.isfinite(x)]
         apex_scale_floor = (

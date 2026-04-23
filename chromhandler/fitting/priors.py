@@ -581,19 +581,19 @@ def _gaussian_area_from_halfwidths(
 
 
 def _estimate_snr(
-    y_win: NDArray[np.float64],
-    apex_height: jax.Array,
+    apex_height: jax.Array | NDArray[np.float64],
+    sigma_noise: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    """Per-trace signal-to-noise ratio from first-difference MAD.
+    """Per-trace signal-to-noise ratio = ``apex_height / sigma_noise``.
 
-    Uses the median absolute deviation of first differences as a robust
-    noise estimator (no baseline regions required).
+    Both inputs are per-trace arrays of shape ``[n_trace]``. ``sigma_noise``
+    comes from :class:`chromhandler.trace_statistics.TraceStatistics` via
+    :attr:`Fitter.trace_sigma_noise` and is already strictly positive.
     """
-    diffs = np.abs(np.diff(np.asarray(y_win, dtype=float), axis=1))
-    # MAD of first differences → noise std (factor 0.7071 = 1/sqrt(2))
-    noise_est = float(np.median(diffs)) * 0.7071
-    noise_est = max(noise_est, _FLOAT_MIN)
-    return np.maximum(np.asarray(apex_height, dtype=float) / noise_est, 0.0)
+    return np.maximum(
+        np.asarray(apex_height, dtype=float) / np.asarray(sigma_noise, dtype=float),
+        0.0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +606,8 @@ def build_peak_priors(
     x: NDArray[np.float64],
     signal: NDArray[np.float64],
     baseline: NDArray[np.float64],
+    *,
+    sigma_noise: NDArray[np.float64],
 ) -> tuple[list[GeometricPeakPriors], PeakApexTraces]:
     """Build window-geometry-based priors and per-trace apex data in one pass.
 
@@ -624,6 +626,9 @@ def build_peak_priors(
         Raw signal matrix, shape ``[n_trace, n_time]``.
     baseline:
         Estimated baseline matrix from ``baseline.py``, shape ``[n_trace, n_time]``.
+    sigma_noise:
+        Per-trace noise estimate, shape ``[n_trace]``.  Used for the
+        signal-to-noise diagnostic on ``GeometricPeakPriors``.
 
     Returns
     -------
@@ -650,6 +655,12 @@ def build_peak_priors(
     if signal.shape != baseline.shape:
         raise ValueError(
             f"signal and baseline must have the same shape, got {signal.shape} vs {baseline.shape}."
+        )
+
+    sigma_noise = np.asarray(sigma_noise, dtype=float)
+    if sigma_noise.shape != (signal.shape[0],):
+        raise ValueError(
+            f"sigma_noise must have shape [n_trace]={signal.shape[0]}, got {sigma_noise.shape}."
         )
 
     n_trace = int(signal.shape[0])
@@ -710,7 +721,7 @@ def build_peak_priors(
             area_art_per_trace = np.full(n_trace, np.nan)
 
         # --- Signal-to-noise ratio ---
-        snr_per_trace = _estimate_snr(y_win, geometry.apex_height)
+        snr_per_trace = _estimate_snr(geometry.apex_height, sigma_noise)
 
         # --- Per-trace apex data for trace-shift refinement ---
         fwhm_apex_trace[:, peak_idx] = np.asarray(
