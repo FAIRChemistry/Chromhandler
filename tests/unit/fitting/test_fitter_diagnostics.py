@@ -44,6 +44,8 @@ def _make_fitter(n_trace: int = 3, n_time: int = 150) -> Fitter:
     ])
     time = np.tile(x, (n_trace, 1))
     fitter = Fitter(time, signal)
+    assert fitter.trace_sigma_noise.shape == (fitter.n_traces,)
+    assert np.all(fitter.trace_sigma_noise > 0.0)
     fitter.add_baseline_annotation(BaselineAnnotation(rt_min=2.5, rt_max=2.62))
     fitter.add_baseline_annotation(BaselineAnnotation(rt_min=3.38, rt_max=3.5))
     fitter.add_peak_annotation(PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=3.3, mode="single"))
@@ -210,6 +212,8 @@ def test_plot_geometric_diagnostic_flags_synthetic_outlier() -> None:
     time = np.tile(x, (n_trace, 1))
 
     fitter = Fitter(time, signal)
+    assert fitter.trace_sigma_noise.shape == (fitter.n_traces,)
+    assert np.all(fitter.trace_sigma_noise > 0.0)
     fitter.add_baseline_annotation(BaselineAnnotation(rt_min=2.5, rt_max=2.62))
     fitter.add_baseline_annotation(BaselineAnnotation(rt_min=3.38, rt_max=3.5))
     fitter.add_peak_annotation(PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=3.3, mode="single"))

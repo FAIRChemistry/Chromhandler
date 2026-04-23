@@ -45,6 +45,8 @@ def _make_fitter(
     time = np.tile(x, (n_trace, 1))
 
     fitter = Fitter(time, signal)
+    assert fitter.trace_sigma_noise.shape == (fitter.n_traces,)
+    assert np.all(fitter.trace_sigma_noise > 0.0)
     fitter.add_baseline_annotation(BaselineAnnotation(rt_min=2.5, rt_max=2.62))
     fitter.add_baseline_annotation(BaselineAnnotation(rt_min=3.38, rt_max=3.5))
 
