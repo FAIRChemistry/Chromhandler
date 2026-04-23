@@ -104,6 +104,7 @@ class Fitter:
         baselines: list[BaselineAnnotation] | None = None,
         trace_sample_ids: list[str] | None = None,
         trace_chromatogram_ids: list[str] | None = None,
+        trace_sigma_noise: NDArray[np.float64] | None = None,
         hyperparams: ModelHyperparams | None = None,
     ) -> None:
         self.time = np.asarray(time, dtype=float)
@@ -129,6 +130,8 @@ class Fitter:
             np.asarray(trace_chromatogram_ids, dtype=object) if trace_chromatogram_ids is not None else None
         )
 
+        self.trace_sigma_noise: NDArray[np.float64] = self._resolve_trace_sigma_noise(trace_sigma_noise)
+
         self.hyperparams: ModelHyperparams = hyperparams if hyperparams is not None else ModelHyperparams()
 
         self.shift_samples: NDArray[np.float64] | None = None  # [n_trace] shifts in samples
@@ -150,6 +153,33 @@ class Fitter:
             raise ValueError(
                 f"time and signal must have the same shape; got {self.time.shape} vs {self.signal.shape}."
             )
+
+    def _resolve_trace_sigma_noise(
+        self, supplied: NDArray[np.float64] | None
+    ) -> NDArray[np.float64]:
+        """Return per-trace sigma_noise, auto-computing from signal rows when missing."""
+        from chromhandler.trace_statistics import compute_trace_statistics
+
+        if supplied is not None:
+            arr = np.asarray(supplied, dtype=float)
+            if arr.shape != (self.n_traces,):
+                raise ValueError(
+                    f"trace_sigma_noise must have length n_traces={self.n_traces}, got shape {arr.shape}."
+                )
+            if not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+                raise ValueError("trace_sigma_noise must be finite and positive for every trace.")
+            return arr
+
+        out = np.empty(self.n_traces, dtype=float)
+        for t in range(self.n_traces):
+            try:
+                out[t] = compute_trace_statistics(
+                    np.asarray(self.time[t], dtype=float),
+                    np.asarray(self.signal[t], dtype=float),
+                ).sigma_noise
+            except ValueError as exc:  # noqa: PERF203 - per-row error needs index context
+                raise ValueError(f"trace row {t}: {exc}") from exc
+        return out
 
     # ------------------------------------------------------------------
     # Derived quantities
