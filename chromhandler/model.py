@@ -6,6 +6,8 @@ from uuid import uuid4
 from mdmodels.units.annotation import UnitDefinitionAnnot  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field
 
+from chromhandler.trace_statistics import TraceStatistics  # noqa: TC001
+
 if TYPE_CHECKING:
     pass
 
@@ -301,6 +303,13 @@ class Chromatogram(BaseModel):
     reaction_time_unit: str | UnitDefinitionAnnot | None = Field(
         default=None,
         description="""Unit of reaction time""",
+    )
+    trace_stats: TraceStatistics | None = Field(
+        default=None,
+        description="""Per-trace statistics (noise, scale, sampling) computed
+        on the full untruncated signal. Populated lazily by
+        ``Handler.compute_trace_statistics`` and before
+        ``Handler.cut_chromatograms``.""",
     )
 
     # JSON-LD fields

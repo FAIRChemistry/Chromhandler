@@ -181,3 +181,29 @@ def test_peak_annotation_accepts_wavelength() -> None:
 
     ann = PeakAnnotation(molecule_id="mol", rt_min=2.8, rt_max=3.2, wavelength=280.0)
     assert ann.wavelength == 280.0
+
+
+@pytest.mark.unit
+def test_chromatogram_roundtrips_trace_stats_through_json() -> None:
+    """Chromatogram.trace_stats serialises + deserialises without loss."""
+    from chromhandler.trace_statistics import TraceStatistics
+
+    chrom = Chromatogram(
+        id="c0",
+        sample_id="s0",
+        signal=[1.0, 2.0, 3.0, 2.0, 1.0],
+        time=[0.0, 0.1, 0.2, 0.3, 0.4],
+        trace_stats=TraceStatistics(sigma_noise=0.75),
+    )
+
+    dumped = chrom.model_dump_json()
+    restored = Chromatogram.model_validate_json(dumped)
+
+    assert restored.trace_stats is not None
+    assert restored.trace_stats.sigma_noise == pytest.approx(0.75)
+
+
+@pytest.mark.unit
+def test_chromatogram_defaults_trace_stats_to_none() -> None:
+    chrom = Chromatogram(id="c0", sample_id="s0")
+    assert chrom.trace_stats is None
