@@ -9,6 +9,7 @@ Content: Handler initialization, basic accessors, simple properties.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from chromhandler.handler import Handler
@@ -207,3 +208,53 @@ def test_chromatogram_roundtrips_trace_stats_through_json() -> None:
 def test_chromatogram_defaults_trace_stats_to_none() -> None:
     chrom = Chromatogram(id="c0", sample_id="s0")
     assert chrom.trace_stats is None
+
+
+def _handler_with_noisy_chromatograms(
+    *, n_samples: int = 2, n_points: int = 4000, true_sigma: float = 1.2, seed: int = 0
+) -> Handler:
+    rng = np.random.default_rng(seed)
+    handler = Handler()
+    for i in range(n_samples):
+        time = np.linspace(0.0, 10.0, n_points)
+        signal = 100.0 + rng.normal(0.0, true_sigma, size=n_points)
+        chrom = Chromatogram(
+            id=f"c{i}", sample_id=f"s{i}", time=time.tolist(), signal=signal.tolist()
+        )
+        handler.samples.append(Sample(id=f"s{i}", chromatograms=[chrom]))
+    return handler
+
+
+def test_handler_compute_trace_statistics_fills_every_chromatogram() -> None:
+    handler = _handler_with_noisy_chromatograms(true_sigma=1.2)
+    handler.compute_trace_statistics()
+
+    for sample in handler.samples:
+        for chrom in sample.chromatograms:
+            assert chrom.trace_stats is not None
+            assert chrom.trace_stats.sigma_noise == pytest.approx(1.2, rel=0.07)
+
+
+def test_handler_compute_trace_statistics_skips_existing_by_default() -> None:
+    from chromhandler.trace_statistics import TraceStatistics
+
+    handler = _handler_with_noisy_chromatograms()
+    sentinel = TraceStatistics(sigma_noise=999.0)
+    handler.samples[0].chromatograms[0].trace_stats = sentinel
+
+    handler.compute_trace_statistics()
+
+    assert handler.samples[0].chromatograms[0].trace_stats is sentinel
+
+
+def test_handler_compute_trace_statistics_overwrite_recomputes() -> None:
+    from chromhandler.trace_statistics import TraceStatistics
+
+    handler = _handler_with_noisy_chromatograms(true_sigma=2.0)
+    handler.samples[0].chromatograms[0].trace_stats = TraceStatistics(sigma_noise=999.0)
+
+    handler.compute_trace_statistics(overwrite=True)
+
+    stats = handler.samples[0].chromatograms[0].trace_stats
+    assert stats is not None
+    assert stats.sigma_noise == pytest.approx(2.0, rel=0.07)

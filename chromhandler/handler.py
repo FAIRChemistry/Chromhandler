@@ -1353,6 +1353,33 @@ class Handler(BaseModel):
             child.samples.append(sample_copy)
         return child
 
+    def compute_trace_statistics(self, *, overwrite: bool = False) -> None:
+        """Populate ``trace_stats`` on every chromatogram in the handler.
+
+        Stats are computed on the *full, untruncated* signal, so call this
+        before :meth:`cut_chromatograms` (which itself invokes this method
+        defensively).
+
+        Args:
+            overwrite: When ``False`` (default), chromatograms that already
+                have ``trace_stats`` are skipped. When ``True``, every
+                chromatogram is recomputed.
+        """
+        import numpy as np
+
+        from .trace_statistics import compute_trace_statistics
+
+        for sample in self.samples:
+            for chrom in sample.chromatograms:
+                if chrom.trace_stats is not None and not overwrite:
+                    continue
+                if not chrom.time or not chrom.signal:
+                    continue
+                chrom.trace_stats = compute_trace_statistics(
+                    np.asarray(chrom.time, dtype=float),
+                    np.asarray(chrom.signal, dtype=float),
+                )
+
     def cut_chromatograms(
         self,
         ranges: (slice | tuple[float, float] | list[slice] | list[tuple[float, float]]),
