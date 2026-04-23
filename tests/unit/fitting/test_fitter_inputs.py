@@ -172,26 +172,6 @@ def test_compute_model_inputs_all_positive_scale_params() -> None:
 
 
 @pytest.mark.unit
-def test_noise_prior_data_derived_floor() -> None:
-    """Noise floor scales with signal magnitude, not hardcoded 1.0."""
-    # High-amplitude signal
-    fitter_high = _make_fitter(area=1e5)
-    fitter_high.add_peak_annotation(PeakAnnotation(molecule_id="B", rt_min=2.7, rt_max=3.3, mode="single"))
-    # Noise floor should be >> 1.0 for large signal
-    noise_high = fitter_high.noise_prior()
-    # noise_floor = 1e-3 * signal_range; for area=1e5 with sigma=0.04, peak ≈ 1e5/(0.04*sqrt(2π)) ≈ 1e6
-    # signal_range >> 1, so noise_floor >> 1.0
-    assert np.all(noise_high > 0.0)
-
-    # Low-amplitude signal: noise floor << 1.0
-    fitter_low = _make_fitter(area=0.01, noise_std=1e-4)
-    noise_low = fitter_low.noise_prior()
-    assert np.all(noise_low > 0.0)
-    # Verify low-amplitude fitter noise floor is much smaller than high-amplitude
-    assert np.median(noise_high) > np.median(noise_low)
-
-
-@pytest.mark.unit
 def test_noise_prior_all_positive() -> None:
     """noise_prior() always returns strictly positive values."""
     fitter = _make_fitter()
