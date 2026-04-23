@@ -428,7 +428,9 @@ def test_fitter_from_handler_inherits_peak_annotations() -> None:
     )
 
     time = list(np.linspace(0.0, 5.0, 100))
-    signal = [0.0] * 100
+    # Non-zero noise so DER_SNR yields a positive sigma_noise (required by Fitter).
+    rng = np.random.default_rng(0)
+    signal = rng.normal(0.0, 1.0, size=100).tolist()
     handler.samples.append(
         Sample(
             id="s1",
