@@ -700,6 +700,8 @@ class Fitter:
         path: str | Path | None = None,
         *,
         k_mad: float = 3.0,
+        show_mad_region: bool = False,
+        show_outlier_labels: bool = False,
     ) -> tuple[MplFigure, np.ndarray[Any, Any], list[int]]:
         """Pre-fit per-trace ``(sigma_eff, alpha_asym)`` scatter with MAD bounds.
 
@@ -718,6 +720,8 @@ class Fitter:
             self.signal,
             self.peaks,
             k_mad=k_mad,
+            show_mad_region=show_mad_region,
+            show_outlier_labels=show_outlier_labels,
             chromatogram_ids=self._chromatogram_id_list(),
         )
         if path is not None:

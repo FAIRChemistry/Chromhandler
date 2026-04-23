@@ -362,6 +362,8 @@ def plot_geometric_diagnostic(
     peaks: list[PeakAnnotation],
     *,
     k_mad: float = 3.0,
+    show_mad_region: bool = False,
+    show_outlier_labels: bool = False,
     chromatogram_ids: list[str] | None = None,
     figsize: tuple[float, float] | None = None,
 ) -> tuple[Figure, np.ndarray[Any, Any], list[int]]:
@@ -419,48 +421,52 @@ def plot_geometric_diagnostic(
         outlier &= valid
 
         inlier = valid & ~outlier
-        invalid = ~valid
+
+        heights = np.asarray(geo.apex_height, dtype=float)
+        h_max = float(np.nanmax(heights[valid])) if valid.any() else 0.0
+        sizes = np.full(n_trace, 30.0)
+        if h_max > 0.0:
+            sizes = 15.0 + 120.0 * np.clip(heights / h_max, 0.0, 1.0)
 
         if inlier.any():
             ax.scatter(
-                sigma_eff[inlier], alpha_asym[inlier],
-                s=30, color="C0", edgecolor="none", label="Inlier" if p == 0 else "",
+                alpha_asym[inlier], sigma_eff[inlier],
+                s=sizes[inlier], color="C0", edgecolor="none",
+                label="Inlier" if p == 0 else "",
             )
         if outlier.any():
             ax.scatter(
-                sigma_eff[outlier], alpha_asym[outlier],
-                s=40, color="red", edgecolor="none", label="Outlier" if p == 0 else "",
+                alpha_asym[outlier], sigma_eff[outlier],
+                s=sizes[outlier], color="red", edgecolor="none",
+                label="Outlier" if p == 0 else "",
             )
             for t in np.where(outlier)[0]:
-                ax.annotate(
-                    _trace_label(int(t), chromatogram_ids),
-                    (sigma_eff[t], alpha_asym[t]),
-                    fontsize=6, xytext=(3, 3), textcoords="offset points",
-                )
+                if show_outlier_labels:
+                    ax.annotate(
+                        _trace_label(int(t), chromatogram_ids),
+                        (alpha_asym[t], sigma_eff[t]),
+                        fontsize=6, xytext=(3, 3), textcoords="offset points",
+                    )
                 outlier_set.add(int(t))
 
         ax.scatter(
-            [med_s], [med_a],
+            [med_a], [med_s],
             marker="x", color="black", s=60, linewidths=1.5,
             label="Median" if p == 0 else "",
         )
-        if mad_s > 0.0 and mad_a > 0.0:
+        if show_mad_region and mad_s > 0.0 and mad_a > 0.0:
             ax.add_patch(plt.Rectangle(  # type: ignore[attr-defined]
-                (med_s - k_mad * mad_s, med_a - k_mad * mad_a),
-                2 * k_mad * mad_s, 2 * k_mad * mad_a,
+                (med_a - k_mad * mad_a, med_s - k_mad * mad_s),
+                2 * k_mad * mad_a, 2 * k_mad * mad_s,
                 fill=False, edgecolor="red", linestyle="--", linewidth=0.8,
                 label=f"±{k_mad:g}·MAD" if p == 0 else "",
             ))
 
-        ax.set_title(
-            f"{peak.molecule_id}  (n={int(valid.sum())}"
-            f"{f', {int(invalid.sum())} invalid' if invalid.any() else ''})",
-            fontsize=9,
-        )
-        ax.set_xlabel("sigma_eff [min]", fontsize=8)
+        ax.set_title(peak.molecule_id, fontsize=9)
+        ax.set_xlabel("alpha_asym", fontsize=8)
         if p == 0:
-            ax.set_ylabel("alpha_asym", fontsize=8)
-        ax.axhline(0.0, color="gray", linewidth=0.5, alpha=0.5)
+            ax.set_ylabel("sigma_eff [min]", fontsize=8)
+        ax.axvline(0.0, color="gray", linewidth=0.5, alpha=0.5)
         ax.grid(True, alpha=0.3, linestyle="--")
         ax.tick_params(labelsize=7)
 
