@@ -74,6 +74,8 @@ def estimate_baseline(
         raise ValueError(
             f"sigma_noise must have shape [n_trace]={time.shape[0]}, got {sigma_noise.shape}."
         )
+    if not bool(jnp.all(jnp.isfinite(sigma_noise) & (sigma_noise > 0.0))):
+        raise ValueError("sigma_noise must be finite and strictly positive per trace.")
     if not (0.0 < float(percentile) <= 100.0):
         raise ValueError("percentile must satisfy 0 < percentile <= 100.")
     if not (0.0 < float(edge_fraction) <= 0.5):

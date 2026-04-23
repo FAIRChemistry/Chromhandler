@@ -58,6 +58,21 @@ def test_estimate_baseline_floors_tolerate_zero_time_span() -> None:
         time, signal, peaks=[_single_peak(rt_min=1.5, rt_max=2.5)], sigma_noise=sigma_noise
     )
     np.testing.assert_allclose(np.asarray(priors.slope_scale), [0.7], atol=1e-6)
+    # Intercept floor still equals sigma_noise regardless of time span.
+    np.testing.assert_allclose(np.asarray(priors.intercept_scale), [0.7], atol=1e-6)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [[0.0, 1.0], [-0.5, 1.0], [float("nan"), 1.0], [float("inf"), 1.0]])
+def test_estimate_baseline_rejects_non_positive_sigma_noise(bad: list[float]) -> None:
+    """estimate_baseline rejects non-finite or non-positive sigma_noise entries."""
+    t = np.linspace(0.0, 10.0, 200)
+    time = jnp.asarray(np.tile(t, (2, 1)))
+    signal = jnp.asarray(np.full((2, 200), 100.0))
+    with pytest.raises(ValueError, match="finite and strictly positive"):
+        estimate_baseline(
+            time, signal, peaks=[_single_peak()], sigma_noise=jnp.asarray(bad)
+        )
 
 
 @pytest.mark.unit
