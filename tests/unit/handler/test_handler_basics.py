@@ -258,3 +258,20 @@ def test_handler_compute_trace_statistics_overwrite_recomputes() -> None:
     stats = handler.samples[0].chromatograms[0].trace_stats
     assert stats is not None
     assert stats.sigma_noise == pytest.approx(2.0, rel=0.07)
+
+
+def test_cut_chromatograms_captures_stats_on_full_trace() -> None:
+    """Stats must be taken on the *full* trace, not the truncated one."""
+    handler = _handler_with_noisy_chromatograms(n_points=4000, true_sigma=1.0)
+
+    # Cut away 99% of the trace — a DER_SNR computed *after* truncation
+    # would have way too few samples to be reliable.
+    handler.cut_chromatograms([(0.0, 0.1)])
+
+    for sample in handler.samples:
+        for chrom in sample.chromatograms:
+            assert chrom.trace_stats is not None
+            # Full-trace DER_SNR should have recovered the true sigma.
+            assert chrom.trace_stats.sigma_noise == pytest.approx(1.0, rel=0.1)
+            # Truncation still happened.
+            assert len(chrom.time) < 4000

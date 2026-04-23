@@ -1398,6 +1398,10 @@ class Handler(BaseModel):
         Example::
             handler.cut_chromatograms([(0, 1), (2.5, 4)])
         """
+        # Freeze full-trace stats before we drop samples. No-op if already
+        # populated by an earlier call.
+        self.compute_trace_statistics(overwrite=False)
+
         norm = self._normalize_cut_ranges(ranges)
         for sample in self.samples:
             for chrom in sample.chromatograms:
