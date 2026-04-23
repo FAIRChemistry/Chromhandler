@@ -381,10 +381,31 @@ class Fitter:
         if not samples:
             raise ValueError("No matching samples found in handler.")
 
+        # Strict check: every included chromatogram must carry trace_stats.
+        # Degenerate (all-NaN / <3-point) chromatograms are skipped silently
+        # by compute_trace_statistics and surface here.
+        missing = [
+            c.id
+            for s in samples
+            for c in s.chromatograms
+            if c.trace_stats is None
+        ]
+        if missing:
+            raise ValueError(
+                "Fitter.from_handler: chromatograms missing trace_stats after "
+                f"compute_trace_statistics: {missing}. These traces are likely "
+                "all-NaN or too short — drop them via handler.cut_chromatograms "
+                "or filter upstream."
+            )
+
         time_lists: list[list[float]] = [c.time for s in samples for c in s.chromatograms]
         signal_lists: list[list[float]] = [c.signal for s in samples for c in s.chromatograms]
         trace_sample_ids: list[str] = [s.id for s in samples for _c in s.chromatograms]
         trace_chrom_ids: list[str] = [c.id for s in samples for c in s.chromatograms]
+        trace_sigma_noise = np.array(
+            [c.trace_stats.sigma_noise for s in samples for c in s.chromatograms],  # type: ignore[union-attr]
+            dtype=float,
+        )
 
         time_arr, signal_arr = pad_traces(time_lists, signal_lists)
 
@@ -397,6 +418,7 @@ class Fitter:
             baselines=None,
             trace_sample_ids=trace_sample_ids,
             trace_chromatogram_ids=trace_chrom_ids,
+            trace_sigma_noise=trace_sigma_noise,
         )
 
     # ------------------------------------------------------------------
