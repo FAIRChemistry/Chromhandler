@@ -53,7 +53,7 @@ from .types import (
     peak_is_artefact_mode,
     peak_is_free_mode,
 )
-from .utils import baseline_to_mask, pad_traces
+from .utils import pad_traces
 
 
 @dataclasses.dataclass(frozen=True)
@@ -252,45 +252,18 @@ class Fitter:
         return priors
 
     def noise_prior(self) -> NDArray[np.float64]:
-        """Estimate per-trace observation noise from baseline-corrected signal.
+        """Per-trace observation noise prior — equals ``self.trace_sigma_noise``.
 
-        Uses median absolute deviation in baseline regions, or falls back to
-        signal std if no baseline regions defined.
+        The DER_SNR estimate computed on the full untruncated signal
+        (see :class:`chromhandler.trace_statistics.TraceStatistics`) is used
+        directly. No additional floors or window-local estimators.
 
         Returns
         -------
         np.ndarray
-            Shape ``[n_trace]``, noise level for each trace (positive).
+            Shape ``[n_trace]``, strictly positive.
         """
-        bp = self.baseline_priors()
-        intercept = np.asarray(bp.intercept, dtype=float)[:, None]
-        slope = np.asarray(bp.slope, dtype=float)[:, None]
-        baseline = intercept + slope * self.time
-        signal_corrected: NDArray[np.float64] = np.asarray(self.signal - baseline, dtype=float)
-
-        if self.baselines:
-            x_jax = jnp.asarray(self.time, dtype=float)
-            baseline_mask = baseline_to_mask(self.baselines, x_jax)
-            baseline_mask_np = np.asarray(baseline_mask, dtype=bool)
-            sigma_y = np.array(
-                [
-                    float(
-                        np.median(
-                            np.abs(
-                                np.asarray(signal_corrected[t])[np.asarray(baseline_mask_np[t], dtype=bool)]
-                            )
-                        )
-                    )
-                    * 1.4826
-                    for t in range(self.n_traces)
-                ]
-            )
-        else:
-            sigma_y = np.std(signal_corrected, axis=1)
-
-        signal_range = np.ptp(self.signal, axis=1)
-        noise_floor = 1e-3 * np.maximum(signal_range, 1e-6)
-        return np.maximum(sigma_y, noise_floor)
+        return self.trace_sigma_noise
 
     def create_observation_mask(self) -> NDArray[np.bool_]:
         """Create boolean mask for timepoints to include in likelihood.

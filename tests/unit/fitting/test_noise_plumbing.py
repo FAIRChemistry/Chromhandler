@@ -137,3 +137,13 @@ def test_from_handler_raises_when_any_trace_stats_missing() -> None:
 
     with pytest.raises(ValueError, match=r"missing trace_stats.*c1"):
         Fitter.from_handler(handler)
+
+
+@pytest.mark.unit
+def test_noise_prior_is_trace_sigma_noise_passthrough() -> None:
+    """Fitter.noise_prior() returns self.trace_sigma_noise unchanged."""
+    time, signal = _noisy_matrix(n_trace=3, sigma=1.5)
+    explicit = np.array([0.5, 1.0, 2.0])
+    fitter = Fitter(time, signal, trace_sigma_noise=explicit)
+
+    np.testing.assert_array_equal(fitter.noise_prior(), explicit)
