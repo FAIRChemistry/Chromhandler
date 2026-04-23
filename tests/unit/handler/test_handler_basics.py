@@ -275,3 +275,62 @@ def test_cut_chromatograms_captures_stats_on_full_trace() -> None:
             assert chrom.trace_stats.sigma_noise == pytest.approx(1.0, rel=0.1)
             # Truncation still happened.
             assert len(chrom.time) < 4000
+
+
+@pytest.mark.unit
+def test_handler_compute_trace_statistics_skips_all_nan_signals() -> None:
+    """A populated-but-all-NaN signal is skipped silently, not raised."""
+    handler = Handler()
+    handler.samples.append(
+        Sample(
+            id="s0",
+            chromatograms=[
+                Chromatogram(
+                    id="c0",
+                    sample_id="s0",
+                    time=[0.0, 0.1, 0.2, 0.3],
+                    signal=[float("nan")] * 4,
+                )
+            ],
+        )
+    )
+
+    # Must not raise.
+    handler.compute_trace_statistics()
+
+    assert handler.samples[0].chromatograms[0].trace_stats is None
+
+
+@pytest.mark.unit
+def test_cut_chromatograms_tolerates_all_nan_chromatogram() -> None:
+    """Pre-existing cut_chromatograms tolerance for degenerate rows is preserved."""
+    handler = Handler()
+    # One healthy chromatogram + one all-NaN chromatogram.
+    rng = np.random.default_rng(0)
+    n = 1000
+    healthy_signal = (100.0 + rng.normal(0.0, 1.0, size=n)).tolist()
+    healthy_time = np.linspace(0.0, 10.0, n).tolist()
+    handler.samples.append(
+        Sample(
+            id="s0",
+            chromatograms=[
+                Chromatogram(id="c0", sample_id="s0", time=healthy_time, signal=healthy_signal),
+                Chromatogram(
+                    id="c1",
+                    sample_id="s0",
+                    time=[0.0, 0.1, 0.2, 0.3],
+                    signal=[float("nan")] * 4,
+                ),
+            ],
+        )
+    )
+
+    # Must not raise even though the second chromatogram is all-NaN.
+    handler.cut_chromatograms([(0.0, 5.0)])
+
+    healthy, degenerate = handler.samples[0].chromatograms
+    # Healthy chromatogram got full-trace stats.
+    assert healthy.trace_stats is not None
+    assert healthy.trace_stats.sigma_noise == pytest.approx(1.0, rel=0.1)
+    # Degenerate chromatogram was skipped — no stats, but the row still exists.
+    assert degenerate.trace_stats is None

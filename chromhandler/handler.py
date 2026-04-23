@@ -1375,9 +1375,14 @@ class Handler(BaseModel):
                     continue
                 if not chrom.time or not chrom.signal:
                     continue
+                signal_arr = np.asarray(chrom.signal, dtype=float)
+                # DER_SNR needs >=3 finite samples; skip degenerate traces
+                # silently to preserve pre-existing cut_chromatograms tolerance.
+                if int(np.isfinite(signal_arr).sum()) < 3:
+                    continue
                 chrom.trace_stats = compute_trace_statistics(
                     np.asarray(chrom.time, dtype=float),
-                    np.asarray(chrom.signal, dtype=float),
+                    signal_arr,
                 )
 
     def cut_chromatograms(
