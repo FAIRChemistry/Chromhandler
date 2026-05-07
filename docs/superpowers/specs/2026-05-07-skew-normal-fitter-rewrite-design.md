@@ -22,8 +22,8 @@ HMC divergences on real datasets. Investigation surfaced three structural issues
    bracket-finding instead of principled, data-driven priors.
 
 This rewrite addresses all three by switching to a **skew-normal model in
-centred-parameter (CP) form**, with priors derived from method-of-moments on
-the windowed signal across traces, and strict spatial naming throughout.
+centred-parameter (CP) form**, with FWHM-based hybrid feature extraction
+on the windowed signal across traces, and strict spatial naming throughout.
 
 ## 2. Mathematical foundation
 
@@ -413,31 +413,77 @@ Public API:
 
 ```python
 @dataclass(frozen=True)
-class WindowMoments:
-    """Per-trace moments within one peak window."""
-    mu: float
-    sigma: float
-    gamma1: float
-    area: float
+class WindowFeatures:
+    """Per-trace FWHM-based features within a single-peak window."""
+    mu: float           # apex location (smoothed argmax)
+    sigma: float        # (HWHM_L + HWHM_R) / (2 · √(2 ln 2))
+    gamma1: float       # from HWHM ratio via sn_asymmetry_to_gamma1
+    area: float         # trapezoid integration
 
-def compute_window_moments(
-    time: jax.Array,        # [n_time]
-    signal: jax.Array,      # [n_time]
-    baseline: jax.Array,    # [n_time]
+def compute_single_window_features(
+    time: np.ndarray,
+    signal_baseline_subtracted: np.ndarray,
     window_low: float,
     window_high: float,
-    split_at: float | None = None,  # for doublets
-) -> WindowMoments | tuple[WindowMoments, WindowMoments]:
-    """Method-of-moments extraction. Returns one or two depending on split_at."""
+    smoothing_window: int = 5,
+) -> WindowFeatures:
+    """FWHM-based feature extraction for single-peak windows."""
 
-def aggregate_priors(
-    per_trace_moments: list[WindowMoments],
-    n_trace: int,
+def detect_dominant_apex(
+    time: np.ndarray,
+    signal_baseline_subtracted: np.ndarray,
+    window_low: float,
+    window_high: float,
+    smoothing_window: int = 5,
+) -> tuple[float, float]:
+    """Smoothed argmax → (apex_loc, apex_height). Used by both single and doublet paths."""
+
+def split_doublet_areas(
+    time: np.ndarray,
+    signal_baseline_subtracted: np.ndarray,
+    window_low: float,
+    window_high: float,
+    window_midpoint: float,
+    noise_per_trace: float,
     dt: float,
-    n_components: int,
+) -> tuple[float, float]:
+    """Outer-HWHM Gaussian-residual area decomposition with spatial assignment.
+    Returns (A_left, A_right). See §6.1 doublet block."""
+
+def aggregate_single_peak_priors(
+    per_trace_features: list[WindowFeatures],
+    n_trace_pooled: int,
+    dt: float,
 ) -> SkewNormalPriors:
-    """Aggregate across traces with principled floors."""
+    """Aggregate single-peak features across traces with principled floors."""
+
+def aggregate_doublet_priors(
+    per_trace_dominant_apex: list[tuple[float, float]],
+    per_trace_areas: list[tuple[float, float]],
+    shared_shape_priors: tuple[float, float, float, float],  # (sigma_loc, sigma_scale, gamma1_loc, gamma1_scale)
+    window_low: float,
+    window_high: float,
+    noise_per_trace: np.ndarray,
+    dt: float,
+    n_trace_pooled: int,
+) -> SkewNormalPriors:
+    """Aggregate doublet features. Δ prior is Uniform(5·dt, window_width/2)."""
+
+def build_priors(
+    time: jnp.ndarray,
+    signal: jnp.ndarray,
+    baseline: jnp.ndarray,
+    noise_per_trace: jnp.ndarray,
+    dt: float,
+    annotations: list[PeakAnnotation],
+) -> list[SkewNormalPriors]:
+    """Top-level orchestrator. Returns one SkewNormalPriors per peak window."""
 ```
+
+Note: no `WindowMoments`, no method-of-moments. Single peaks go through
+`compute_single_window_features` (FWHM hybrid). Doublets go through
+`detect_dominant_apex` + `split_doublet_areas`, with shape priors borrowed
+from the population of single-peak windows.
 
 ### 7.3 `model.py` — NumPyro layer
 
