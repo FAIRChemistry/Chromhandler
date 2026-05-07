@@ -197,7 +197,7 @@ the absolute position, the trace shift absorbs the drift.
 
 For each trace, on the baseline-subtracted signal `s(t)` within `[window_min, window_max]`:
 
-**Single peak window:**
+**Single peak window — method of moments:**
 ```
 weights = clip(s, 0) / sum(clip(s, 0))
 μ̂      = Σ t · weights
@@ -206,9 +206,70 @@ weights = clip(s, 0) / sum(clip(s, 0))
 Â       = trapezoid(s, t)
 ```
 
-**Doublet window:** decompose into left and right halves at the
-between-peak minimum (or `window_midpoint` as fallback), then apply the same
-moments separately on each half. Δ̂ = (μ̂_right − μ̂_left).
+**Doublet window — population information sharing.**
+
+Splitting at the between-peak minimum is unreliable: the minimum is shallow,
+sensitive to noise, and biased when the two components have unequal widths.
+Many traces will not show two distinguishable maxima at all (the typical
+case for sub-detection artefacts). We therefore use a population strategy
+that does not require per-trace decomposition:
+
+- **Shape parameters (`σ`, `γ₁`):** identical priors for left and right,
+  drawn from the population of single-peak windows in the dataset (or
+  fallback to outer-HWHM on doublet dominant apexes if no clean single-peak
+  windows exist). Same prior, sampled twice independently. Identifiability
+  comes from signed Δ and asymmetric area priors, not from differing shape
+  priors.
+
+- **Location anchor (`mu_anchor_left`):** per trace, locate the dominant
+  apex in the smoothed window signal. Aggregate across traces for the
+  empirical `(loc, scale)`.
+
+- **Separation (`Δ`):** per trace, attempt to detect a secondary maximum.
+  If at least N traces (e.g. N=3) reveal two maxima, fit a `LogNormal` from
+  that subset's empirical `(apex_right − apex_left)`. Otherwise fall back
+  to `LogUniform(Δ_min, Δ_max)` with bounds purely from window geometry:
+  `Δ_min = max(a_few · dt, σ_pop_estimate)` (below this, peaks are
+  unidentifiable); `Δ_max = window_width − 2·σ_pop_estimate` (above this,
+  one component escapes the window).
+
+- **Per-trace amplitudes (`A_left[trace]`, `A_right[trace]`) — outer-HWHM
+  Gaussian residual, assigned by spatial position.** Per trace:
+
+  1. Compute `A_total = trapezoid(s − baseline)` over the window.
+  2. Detect the dominant apex `(apex_loc, h_apex)` from smoothed `s − baseline`.
+  3. Determine the dominant spatial side:
+     `side = "left" if apex_loc < window_midpoint else "right"`.
+  4. Estimate `σ_dominant` from the **outer-side HWHM** of the dominant
+     apex — the side facing away from the window centre, uncontaminated by
+     the other component:
+     - if `side == "left"`: walk left from `apex_loc` until `s = h_apex/2`.
+     - if `side == "right"`: walk right from `apex_loc` until `s = h_apex/2`.
+     `σ_dominant = HWHM_outer / √(2 ln 2)`.
+  5. Reconstruct the dominant component as a Gaussian and analytically
+     integrate: `A_dominant = h_apex · σ_dominant · √(2π)`.
+  6. Assign by spatial position:
+     - `A_{side}     = A_dominant`
+     - `A_{other}    = max(A_total − A_dominant, A_floor)` where
+       `A_floor = noise_per_trace · √(window_npoints) · dt`.
+  7. Floor both: `A_x ← max(A_x, A_floor)`.
+
+  **Why spatial assignment, not "dominant = left":** if the analyte
+  vanishes (kinetics, full conversion) the dominant apex sits at the
+  artefact position. A "dominant = left" rule would manufacture a ghost
+  analyte peak. Spatial assignment correctly collapses the absent
+  component's amplitude prior to the noise floor.
+
+  Per-trace prior scales come from noise propagation:
+  ```
+  σ_A             ≈ noise_per_trace · √(window_npoints) · dt
+  log_A_loc       = log(max(A_estimate, A_floor))
+  log_A_scale     = max(σ_A / A_estimate, 1/√n_trace_pooled)
+  ```
+
+  No magic fractions anywhere. When the artefact is invisible in a trace,
+  its `log_A_loc` pins to noise level and the prior is wide enough to
+  allow `A → 0` without permitting a phantom mode.
 
 ### 6.2 Aggregation across traces
 
