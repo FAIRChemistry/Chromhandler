@@ -124,8 +124,8 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
       gamma1_left_scale: float
       log_A_left_loc_per_trace: jnp.ndarray            # [n_trace]
       log_A_left_scale_per_trace: jnp.ndarray          # [n_trace]
-      log_Delta_loc: float | None
-      log_Delta_scale: float | None
+      Delta_low: float | None                          # Uniform lower bound = 5·dt
+      Delta_high: float | None                         # Uniform upper bound = window_width/2
       log_sigma_right_loc: float | None
       log_sigma_right_scale: float | None
       gamma1_right_loc: float | None
@@ -173,7 +173,7 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
   - Synthetic SN with known `(μ, σ, γ₁, A)` recovered within 5% on dense grid, low noise.
   - Tested across γ₁ ∈ {-0.9, -0.3, 0, 0.3, 0.9}.
 
-### Step 3.2 — Doublet apex detection (smoothed)
+### Step 3.2 — Dominant apex detection (smoothed)
 - Implement:
   ```python
   def detect_dominant_apex(
@@ -183,21 +183,14 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
       window_high: float,
       smoothing_window: int = 5,
   ) -> tuple[float, float]                         # (apex_loc, height)
-
-  def detect_secondary_apex(
-      time: np.ndarray,
-      signal_smoothed: np.ndarray,
-      window_low: float,
-      window_high: float,
-      dominant_apex_loc: float,
-      min_separation_dt: int = 3,
-  ) -> tuple[float, float] | None                  # None if not found
   ```
-- Use Savitzky-Golay smoothing (`scipy.signal.savgol_filter`) before peak finding (`scipy.signal.find_peaks`).
+- Use Savitzky-Golay smoothing (`scipy.signal.savgol_filter`) before peak
+  finding (`scipy.signal.find_peaks`). We only need the dominant apex —
+  per-trace secondary apex detection is not used (Δ is uniform, not
+  empirical).
 - Acceptance: `tests/unit/fitting/test_priors_apex.py`:
   - Single peak: dominant detected at the synthesized μ.
-  - Two well-separated peaks: both detected, ordering preserved.
-  - Two close peaks (Δ ≈ 1.5σ): only dominant detected, secondary returns None.
+  - Two well-separated peaks: dominant detected at the larger one.
   - Noise-only window: dominant detection still returns argmax (don't crash).
 
 ### Step 3.3 — Outer-side HWHM and Gaussian-residual amplitude split
@@ -242,7 +235,6 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
 
   def aggregate_doublet_priors(
       per_trace_dominant_apex: list[tuple[float, float]],
-      per_trace_secondary_apex: list[tuple[float, float] | None],
       per_trace_areas: list[tuple[float, float]],   # (A_left, A_right)
       shared_shape_priors: tuple[float, float, float, float],  # (sigma_loc, sigma_scale, gamma1_loc, gamma1_scale)
       window_low: float,
@@ -257,12 +249,17 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
   - `log_sigma`: floor `1/√n_trace`.
   - `gamma1`: floor `√(6/n_eff)`.
   - `log_A`: floor `1/√n_trace`.
-- For doublets where < 3 traces show two maxima → LogUniform Δ prior with window-geometry bounds; otherwise LogNormal from the empirical subset.
+- For doublets, Δ always gets a `Uniform(Δ_low, Δ_high)` prior with
+  `Δ_low = 5·dt` and `Δ_high = window_width/2`. Per-trace separation
+  measurements are not used to build a Normal prior — separation cannot
+  be reliably measured from data even when two maxima are visible
+  per-trace; uniform on derived bounds is the principled max-entropy
+  choice (see spec §6.1 doublet block).
 - Acceptance: `tests/unit/fitting/test_priors_aggregate.py`:
   - n_trace=10 with controlled spread → recovered (loc, scale) match.
   - n_trace=1 → scale collapses to floor exactly.
-  - Doublet with all secondary detections → LogNormal Δ.
-  - Doublet with zero secondary detections → LogUniform Δ.
+  - Doublet: `Delta_low == 5·dt` and `Delta_high == window_width/2`
+    regardless of how many traces show secondary maxima.
 
 ### Step 3.5 — Top-level prior orchestrator
 - Implement:
@@ -281,7 +278,8 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
   2. Compute *shared shape priors* from the population of single-peak windows
      (median μ, σ, γ₁ across all single-peak windows in the dataset).
   3. Per doublet annotation: per-trace dominant apex + outer-HWHM split,
-     opportunistic secondary apex, then aggregate using shared shape priors.
+     then aggregate using shared shape priors. Δ uniform-bound prior is
+     computed from window geometry alone.
 - Acceptance: `tests/unit/fitting/test_priors_orchestrator.py` — end-to-end on a synthetic dataset with mixed single/doublet annotations.
 
 ## Phase 4 — NumPyro model (`model.py`)
@@ -310,11 +308,11 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
 - Sample sites:
   - `mu_anchor_left[peak]`
   - `log_sigma_left[peak]`, `gamma1_left_raw[peak]`
-  - For doublet peaks only: `log_Delta[peak]`, `log_sigma_right[peak]`, `gamma1_right_raw[peak]`, `log_A_right[trace, peak]`
+  - For doublet peaks only: `Delta[peak]` (Uniform), `log_sigma_right[peak]`, `gamma1_right_raw[peak]`, `log_A_right[trace, peak]`
   - `log_A_left[trace, peak]`, `trace_shift[trace]`, `baseline_intercept[trace]`, `baseline_slope[trace]`
 - Compose:
   - `mu_left[t,p] = mu_anchor_left[p] + trace_shift[t]`
-  - For doublet `p`: `mu_right[t,p] = mu_left[t,p] + exp(log_Delta[p])`
+  - For doublet `p`: `mu_right[t,p] = mu_left[t,p] + Delta[p]`
 - Sum component contributions + baseline → predicted signal.
 - Likelihood: `Normal(predicted, noise_per_trace)` per `(trace, time)`.
 - Acceptance:

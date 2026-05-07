@@ -161,7 +161,7 @@ symmetrically.
 | `gamma1_left_raw[peak]` | shared per peak | shape constant across traces |
 | `log_sigma_right[peak]` (doublet only) | shared per peak | same |
 | `gamma1_right_raw[peak]` (doublet only) | shared per peak | same |
-| `Delta[peak]` (doublet only) | shared per peak | chemical separation is fixed |
+| `Delta[peak]` (doublet only) | shared per peak | chemical separation is fixed (sampled directly, Uniform prior) |
 | `mu_anchor_left[peak]` | shared per peak | true retention time per analyte |
 | `trace_shift[trace]` | shared per trace | flow/temperature drift, applied to all peaks |
 | `log_A_left[trace, peak]` | per (trace, peak) | concentration varies per injection |
@@ -225,13 +225,24 @@ that does not require per-trace decomposition:
   apex in the smoothed window signal. Aggregate across traces for the
   empirical `(loc, scale)`.
 
-- **Separation (`Δ`):** per trace, attempt to detect a secondary maximum.
-  If at least N traces (e.g. N=3) reveal two maxima, fit a `LogNormal` from
-  that subset's empirical `(apex_right − apex_left)`. Otherwise fall back
-  to `LogUniform(Δ_min, Δ_max)` with bounds purely from window geometry:
-  `Δ_min = max(a_few · dt, σ_pop_estimate)` (below this, peaks are
-  unidentifiable); `Δ_max = window_width − 2·σ_pop_estimate` (above this,
-  one component escapes the window).
+- **Separation (`Δ`):** `Uniform(Δ_low, Δ_high)` with bounds purely from
+  window geometry. We do **not** attempt to derive a Normal prior from
+  per-trace separation measurements: even when two maxima are visible in
+  some traces, the across-trace variability is dominated by noise, not by
+  any genuine population variation (the chemical separation is fixed). A
+  uniform prior on derivable bounds is the maximum-entropy choice for a
+  quantity we cannot reliably measure.
+
+  Bounds:
+  - `Δ_low  = 5 · dt` — below this, two components are unidentifiable at
+    the sampling resolution.
+  - `Δ_high = window_width / 2` — above this, the user's annotation
+    window is too small to contain both components comfortably (signal of
+    a window choice problem, not a model problem).
+
+  Δ is sampled in linear space directly: `Delta ~ Uniform(Δ_low, Δ_high)`.
+  NumPyro's transform handles the unconstrained-space mapping for HMC
+  internally.
 
 - **Per-trace amplitudes (`A_left[trace]`, `A_right[trace]`) — outer-HWHM
   Gaussian residual, assigned by spatial position.** Per trace:
@@ -290,7 +301,8 @@ resolution- or pooling-limited floors. Each floor is derived, not heuristic:
 
 | Parameter | Floor formula | Justification |
 |---|---|---|
-| `mu`, `Delta` | `dt` | sub-sample resolution unidentifiable |
+| `mu` | `dt` | sub-sample resolution unidentifiable |
+| `Delta` | n/a — uniform prior on derived bounds | see §6.1 doublet block |
 | `log_sigma` | `1 / √n_trace` | precision of mean over n_trace measurements |
 | `gamma1` | `√(6 / n_eff)` | large-sample SE of sample skewness |
 | `log_A` | `1 / √n_trace` | pooling precision |
@@ -317,8 +329,8 @@ class SkewNormalPriors:
     log_A_left_scale: float
 
     # Right component (only if n_components == 2)
-    log_Delta_loc: float | None
-    log_Delta_scale: float | None
+    Delta_low: float | None              # Uniform lower bound = 5 · dt
+    Delta_high: float | None             # Uniform upper bound = window_width / 2
     log_sigma_right_loc: float | None
     log_sigma_right_scale: float | None
     gamma1_right_loc: float | None
@@ -424,7 +436,7 @@ SAMPLED_PARAMETER_NAMES_SINGLE = (
 )
 SAMPLED_PARAMETER_NAMES_DOUBLET = (
     *SAMPLED_PARAMETER_NAMES_SINGLE,
-    "log_Delta", "log_sigma_right", "gamma1_right_raw", "log_A_right",
+    "Delta", "log_sigma_right", "gamma1_right_raw", "log_A_right",
 )
 ```
 
