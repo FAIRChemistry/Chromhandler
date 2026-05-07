@@ -61,29 +61,50 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
     - α=0 reduces to standard Normal density.
     - `density_cp` agrees with `density_dp(x, *cp_to_dp(...))`.
 
-### Step 1.3 — Derived quantities (mode, FWHM)
+### Step 1.3 — Derived quantities (mode, FWHM, HWHM ratio)
 - Implement:
   ```python
   def mode_dp(xi, omega, alpha) -> array         # Azzalini's m₀ approximation
   def fwhm_dp(xi, omega, alpha) -> array         # numerical: solve density = max/2
+  def hwhm_ratio_dp(xi, omega, alpha) -> array   # HWHM_R / HWHM_L (independent of ξ, ω)
   ```
 - For `mode_dp`, use the standard approximation:
   ```
   m₀(α) ≈ μ_z(α) − γ₁(α) · σ_z(α)/2 − sign(α)·exp(−2π/|α|)/2
   ```
   where `μ_z, σ_z, γ₁(α)` are the moments of standardized SN(α). Document that it's accurate to ~10⁻⁴.
-- For `fwhm_dp`, use a small bracketed bisection on each side of the mode (JAX-friendly).
+- For `fwhm_dp` and `hwhm_ratio_dp`, use a small bracketed bisection on each
+  side of the mode (JAX-friendly).
 - Acceptance:
   - `tests/unit/fitting/test_skew_normal_derived.py`:
     - Mode is a local maximum: `density(mode) > density(mode ± ε)` for small ε.
     - At α=0, mode equals ξ (within tolerance).
     - FWHM at α=0 equals `2·√(2 ln 2)·ω` within 1e-3 relative.
-    - For α=10, mode is shifted positively from ξ.
+    - At α=0, `hwhm_ratio_dp == 1.0` (symmetric).
+    - For α=10, mode is shifted positively from ξ; `hwhm_ratio_dp > 1`.
 
-### Step 1.4 — Module documentation and re-exports
+### Step 1.4 — Asymmetry → γ₁ inversion table
+- Implement:
+  ```python
+  def sn_asymmetry_to_gamma1(ratio: jax.Array) -> jax.Array
+  ```
+- Build a precomputed lookup table at module load time:
+  - α grid: `np.linspace(-50, 50, 2001)`
+  - For each α, compute `(hwhm_ratio_dp(0, 1, α), dp_to_cp(0, 1, α).gamma1)`
+  - Store as two `jnp.ndarray`s for interpolation.
+- `sn_asymmetry_to_gamma1(ratio)` linearly interpolates ratio → γ₁ on the table.
+- Acceptance: `tests/unit/fitting/test_skew_normal_asymmetry.py`:
+  - `sn_asymmetry_to_gamma1(1.0) == 0.0` (symmetric).
+  - Round-trip on a grid: for α ∈ {-5, -1, 0, 1, 5}, generate ratio via
+    `hwhm_ratio_dp`, invert via `sn_asymmetry_to_gamma1`, compare to true
+    γ₁ from `dp_to_cp`. Tolerance: 1e-3 absolute.
+  - Out-of-range ratio (e.g. 100): clipped to table bounds, returns saturating γ₁.
+
+### Step 1.5 — Module documentation and re-exports
 - Add module-level Google-style docstring summarizing the math.
 - Re-export from `chromhandler/fitting/__init__.py`:
-  `GAMMA1_MAX, cp_to_dp, dp_to_cp, density_dp, density_cp, mode_dp, fwhm_dp`.
+  `GAMMA1_MAX, cp_to_dp, dp_to_cp, density_dp, density_cp, mode_dp,
+  fwhm_dp, hwhm_ratio_dp, sn_asymmetry_to_gamma1`.
 - Acceptance: `uv run ruff check chromhandler/fitting/skew_normal.py` and `uv run pyright chromhandler/fitting/skew_normal.py` pass clean.
 
 ## Phase 2 — Annotation and types layer
@@ -150,28 +171,37 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
 
 ## Phase 3 — Priors layer (`priors.py`)
 
-### Step 3.1 — Single-peak window moments
+### Step 3.1 — Single-peak FWHM-based feature extraction
 - Create `chromhandler/fitting/priors.py`.
 - Implement:
   ```python
   @dataclass(frozen=True)
-  class WindowMoments:
-      mu: float
-      sigma: float
-      gamma1: float
-      area: float
+  class WindowFeatures:
+      mu: float           # apex location (smoothed argmax)
+      sigma: float        # (HWHM_L + HWHM_R) / (2 · √(2 ln 2))
+      gamma1: float       # from HWHM ratio via sn_asymmetry_to_gamma1
+      area: float         # trapezoid integration
 
-  def compute_single_window_moments(
+  def compute_single_window_features(
       time: np.ndarray,
       signal_baseline_subtracted: np.ndarray,
       window_low: float,
       window_high: float,
-  ) -> WindowMoments
+      smoothing_window: int = 5,
+  ) -> WindowFeatures
   ```
-- Method of moments per §6.1 single-peak block.
-- Acceptance: `tests/unit/fitting/test_priors_moments.py`:
-  - Synthetic SN with known `(μ, σ, γ₁, A)` recovered within 5% on dense grid, low noise.
-  - Tested across γ₁ ∈ {-0.9, -0.3, 0, 0.3, 0.9}.
+- Per §6.1 single-peak hybrid block: smoothed argmax for μ, sample-interpolated
+  half-max bracket for HWHM_L and HWHM_R, conversion to (σ, γ₁), trapezoid
+  for area.
+- Half-max bracket: walk from apex outward, linearly interpolate the
+  threshold crossing between the two surrounding samples for sub-sample
+  precision.
+- Acceptance: `tests/unit/fitting/test_priors_features.py`:
+  - Synthetic SN with known `(μ, σ, γ₁, A)` recovered within 5% on dense
+    grid, low noise.
+  - Tested across γ₁ ∈ {-0.7, -0.3, 0, 0.3, 0.7}.
+  - At low S/N (S/N=5), per-trace estimates noisy but unbiased: average
+    over 100 synthetic traces recovers true values within 2%.
 
 ### Step 3.2 — Dominant apex detection (smoothed)
 - Implement:
@@ -228,7 +258,7 @@ This phase has zero NumPyro dependencies. It is the most-tested and most-isolate
 - Implement:
   ```python
   def aggregate_single_peak_priors(
-      per_trace_moments: list[WindowMoments],
+      per_trace_features: list[WindowFeatures],
       n_trace_pooled: int,
       dt: float,
   ) -> SkewNormalPriors

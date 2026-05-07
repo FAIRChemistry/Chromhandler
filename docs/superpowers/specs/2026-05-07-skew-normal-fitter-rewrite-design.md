@@ -191,20 +191,36 @@ the absolute position, the trace shift absorbs the drift.
   3. Empirical σ priors per side may differ — natural data-driven asymmetry.
 - No explicit ordering constraint on amplitudes. Empirical priors do the job.
 
-## 6. Priors — method of moments, no magic numbers
+## 6. Priors — FWHM-based hybrid extraction, no magic numbers
+
+Extraction uses each parameter's most robust estimator. Method of moments
+was rejected because (a) tight user windows truncate the SN tails,
+introducing systematic bias that survives population averaging, and
+(b) third moments are cubically sensitive to baseline error and tail noise.
+FWHM-based extraction is local (uses high-S/N points near the apex), so
+per-trace estimates are noisy but **unbiased** — averaging across traces
+cleans up the noise and recovers the true population shape. This is
+industry-standard in chromatography for the same reasons.
 
 ### 6.1 Per-trace, per-window extraction
 
 For each trace, on the baseline-subtracted signal `s(t)` within `[window_min, window_max]`:
 
-**Single peak window — method of moments:**
+**Single peak window — hybrid extraction:**
 ```
-weights = clip(s, 0) / sum(clip(s, 0))
-μ̂      = Σ t · weights
-σ̂²     = Σ (t − μ̂)² · weights
-γ̂₁     = Σ ((t − μ̂)/σ̂)³ · weights
-Â       = trapezoid(s, t)
+μ̂        = apex_loc                                  # smoothed argmax
+HWHM_L̂   = bracket left:  walk left from apex_loc until s = h_apex/2  (sample-interpolated)
+HWHM_R̂   = bracket right: walk right from apex_loc until s = h_apex/2 (sample-interpolated)
+σ̂        = (HWHM_L̂ + HWHM_R̂) / (2 · √(2 ln 2))      # FWHM/2.355
+γ̂₁       = sn_asymmetry_to_gamma1(HWHM_R̂ / HWHM_L̂)  # one-time table inversion
+Â        = trapezoid(s, t)
 ```
+
+`sn_asymmetry_to_gamma1` is a small precomputed table built once at fit
+time: for `α ∈ [-50, +50]`, compute the SN HWHM ratio numerically from
+`density_dp` and the corresponding `γ₁` via `dp_to_cp`. Lives in
+`skew_normal.py`. At prior-build time, interpolate measured asymmetry
+ratio → γ̂₁.
 
 **Doublet window — population information sharing.**
 
@@ -378,6 +394,14 @@ def mode_dp(xi: jax.Array, omega: jax.Array, alpha: jax.Array) -> jax.Array:
 
 def fwhm_dp(xi: jax.Array, omega: jax.Array, alpha: jax.Array) -> jax.Array:
     """Full width at half maximum, computed numerically from the density."""
+
+def hwhm_ratio_dp(xi: jax.Array, omega: jax.Array, alpha: jax.Array) -> jax.Array:
+    """HWHM_right / HWHM_left for SN(ξ, ω, α). Used to build the asymmetry
+    inversion table. Independent of ξ and ω (only depends on α)."""
+
+def sn_asymmetry_to_gamma1(ratio: float | jax.Array) -> float | jax.Array:
+    """Invert measured HWHM_R/HWHM_L ratio to γ₁ via a precomputed table.
+    Used at prior-build time only — once per fit."""
 ```
 
 No NumPyro imports. No state. Fully unit-testable with property-based tests
