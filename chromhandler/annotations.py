@@ -128,3 +128,29 @@ class BaselineAnnotation(BaseModel):
                 f"rt_max ({self.rt_max}) must be greater than rt_min ({self.rt_min})."
             )
         return self
+
+
+def check_baseline_peak_disjoint(
+    peaks: list[PeakAnnotation],
+    baselines: list[BaselineAnnotation],
+) -> None:
+    """Raise ``ValueError`` if any baseline window overlaps any peak window.
+
+    Peak-peak and baseline-baseline overlaps are explicitly allowed and not
+    checked. Touching boundaries (``a.rt_max == b.rt_min``) are not overlap.
+
+    Args:
+        peaks: Peak annotations to validate.
+        baselines: Baseline annotations to validate.
+
+    Raises:
+        ValueError: If a baseline window overlaps any peak window.
+    """
+    for b in baselines:
+        for p in peaks:
+            if b.rt_min < p.rt_max and p.rt_min < b.rt_max:
+                raise ValueError(
+                    f"Baseline window [{b.rt_min}, {b.rt_max}] overlaps peak "
+                    f"window [{p.rt_min}, {p.rt_max}] for molecule "
+                    f"{p.molecule_id!r}. Baseline regions must be peak-free."
+                )
