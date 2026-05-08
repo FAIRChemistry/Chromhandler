@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 
 # Vocabulary aligned with the fitting module internals.
 PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
@@ -68,6 +68,16 @@ class PeakAnnotation(BaseModel):
     vary_separation: bool = False
     include_artefact_in_area: bool = False
     wavelength: float | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def n_components(self) -> int:
+        """Number of skew-normal components implied by ``mode``.
+
+        Returns:
+            1 for ``"single"``, 2 for ``"artefact_doublet"`` or ``"free_doublet"``.
+        """
+        return 1 if self.mode == "single" else 2
 
     @model_validator(mode="after")
     def _validate(self) -> PeakAnnotation:
