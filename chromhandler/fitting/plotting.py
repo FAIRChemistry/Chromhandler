@@ -85,3 +85,52 @@ def add_annotation_regions(
     for b in dataset.baseline_annotations:
         ax.axvspan(b.rt_min, b.rt_max, color=baseline_color, alpha=alpha)
     return ax
+
+
+def add_baseline(
+    ax: Axes,
+    dataset: PreparedDataset,
+    trace_idx: int,
+    *,
+    show_noise_band: bool = True,
+    color: str = "tab:blue",
+    linewidth: float = 1.0,
+    linestyle: str = "--",
+    band_alpha: float = 0.15,
+) -> Axes:
+    """Overlay one trace's OLS baseline, optionally with a +/-noise ribbon.
+
+    The baseline is drawn across the full valid time range of the trace
+    (NaN-padded samples excluded). The optional noise ribbon is a
+    translucent fill at ``baseline +/- noise_per_trace[trace_idx]``.
+
+    Args:
+        ax: Target axes (mutated and returned).
+        dataset: Source of baseline parameters and noise.
+        trace_idx: Which trace to plot.
+        show_noise_band: If True, fill between ``baseline +/- noise``.
+        color: Line + fill colour.
+        linewidth: Line width in points.
+        linestyle: Line style (default dashed).
+        band_alpha: Noise-band fill opacity.
+
+    Returns:
+        The same ``ax`` passed in.
+    """
+    valid = dataset.valid_mask[trace_idx]
+    t = dataset.time[trace_idx][valid]
+    intercept = dataset.baseline_intercept[trace_idx]
+    slope = dataset.baseline_slope[trace_idx]
+    noise = dataset.noise_per_trace[trace_idx]
+    baseline = intercept + slope * t
+    if show_noise_band:
+        ax.fill_between(
+            t,
+            baseline - noise,
+            baseline + noise,
+            color=color,
+            alpha=band_alpha,
+            linewidth=0,
+        )
+    ax.plot(t, baseline, color=color, linewidth=linewidth, linestyle=linestyle)
+    return ax

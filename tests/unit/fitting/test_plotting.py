@@ -100,3 +100,72 @@ class TestAddAnnotationRegions:
             assert len(ax.patches) - n_patches_before == 3
         finally:
             plt.close(fig)
+
+
+class TestAddBaseline:
+    """The add_baseline axes primitive."""
+
+    def test_returns_same_axes(self) -> None:
+        from chromhandler.fitting.plotting import add_baseline
+
+        ds = _make_synthetic_dataset()
+        fig, ax = plt.subplots()
+        try:
+            returned = add_baseline(ax, ds, trace_idx=0)
+            assert returned is ax
+        finally:
+            plt.close(fig)
+
+    def test_adds_baseline_line(self) -> None:
+        from chromhandler.fitting.plotting import add_baseline
+
+        ds = _make_synthetic_dataset()
+        fig, ax = plt.subplots()
+        try:
+            n_lines_before = len(ax.lines)
+            add_baseline(ax, ds, trace_idx=0, show_noise_band=False)
+            assert len(ax.lines) == n_lines_before + 1
+        finally:
+            plt.close(fig)
+
+    def test_noise_band_adds_polycollection(self) -> None:
+        from chromhandler.fitting.plotting import add_baseline
+
+        ds = _make_synthetic_dataset()
+        fig, ax = plt.subplots()
+        try:
+            n_collections_before = len(ax.collections)
+            add_baseline(ax, ds, trace_idx=0, show_noise_band=True)
+            # fill_between adds a PolyCollection
+            assert len(ax.collections) == n_collections_before + 1
+        finally:
+            plt.close(fig)
+
+    def test_no_noise_band_when_disabled(self) -> None:
+        from chromhandler.fitting.plotting import add_baseline
+
+        ds = _make_synthetic_dataset()
+        fig, ax = plt.subplots()
+        try:
+            n_collections_before = len(ax.collections)
+            add_baseline(ax, ds, trace_idx=0, show_noise_band=False)
+            assert len(ax.collections) == n_collections_before
+        finally:
+            plt.close(fig)
+
+    def test_baseline_values_match_intercept_slope(self) -> None:
+        from chromhandler.fitting.plotting import add_baseline
+
+        ds = _make_synthetic_dataset()
+        fig, ax = plt.subplots()
+        try:
+            add_baseline(ax, ds, trace_idx=0, show_noise_band=False)
+            (line,) = ax.lines[-1:]
+            xdata = np.asarray(line.get_xdata())
+            ydata = np.asarray(line.get_ydata())
+            expected = (
+                ds.baseline_intercept[0] + ds.baseline_slope[0] * xdata
+            )
+            np.testing.assert_allclose(ydata, expected, atol=1e-9)
+        finally:
+            plt.close(fig)
