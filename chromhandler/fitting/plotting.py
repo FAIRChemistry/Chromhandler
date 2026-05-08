@@ -21,7 +21,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import numpy as np
     from matplotlib.axes import Axes
+    from numpy.typing import NDArray
 
     from chromhandler.fitting.prepared_dataset import PreparedDataset
 
@@ -133,4 +137,42 @@ def add_baseline(
             linewidth=0,
         )
     ax.plot(t, baseline, color=color, linewidth=linewidth, linestyle=linestyle)
+    return ax
+
+
+def add_model(
+    ax: Axes,
+    dataset: PreparedDataset,
+    trace_idx: int,
+    model_fn: Callable[[NDArray[np.float64], int], NDArray[np.float64]],
+    *,
+    color: str = "tab:red",
+    linewidth: float = 1.0,
+    linestyle: str = "-",
+) -> Axes:
+    """Overlay an arbitrary model evaluation on one trace.
+
+    Decoupled from MCMC: ``model_fn`` is any callable that takes
+    ``(time[n_valid], trace_idx)`` and returns predicted signal of the
+    same shape. NaN-padded samples are masked out before the call.
+
+    Use cases include prior predictive checks, MAP fits, posterior
+    median overlays, and hand-specified parameter sweeps.
+
+    Args:
+        ax: Target axes (mutated and returned).
+        dataset: Source of time + valid mask.
+        trace_idx: Which trace to evaluate.
+        model_fn: Callable ``(time, trace_idx) -> predicted_signal``.
+        color: Line colour.
+        linewidth: Line width in points.
+        linestyle: Line style.
+
+    Returns:
+        The same ``ax`` passed in.
+    """
+    valid = dataset.valid_mask[trace_idx]
+    t = dataset.time[trace_idx][valid]
+    predicted = model_fn(t, trace_idx)
+    ax.plot(t, predicted, color=color, linewidth=linewidth, linestyle=linestyle)
     return ax

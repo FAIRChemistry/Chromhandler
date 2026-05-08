@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 from chromhandler.fitting.prepared_dataset import PreparedDataset, prepare_dataset
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 def _make_synthetic_dataset(n_trace: int = 3) -> PreparedDataset:
@@ -167,5 +172,62 @@ class TestAddBaseline:
                 ds.baseline_intercept[0] + ds.baseline_slope[0] * xdata
             )
             np.testing.assert_allclose(ydata, expected, atol=1e-9)
+        finally:
+            plt.close(fig)
+
+
+class TestAddModel:
+    """The add_model axes primitive."""
+
+    def test_returns_same_axes(self) -> None:
+        from chromhandler.fitting.plotting import add_model
+
+        ds = _make_synthetic_dataset()
+        fig, ax = plt.subplots()
+        try:
+            returned = add_model(ax, ds, trace_idx=0, model_fn=lambda t, i: t)
+            assert returned is ax
+        finally:
+            plt.close(fig)
+
+    def test_calls_model_fn_with_valid_time_and_trace_idx(self) -> None:
+        from chromhandler.fitting.plotting import add_model
+
+        ds = _make_synthetic_dataset()
+        seen: dict[str, object] = {}
+
+        def model_fn(t: NDArray[np.float64], i: int) -> NDArray[np.float64]:
+            seen["t"] = t
+            seen["i"] = i
+            return np.zeros_like(t)
+
+        fig, ax = plt.subplots()
+        try:
+            add_model(ax, ds, trace_idx=2, model_fn=model_fn)
+            assert seen["i"] == 2
+            t_obj = seen["t"]
+            assert isinstance(t_obj, np.ndarray)
+            t: NDArray[np.float64] = t_obj
+            assert not np.any(np.isnan(t))  # NaN padding masked out
+            assert t.shape == (101,)
+        finally:
+            plt.close(fig)
+
+    def test_overlays_model_output_as_line(self) -> None:
+        from chromhandler.fitting.plotting import add_model
+
+        ds = _make_synthetic_dataset()
+
+        def model_fn(t: NDArray[np.float64], i: int) -> NDArray[np.float64]:
+            return 0.5 + 0.0 * t  # constant 0.5
+
+        fig, ax = plt.subplots()
+        try:
+            n_lines_before = len(ax.lines)
+            add_model(ax, ds, trace_idx=0, model_fn=model_fn)
+            assert len(ax.lines) == n_lines_before + 1
+            (line,) = ax.lines[-1:]
+            ydata = np.asarray(line.get_ydata())
+            np.testing.assert_allclose(ydata, 0.5, atol=1e-9)
         finally:
             plt.close(fig)
