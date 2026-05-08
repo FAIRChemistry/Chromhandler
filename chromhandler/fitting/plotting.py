@@ -1,0 +1,87 @@
+"""Diagnostic and posterior plotting for chromatographic fitting.
+
+Two layers:
+
+1. **Axes-level primitives** -- ``add_*`` functions that take an existing
+   :class:`matplotlib.axes.Axes`, mutate it, and return it. Composable
+   building blocks. Idiomatic matplotlib.
+
+2. **Figure-level convenience** -- ``plot_*`` functions that build a
+   complete :class:`matplotlib.figure.Figure` for a common case by
+   composing the axes primitives.
+
+Matplotlib is the only plot dependency. The foundations modules
+(``preprocessing``, ``baseline``, ``noise``, ``prepared_dataset``,
+``annotations``) deliberately do not import matplotlib; that import
+lives only here.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+
+    from chromhandler.fitting.prepared_dataset import PreparedDataset
+
+
+def add_signal(
+    ax: Axes,
+    dataset: PreparedDataset,
+    trace_idx: int,
+    *,
+    color: str = "tab:gray",
+    linewidth: float = 0.8,
+    alpha: float = 0.85,
+) -> Axes:
+    """Plot one trace's raw signal on the given axes.
+
+    NaN-padded samples are masked out before plotting.
+
+    Args:
+        ax: Target axes (mutated and returned).
+        dataset: The prepared dataset.
+        trace_idx: Which trace to plot.
+        color: Line colour.
+        linewidth: Line width in points.
+        alpha: Line opacity.
+
+    Returns:
+        The same ``ax`` passed in.
+    """
+    valid = dataset.valid_mask[trace_idx]
+    t = dataset.time[trace_idx][valid]
+    s = dataset.signal[trace_idx][valid]
+    ax.plot(t, s, color=color, linewidth=linewidth, alpha=alpha)
+    return ax
+
+
+def add_annotation_regions(
+    ax: Axes,
+    dataset: PreparedDataset,
+    *,
+    peak_color: str = "tab:orange",
+    baseline_color: str = "tab:green",
+    alpha: float = 0.15,
+) -> Axes:
+    """Shade peak windows and baseline regions across the time axis.
+
+    Each :class:`PeakAnnotation` and :class:`BaselineAnnotation` becomes a
+    vertical band spanning its ``[rt_min, rt_max]`` range.
+
+    Args:
+        ax: Target axes (mutated and returned).
+        dataset: Source of the annotations.
+        peak_color: Fill colour for peak windows.
+        baseline_color: Fill colour for baseline regions.
+        alpha: Fill opacity.
+
+    Returns:
+        The same ``ax`` passed in.
+    """
+    for p in dataset.peak_annotations:
+        ax.axvspan(p.rt_min, p.rt_max, color=peak_color, alpha=alpha)
+    for b in dataset.baseline_annotations:
+        ax.axvspan(b.rt_min, b.rt_max, color=baseline_color, alpha=alpha)
+    return ax
