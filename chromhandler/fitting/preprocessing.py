@@ -74,7 +74,11 @@ def compute_dt_per_trace(time: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 def compute_global_dt(dt_per_trace: NDArray[np.float64]) -> float:
-    """Median of per-trace ``dt`` values.
+    """Median of per-trace ``dt`` values, ignoring NaN.
+
+    A trace with only one sample produces ``NaN`` in ``dt_per_trace``
+    (no diff defined). Using ``nanmedian`` keeps the global value
+    sensible in that edge case rather than propagating NaN.
 
     Args:
         dt_per_trace: ``[n_trace]`` array of per-trace median dt.
@@ -82,4 +86,4 @@ def compute_global_dt(dt_per_trace: NDArray[np.float64]) -> float:
     Returns:
         Global median dt as a Python float.
     """
-    return float(np.median(dt_per_trace))
+    return float(np.nanmedian(dt_per_trace))

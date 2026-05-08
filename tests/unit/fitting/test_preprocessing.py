@@ -86,3 +86,11 @@ class TestComputeGlobalDt:
         from chromhandler.fitting.preprocessing import compute_global_dt
 
         assert compute_global_dt(np.array([0.1, 0.1, 0.5])) == 0.1
+
+    def test_ignores_nan_from_single_sample_traces(self) -> None:
+        from chromhandler.fitting.preprocessing import compute_global_dt
+
+        # A trace with only one sample contributes NaN to dt_per_trace
+        # (no diff defined); the global value should still come from
+        # the well-defined traces.
+        assert compute_global_dt(np.array([np.nan, 0.1, 0.1])) == 0.1
