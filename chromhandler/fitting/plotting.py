@@ -20,11 +20,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import matplotlib.pyplot as plt
+
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     import numpy as np
     from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
     from numpy.typing import NDArray
 
     from chromhandler.fitting.prepared_dataset import PreparedDataset
@@ -176,3 +180,107 @@ def add_model(
     predicted = model_fn(t, trace_idx)
     ax.plot(t, predicted, color=color, linewidth=linewidth, linestyle=linestyle)
     return ax
+
+
+def _grid_shape(n_trace: int, n_cols: int) -> tuple[int, int]:
+    """Compute ``(n_rows, n_cols)`` for a square-ish grid of n_trace panels."""
+    n_rows = (n_trace + n_cols - 1) // n_cols
+    return n_rows, n_cols
+
+
+def _hide_unused_axes(fig: Figure, n_trace: int) -> None:
+    """Hide any axes beyond the n_trace data panels (trailing grid cells)."""
+    for ax in fig.axes[n_trace:]:
+        ax.set_visible(False)
+
+
+def plot_overview(
+    dataset: PreparedDataset,
+    path: str | Path | None = None,
+    *,
+    n_cols: int = 3,
+    figsize_per_panel: tuple[float, float] = (4.0, 2.5),
+) -> Figure:
+    """Per-trace grid: signal + annotation regions.
+
+    A quick sanity check that the data and annotations look right before
+    any fitting. One panel per trace; trailing grid cells (if any) are
+    hidden.
+
+    Args:
+        dataset: The prepared dataset.
+        path: If provided, save the figure to this path with
+            ``fig.savefig``. The figure is always returned regardless.
+        n_cols: Number of columns in the grid.
+        figsize_per_panel: ``(width, height)`` per panel in inches.
+
+    Returns:
+        The constructed :class:`matplotlib.figure.Figure`.
+    """
+    n_rows, _ = _grid_shape(dataset.n_trace, n_cols)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(figsize_per_panel[0] * n_cols, figsize_per_panel[1] * n_rows),
+        sharex=True,
+        squeeze=False,
+    )
+    flat_axes = axes.ravel()
+    for i in range(dataset.n_trace):
+        ax = flat_axes[i]
+        add_signal(ax, dataset, trace_idx=i)
+        add_annotation_regions(ax, dataset)
+        ax.set_title(f"trace {i}")
+    _hide_unused_axes(fig, dataset.n_trace)
+    fig.tight_layout()
+    if path is not None:
+        fig.savefig(path)
+    return fig
+
+
+def plot_baseline_diagnostic(
+    dataset: PreparedDataset,
+    path: str | Path | None = None,
+    *,
+    n_cols: int = 3,
+    figsize_per_panel: tuple[float, float] = (4.0, 2.5),
+) -> Figure:
+    """Per-trace grid: signal + annotation regions + OLS baseline + noise.
+
+    The canonical pre-fit diagnostic for the foundations layer. Each
+    panel title shows the per-trace ``dt`` and ``noise`` so the user
+    sees at a glance whether the OLS baseline and noise estimate look
+    sensible.
+
+    Args:
+        dataset: The prepared dataset.
+        path: If provided, save the figure to this path. The figure is
+            always returned regardless.
+        n_cols: Number of columns in the grid.
+        figsize_per_panel: ``(width, height)`` per panel in inches.
+
+    Returns:
+        The constructed :class:`matplotlib.figure.Figure`.
+    """
+    n_rows, _ = _grid_shape(dataset.n_trace, n_cols)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(figsize_per_panel[0] * n_cols, figsize_per_panel[1] * n_rows),
+        sharex=True,
+        squeeze=False,
+    )
+    flat_axes = axes.ravel()
+    for i in range(dataset.n_trace):
+        ax = flat_axes[i]
+        add_annotation_regions(ax, dataset)
+        add_signal(ax, dataset, trace_idx=i)
+        add_baseline(ax, dataset, trace_idx=i, show_noise_band=True)
+        dt = dataset.dt_per_trace[i]
+        noise = dataset.noise_per_trace[i]
+        ax.set_title(f"trace {i}: dt={dt:.4f}, noise={noise:.3f}")
+    _hide_unused_axes(fig, dataset.n_trace)
+    fig.tight_layout()
+    if path is not None:
+        fig.savefig(path)
+    return fig

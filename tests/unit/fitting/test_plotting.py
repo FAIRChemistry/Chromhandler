@@ -11,6 +11,8 @@ from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 from chromhandler.fitting.prepared_dataset import PreparedDataset, prepare_dataset
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
 
@@ -229,5 +231,92 @@ class TestAddModel:
             (line,) = ax.lines[-1:]
             ydata = np.asarray(line.get_ydata())
             np.testing.assert_allclose(ydata, 0.5, atol=1e-9)
+        finally:
+            plt.close(fig)
+
+
+class TestPlotOverview:
+    """plot_overview figure-level convenience."""
+
+    def test_returns_figure_with_one_axes_per_trace(self) -> None:
+        from chromhandler.fitting.plotting import plot_overview
+
+        ds = _make_synthetic_dataset(n_trace=4)
+        fig = plot_overview(ds)
+        try:
+            # Each trace gets one axes; trailing cells in the grid stay
+            # empty but are still added by plt.subplots — figure-level
+            # convenience hides them.
+            data_axes = [a for a in fig.axes if a.has_data() or a.lines or a.patches]
+            assert len(data_axes) == 4
+        finally:
+            plt.close(fig)
+
+    def test_save_path_writes_file(self, tmp_path: Path) -> None:
+        from chromhandler.fitting.plotting import plot_overview
+
+        ds = _make_synthetic_dataset(n_trace=2)
+        out = tmp_path / "overview.png"
+        fig = plot_overview(ds, path=out)
+        try:
+            assert out.exists()
+            assert out.stat().st_size > 0
+        finally:
+            plt.close(fig)
+
+
+class TestPlotBaselineDiagnostic:
+    """plot_baseline_diagnostic figure-level convenience."""
+
+    def test_returns_figure_with_one_axes_per_trace(self) -> None:
+        from chromhandler.fitting.plotting import plot_baseline_diagnostic
+
+        ds = _make_synthetic_dataset(n_trace=4)
+        fig = plot_baseline_diagnostic(ds)
+        try:
+            data_axes = [a for a in fig.axes if a.has_data() or a.lines or a.patches]
+            assert len(data_axes) == 4
+        finally:
+            plt.close(fig)
+
+    def test_each_panel_has_baseline_line_and_noise_band(self) -> None:
+        from chromhandler.fitting.plotting import plot_baseline_diagnostic
+
+        ds = _make_synthetic_dataset(n_trace=3)
+        fig = plot_baseline_diagnostic(ds)
+        try:
+            data_axes = [a for a in fig.axes if a.has_data() or a.lines or a.patches]
+            assert len(data_axes) == 3
+            for ax in data_axes:
+                # signal line + baseline line >= 2; one PolyCollection from noise band.
+                assert len(ax.lines) >= 2
+                assert len(ax.collections) >= 1
+        finally:
+            plt.close(fig)
+
+    def test_panel_titles_include_dt_and_noise(self) -> None:
+        from chromhandler.fitting.plotting import plot_baseline_diagnostic
+
+        ds = _make_synthetic_dataset(n_trace=2)
+        fig = plot_baseline_diagnostic(ds)
+        try:
+            data_axes = [a for a in fig.axes if a.has_data() or a.lines or a.patches]
+            for i, ax in enumerate(data_axes):
+                title = ax.get_title()
+                assert f"trace {i}" in title
+                assert "dt=" in title
+                assert "noise=" in title
+        finally:
+            plt.close(fig)
+
+    def test_save_path_writes_file(self, tmp_path: Path) -> None:
+        from chromhandler.fitting.plotting import plot_baseline_diagnostic
+
+        ds = _make_synthetic_dataset(n_trace=2)
+        out = tmp_path / "baseline_diag.png"
+        fig = plot_baseline_diagnostic(ds, path=out)
+        try:
+            assert out.exists()
+            assert out.stat().st_size > 0
         finally:
             plt.close(fig)
