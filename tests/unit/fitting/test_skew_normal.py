@@ -155,3 +155,35 @@ def test_density_dp_is_differentiable():
     assert jnp.isfinite(g_xi)
     assert jnp.isfinite(g_omega)
     assert jnp.isfinite(g_alpha)
+
+
+def test_mode_dp_zero_alpha_is_xi():
+    """At alpha = 0 the mode of N(xi, omega^2) is xi."""
+    m = sn.mode_dp(jnp.asarray(1.5), jnp.asarray(0.7), jnp.asarray(0.0))
+    np.testing.assert_allclose(float(m), 1.5, atol=1e-12)
+
+
+def test_mode_dp_is_local_maximum():
+    """For each alpha in a grid, density at mode >= density at mode +/- eps."""
+    alphas = np.array([-8.0, -2.0, 0.5, 2.0, 8.0])
+    eps = 1e-3
+    for a in alphas:
+        m = float(sn.mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
+        f_at = float(sn.density_dp(jnp.asarray(m), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
+        f_lo = float(sn.density_dp(jnp.asarray(m - eps), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
+        f_hi = float(sn.density_dp(jnp.asarray(m + eps), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
+        assert f_at >= f_lo - 1e-6, f"alpha={a}: f(m)={f_at} < f(m-eps)={f_lo}"
+        assert f_at >= f_hi - 1e-6, f"alpha={a}: f(m)={f_at} < f(m+eps)={f_hi}"
+
+
+def test_mode_dp_close_to_numerical_mode():
+    """Azzalini's m_0 approximation is within 1e-3 of the true mode."""
+    from scipy.optimize import minimize_scalar
+
+    for a in [-5.0, -1.0, 1.0, 5.0]:
+        def neg_pdf(x: float, a: float = a) -> float:
+            return -float(skewnorm.pdf(x, a=a))
+        result = minimize_scalar(neg_pdf, bracket=(-5.0, 5.0))
+        m_true: float = float(result.x)  # type: ignore[union-attr]
+        m_pred = float(sn.mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
+        assert abs(m_pred - m_true) < 1e-3, f"alpha={a}: pred={m_pred}, true={m_true}"
