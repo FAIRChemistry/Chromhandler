@@ -11,6 +11,7 @@ See ``docs/superpowers/specs/2026-05-07-skew-normal-fitter-rewrite-design.md``
 
 from __future__ import annotations
 
+import functools
 import math
 
 import jax.numpy as jnp
@@ -270,3 +271,42 @@ def fwhm_dp(
         np.asarray(omega, dtype=float),
         np.asarray(alpha, dtype=float),
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _asymmetry_table() -> (  # type: ignore[return]
+    tuple[
+        np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+        np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+    ]
+):
+    """Build the (ratio -> gamma1) inversion table once.
+
+    Sweeps alpha over a wide grid, computes HWHM ratio via :func:`_hwhm_ratio_scalar`
+    and gamma1 via :func:`dp_to_cp`, then sorts by ratio so the result is
+    monotone-increasing in ratio. Cached on the first call.
+    """
+    alphas = np.linspace(-50.0, 50.0, 4001)
+    ratios = np.vectorize(_hwhm_ratio_scalar, otypes=[float])(alphas)
+    _, _, gamma1s = dp_to_cp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alphas))
+    gamma1s_np = np.asarray(gamma1s)
+    order = np.argsort(ratios)
+    return ratios[order], gamma1s_np[order]
+
+
+def sn_asymmetry_to_gamma1(ratio: jnp.ndarray) -> jnp.ndarray:
+    """Invert measured HWHM_R/HWHM_L ratio to gamma1 via a precomputed table.
+
+    Used at prior-build time only — once per fit. The table is built on
+    first call and cached for the process lifetime.
+
+    Args:
+        ratio: Measured HWHM_R / HWHM_L. Scalar or array. For symmetric
+            peaks ratio approx 1 -> gamma1 approx 0; ratio>1 -> gamma1>0;
+            ratio<1 -> gamma1<0.
+
+    Returns:
+        Interpolated gamma1 values with the shape of ``ratio``.
+    """
+    ratios_grid, gamma1_grid = _asymmetry_table()
+    return jnp.interp(jnp.asarray(ratio), jnp.asarray(ratios_grid), jnp.asarray(gamma1_grid))
