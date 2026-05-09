@@ -222,3 +222,35 @@ def test_fwhm_dp_array_input():
     out = sn.fwhm_dp(np.zeros_like(alphas), np.ones_like(alphas), alphas)
     assert out.shape == alphas.shape
     assert np.all(out > 0.0)
+
+
+def test_hwhm_ratio_at_zero_alpha_is_one():
+    """For alpha=0 the SN is symmetric: HWHM_R / HWHM_L = 1."""
+    r = float(sn.hwhm_ratio_dp(0.0, 1.0, 0.0))
+    np.testing.assert_allclose(r, 1.0, rtol=1e-5)
+
+
+def test_hwhm_ratio_independent_of_xi_omega():
+    """HWHM ratio depends only on alpha."""
+    a = 3.0
+    r1 = float(sn.hwhm_ratio_dp(0.0, 1.0, a))
+    r2 = float(sn.hwhm_ratio_dp(2.5, 0.4, a))
+    r3 = float(sn.hwhm_ratio_dp(-1.0, 2.7, a))
+    np.testing.assert_allclose(r1, r2, rtol=1e-5)
+    np.testing.assert_allclose(r1, r3, rtol=1e-5)
+
+
+def test_hwhm_ratio_monotone_in_alpha():
+    """HWHM_R / HWHM_L is monotone increasing in alpha."""
+    alphas = np.linspace(-10.0, 10.0, 41)
+    ratios = sn.hwhm_ratio_dp(np.zeros_like(alphas), np.ones_like(alphas), alphas)
+    diffs = np.diff(ratios)
+    assert np.all(diffs > 0.0), f"non-monotone: smallest diff = {diffs.min()}"
+
+
+def test_hwhm_ratio_mirror_symmetry():
+    """hwhm_ratio_dp(-alpha) = 1 / hwhm_ratio_dp(alpha)."""
+    for a in [0.5, 1.0, 3.0, 8.0]:
+        r_pos = float(sn.hwhm_ratio_dp(0.0, 1.0, a))
+        r_neg = float(sn.hwhm_ratio_dp(0.0, 1.0, -a))
+        np.testing.assert_allclose(r_pos * r_neg, 1.0, rtol=1e-4)

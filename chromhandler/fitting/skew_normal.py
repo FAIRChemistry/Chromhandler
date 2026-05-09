@@ -196,6 +196,55 @@ def _fwhm_scalar(xi: float, omega: float, alpha: float) -> float:
     return x_right - x_left
 
 
+def _hwhm_ratio_scalar(alpha: float) -> float:
+    """Scalar HWHM_R / HWHM_L of SN(0, 1, alpha). Independent of xi and omega."""
+    mode = float(mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha)))
+    peak = float(
+        density_dp(jnp.asarray(mode), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha))
+    )
+    half = peak / 2.0
+
+    def shifted(x: float) -> float:
+        return float(
+            density_dp(jnp.asarray(x), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha))
+        ) - half
+
+    x_lo = mode - 1.0
+    while shifted(x_lo) > 0.0:
+        x_lo -= 1.0
+    x_hi = mode + 1.0
+    while shifted(x_hi) > 0.0:
+        x_hi += 1.0
+    x_left = float(brentq(shifted, x_lo, mode))  # type: ignore[arg-type]
+    x_right = float(brentq(shifted, mode, x_hi))  # type: ignore[arg-type]
+    return (x_right - mode) / (mode - x_left)
+
+
+def hwhm_ratio_dp(
+    xi: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+    omega: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+    alpha: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+) -> np.ndarray[tuple[int, ...], np.dtype[np.float64]]:
+    """Right-to-left HWHM ratio of SN(xi, omega, alpha). Independent of xi and omega.
+
+    Used at fit time to invert measured peak asymmetry to gamma1 via
+    :func:`sn_asymmetry_to_gamma1`. The (xi, omega) arguments are accepted
+    for signature symmetry with the rest of the DP API but are ignored.
+
+    Args:
+        xi: Ignored (kept for API symmetry).
+        omega: Ignored (kept for API symmetry).
+        alpha: DP slant, scalar or array.
+
+    Returns:
+        HWHM_R / HWHM_L as a numpy array, broadcast shape of ``alpha``.
+    """
+    del xi, omega  # ratio is invariant under (xi, omega); kept in signature for symmetry.
+    return np.vectorize(_hwhm_ratio_scalar, otypes=[float])(  # type: ignore[return-value]
+        np.asarray(alpha, dtype=float)
+    )
+
+
 def fwhm_dp(
     xi: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
     omega: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
