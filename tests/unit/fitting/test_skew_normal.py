@@ -54,3 +54,51 @@ def test_cp_to_dp_against_scipy_grid():
     np.testing.assert_allclose(np.asarray(xi_pred), xi_true, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(np.asarray(omega_pred), omega_true, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(np.asarray(alpha_pred), alpha_true, rtol=1e-5, atol=1e-7)
+
+
+def test_dp_to_cp_zero_alpha_is_identity_on_xi_omega():
+    """At alpha=0 the SN is N(xi, omega^2): mu=xi, sigma=omega, gamma1=0."""
+    mu, sigma, gamma1 = sn.dp_to_cp(jnp.asarray(2.0), jnp.asarray(0.5), jnp.asarray(0.0))
+    np.testing.assert_allclose(float(mu), 2.0, atol=1e-12)
+    np.testing.assert_allclose(float(sigma), 0.5, atol=1e-12)
+    np.testing.assert_allclose(float(gamma1), 0.0, atol=1e-12)
+
+
+def test_dp_to_cp_matches_scipy_moments():
+    """dp_to_cp matches scipy.stats.skewnorm.stats for a grid of alpha."""
+    alphas = np.linspace(-12.0, 12.0, 25)
+    omegas = np.full_like(alphas, 0.7)
+    xis = np.full_like(alphas, 1.3)
+    mu_pred, sigma_pred, gamma1_pred = sn.dp_to_cp(
+        jnp.asarray(xis), jnp.asarray(omegas), jnp.asarray(alphas)
+    )
+    mean_sp, var_sp, skew_sp = skewnorm.stats(a=alphas, loc=xis, scale=omegas, moments="mvs")
+    np.testing.assert_allclose(np.asarray(mu_pred), mean_sp, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(sigma_pred), np.sqrt(var_sp), rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(gamma1_pred), skew_sp, rtol=1e-6, atol=1e-8)
+
+
+def test_cp_dp_round_trip():
+    """cp_to_dp ∘ dp_to_cp = identity on a grid that stays inside the SN family."""
+    rng = np.random.default_rng(1)
+    mu = rng.uniform(-2.0, 2.0, size=50)
+    sigma = rng.uniform(0.2, 1.5, size=50)
+    gamma1 = rng.uniform(-0.95 * sn.GAMMA1_MAX, 0.95 * sn.GAMMA1_MAX, size=50)
+    xi, omega, alpha = sn.cp_to_dp(jnp.asarray(mu), jnp.asarray(sigma), jnp.asarray(gamma1))
+    mu_back, sigma_back, gamma1_back = sn.dp_to_cp(xi, omega, alpha)
+    np.testing.assert_allclose(np.asarray(mu_back), mu, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(sigma_back), sigma, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(gamma1_back), gamma1, rtol=1e-6, atol=1e-8)
+
+
+def test_dp_cp_round_trip():
+    """dp_to_cp o cp_to_dp = identity on a grid of (xi, omega, alpha)."""
+    rng = np.random.default_rng(2)
+    xi = rng.uniform(-2.0, 2.0, size=50)
+    omega = rng.uniform(0.2, 1.5, size=50)
+    alpha = rng.uniform(-15.0, 15.0, size=50)
+    mu, sigma, gamma1 = sn.dp_to_cp(jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))
+    xi_back, omega_back, alpha_back = sn.cp_to_dp(mu, sigma, gamma1)
+    np.testing.assert_allclose(np.asarray(xi_back), xi, rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(omega_back), omega, rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(alpha_back), alpha, rtol=1e-5, atol=1e-7)

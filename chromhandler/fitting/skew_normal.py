@@ -50,3 +50,27 @@ def cp_to_dp(
     alpha = delta / jnp.sqrt(1.0 - delta**2)
     xi = mu - omega * b_delta
     return xi, omega, alpha
+
+
+def dp_to_cp(
+    xi: jnp.ndarray, omega: jnp.ndarray, alpha: jnp.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Convert direct parameters (xi, omega, alpha) to centred parameters (mu, sigma, gamma1).
+
+    Forward Azzalini formulas (spec §2.3). Inverse of :func:`cp_to_dp`.
+
+    Args:
+        xi: DP location.
+        omega: DP scale, strictly positive.
+        alpha: DP slant. Any real value.
+
+    Returns:
+        Tuple (mu, sigma, gamma1) of CP parameters, broadcast to the
+        common shape of the inputs.
+    """
+    delta = alpha / jnp.sqrt(1.0 + alpha**2)
+    b_delta = _B_CONST * delta
+    mu = xi + omega * b_delta
+    sigma = omega * jnp.sqrt(1.0 - b_delta**2)
+    gamma1 = ((4.0 - jnp.pi) / 2.0) * b_delta**3 / (1.0 - b_delta**2) ** 1.5
+    return mu, sigma, gamma1
