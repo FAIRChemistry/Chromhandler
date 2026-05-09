@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import math
 
+import jax.numpy as jnp
+
 # Skewness of the half-normal distribution = max |γ₁| achievable by any
 # skew-normal. See spec §2.2.
 GAMMA1_MAX: float = (
@@ -22,3 +24,29 @@ GAMMA1_MAX: float = (
 )
 
 _B_CONST: float = math.sqrt(2.0 / math.pi)
+
+
+def cp_to_dp(
+    mu: jnp.ndarray, sigma: jnp.ndarray, gamma1: jnp.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Convert centred parameters (mu, sigma, gamma1) to direct parameters (xi, omega, alpha).
+
+    Closed form via the Azzalini relations (spec §2.3).
+
+    Args:
+        mu: Mean of the skew-normal. Any broadcastable shape.
+        sigma: Standard deviation. Strictly positive.
+        gamma1: Skewness coefficient. Must satisfy |gamma1| < GAMMA1_MAX;
+            values outside the open interval are not in the SN family.
+
+    Returns:
+        Tuple (xi, omega, alpha) of DP parameters, broadcast to the
+        common shape of the inputs.
+    """
+    c = jnp.cbrt(2.0 * gamma1 / (4.0 - jnp.pi))
+    b_delta = c / jnp.sqrt(1.0 + c**2)
+    delta = b_delta / _B_CONST
+    omega = sigma / jnp.sqrt(1.0 - b_delta**2)
+    alpha = delta / jnp.sqrt(1.0 - delta**2)
+    xi = mu - omega * b_delta
+    return xi, omega, alpha
