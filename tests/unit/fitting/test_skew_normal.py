@@ -187,3 +187,38 @@ def test_mode_dp_close_to_numerical_mode():
         m_true: float = float(result.x)  # type: ignore[union-attr]
         m_pred = float(sn.mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
         assert abs(m_pred - m_true) < 1e-3, f"alpha={a}: pred={m_pred}, true={m_true}"
+
+
+def test_fwhm_dp_normal_case():
+    """For alpha=0, FWHM of N(0, omega^2) equals 2 * omega * sqrt(2 ln 2)."""
+    omega = 1.3
+    expected = 2.0 * omega * math.sqrt(2.0 * math.log(2.0))
+    pred = float(sn.fwhm_dp(0.0, omega, 0.0))
+    np.testing.assert_allclose(pred, expected, rtol=1e-5)
+
+
+def test_fwhm_dp_consistent_with_density():
+    """For each alpha, the spread between half-max points (numerically bracketed
+    against scipy) matches fwhm_dp."""
+    from scipy.optimize import brentq
+
+    for a in [-4.0, -1.0, 1.0, 4.0]:
+        xi, omega = 0.5, 0.9
+        m = float(sn.mode_dp(jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(a)))
+        peak = float(sn.density_dp(jnp.asarray(m), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(a)))
+        w = float(sn.fwhm_dp(xi, omega, a))
+
+        def f(x: float, a: float = a, xi: float = xi, omega: float = omega, peak: float = peak) -> float:
+            return float(skewnorm.pdf(x, a=a, loc=xi, scale=omega)) - peak / 2.0
+
+        x_left = brentq(f, m - 5.0 * omega, m)
+        x_right = brentq(f, m, m + 5.0 * omega)
+        np.testing.assert_allclose(w, x_right - x_left, rtol=1e-4)
+
+
+def test_fwhm_dp_array_input():
+    """fwhm_dp vectorizes over array alpha."""
+    alphas = np.array([-3.0, 0.0, 3.0])
+    out = sn.fwhm_dp(np.zeros_like(alphas), np.ones_like(alphas), alphas)
+    assert out.shape == alphas.shape
+    assert np.all(out > 0.0)

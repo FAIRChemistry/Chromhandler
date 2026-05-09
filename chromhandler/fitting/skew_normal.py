@@ -15,6 +15,8 @@ import math
 
 import jax.numpy as jnp
 import jax.scipy.stats as jss
+import numpy as np
+from scipy.optimize import brentq
 
 # Skewness of the half-normal distribution = max |γ₁| achievable by any
 # skew-normal. See spec §2.2.
@@ -167,3 +169,55 @@ def mode_dp(
         z = z - f_val / f_prime
 
     return xi + omega * z
+
+
+def _fwhm_scalar(xi: float, omega: float, alpha: float) -> float:
+    """Scalar FWHM of SN(xi, omega, alpha) via two brentq solves."""
+    mode = float(mode_dp(jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha)))
+    peak = float(
+        density_dp(jnp.asarray(mode), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))
+    )
+    half = peak / 2.0
+
+    def shifted(x: float) -> float:
+        return float(
+            density_dp(jnp.asarray(x), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))
+        ) - half
+
+    # Walk outward from mode by `omega` until the density drops below half-max.
+    x_lo = mode - omega
+    while shifted(x_lo) > 0.0:
+        x_lo -= omega
+    x_hi = mode + omega
+    while shifted(x_hi) > 0.0:
+        x_hi += omega
+    x_left: float = float(brentq(shifted, x_lo, mode))  # type: ignore[arg-type]
+    x_right: float = float(brentq(shifted, mode, x_hi))  # type: ignore[arg-type]
+    return x_right - x_left
+
+
+def fwhm_dp(
+    xi: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+    omega: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+    alpha: float | np.ndarray[tuple[int, ...], np.dtype[np.float64]],
+) -> np.ndarray[tuple[int, ...], np.dtype[np.float64]]:
+    """Full width at half maximum of SN(xi, omega, alpha), computed numerically.
+
+    Uses :func:`mode_dp` to locate the apex, then ``scipy.optimize.brentq``
+    on each side to find where the density drops to half-maximum.
+    Vectorized via :func:`numpy.vectorize`. Used for reporting only — not
+    on the HMC path.
+
+    Args:
+        xi: DP location, scalar or array.
+        omega: DP scale, scalar or array.
+        alpha: DP slant, scalar or array.
+
+    Returns:
+        FWHM as a numpy array with the broadcast shape of the inputs.
+    """
+    return np.vectorize(_fwhm_scalar, otypes=[float])(  # type: ignore[return-value]
+        np.asarray(xi, dtype=float),
+        np.asarray(omega, dtype=float),
+        np.asarray(alpha, dtype=float),
+    )
