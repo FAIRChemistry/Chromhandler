@@ -102,3 +102,56 @@ def test_dp_cp_round_trip():
     np.testing.assert_allclose(np.asarray(xi_back), xi, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(np.asarray(omega_back), omega, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(np.asarray(alpha_back), alpha, rtol=1e-5, atol=1e-7)
+
+
+def test_density_dp_matches_scipy():
+    """density_dp matches scipy.stats.skewnorm.pdf on a grid."""
+    alpha = 3.5
+    xi = 1.2
+    omega = 0.8
+    x = np.linspace(-2.0, 5.0, 401)
+    pred = sn.density_dp(jnp.asarray(x), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))
+    expected = skewnorm.pdf(x, a=alpha, loc=xi, scale=omega)
+    np.testing.assert_allclose(np.asarray(pred), expected, rtol=1e-6, atol=1e-9)
+
+
+def test_density_dp_integrates_to_one():
+    """density_dp integrates to 1 on a wide grid for several alpha."""
+    for alpha in [-8.0, -1.0, 0.0, 1.0, 5.0]:
+        x = np.linspace(-15.0, 15.0, 200_000)
+        dx = x[1] - x[0]
+        pdf = np.asarray(
+            sn.density_dp(jnp.asarray(x), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha))
+        )
+        assert abs(pdf.sum() * dx - 1.0) < 1e-3, f"alpha={alpha}: integral={pdf.sum() * dx}"
+
+
+def test_density_cp_equals_density_dp_after_bijection():
+    """density_cp(x | mu, sigma, gamma1) == density_dp(x | cp_to_dp(mu, sigma, gamma1))."""
+    mu, sigma, gamma1 = 1.0, 0.5, 0.4
+    x = np.linspace(-1.0, 3.5, 301)
+    cp_pred = sn.density_cp(jnp.asarray(x), jnp.asarray(mu), jnp.asarray(sigma), jnp.asarray(gamma1))
+    xi, omega, alpha = sn.cp_to_dp(jnp.asarray(mu), jnp.asarray(sigma), jnp.asarray(gamma1))
+    dp_pred = sn.density_dp(jnp.asarray(x), xi, omega, alpha)
+    np.testing.assert_allclose(np.asarray(cp_pred), np.asarray(dp_pred), rtol=1e-7, atol=1e-10)
+
+
+def test_density_dp_is_differentiable():
+    """jax.grad of density_dp w.r.t. each DP parameter runs without error."""
+    import jax
+
+    def f_xi(xi: jnp.ndarray) -> jnp.ndarray:
+        return sn.density_dp(jnp.asarray(0.5), xi, jnp.asarray(1.0), jnp.asarray(2.0))
+
+    def f_omega(om: jnp.ndarray) -> jnp.ndarray:
+        return sn.density_dp(jnp.asarray(0.5), jnp.asarray(0.0), om, jnp.asarray(2.0))
+
+    def f_alpha(a: jnp.ndarray) -> jnp.ndarray:
+        return sn.density_dp(jnp.asarray(0.5), jnp.asarray(0.0), jnp.asarray(1.0), a)
+
+    g_xi = jax.grad(f_xi)(jnp.asarray(0.0))
+    g_omega = jax.grad(f_omega)(jnp.asarray(1.0))
+    g_alpha = jax.grad(f_alpha)(jnp.asarray(2.0))
+    assert jnp.isfinite(g_xi)
+    assert jnp.isfinite(g_omega)
+    assert jnp.isfinite(g_alpha)

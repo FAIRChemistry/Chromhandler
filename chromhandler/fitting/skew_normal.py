@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 
 import jax.numpy as jnp
+import jax.scipy.stats as jss
 
 # Skewness of the half-normal distribution = max |γ₁| achievable by any
 # skew-normal. See spec §2.2.
@@ -74,3 +75,52 @@ def dp_to_cp(
     sigma = omega * jnp.sqrt(1.0 - b_delta**2)
     gamma1 = ((4.0 - jnp.pi) / 2.0) * b_delta**3 / (1.0 - b_delta**2) ** 1.5
     return mu, sigma, gamma1
+
+
+def density_dp(
+    x: jnp.ndarray,
+    xi: jnp.ndarray,
+    omega: jnp.ndarray,
+    alpha: jnp.ndarray,
+) -> jnp.ndarray:
+    """Skew-normal density in DP form.
+
+    f(x) = (2/omega) * phi((x - xi)/omega) * Phi(alpha * (x - xi)/omega).
+
+    Args:
+        x: Evaluation points. Any broadcastable shape.
+        xi: DP location, broadcastable with x.
+        omega: DP scale, strictly positive, broadcastable with x.
+        alpha: DP slant, broadcastable with x.
+
+    Returns:
+        Density values with shape broadcast from inputs.
+    """
+    z = (x - xi) / omega
+    phi = jss.norm.pdf(z)
+    cdf = jss.norm.cdf(alpha * z)
+    return 2.0 * phi * cdf / omega
+
+
+def density_cp(
+    x: jnp.ndarray,
+    mu: jnp.ndarray,
+    sigma: jnp.ndarray,
+    gamma1: jnp.ndarray,
+) -> jnp.ndarray:
+    """Skew-normal density in CP form.
+
+    Internally converts (mu, sigma, gamma1) -> (xi, omega, alpha) via
+    :func:`cp_to_dp` then delegates to :func:`density_dp`.
+
+    Args:
+        x: Evaluation points.
+        mu: Mean.
+        sigma: Standard deviation, strictly positive.
+        gamma1: Skewness coefficient, |gamma1| < GAMMA1_MAX.
+
+    Returns:
+        Density values.
+    """
+    xi, omega, alpha = cp_to_dp(mu, sigma, gamma1)
+    return density_dp(x, xi, omega, alpha)
