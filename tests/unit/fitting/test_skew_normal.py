@@ -48,9 +48,7 @@ def test_cp_to_dp_against_scipy_grid():
     mu = xi_true + omega_true * _B_CONST_NP * delta
     sigma = omega_true * np.sqrt(1.0 - _B_CONST_NP**2 * delta**2)
     gamma1 = ((4.0 - np.pi) / 2.0) * (_B_CONST_NP * delta) ** 3 / (1.0 - _B_CONST_NP**2 * delta**2) ** 1.5
-    xi_pred, omega_pred, alpha_pred = sn.cp_to_dp(
-        jnp.asarray(mu), jnp.asarray(sigma), jnp.asarray(gamma1)
-    )
+    xi_pred, omega_pred, alpha_pred = sn.cp_to_dp(jnp.asarray(mu), jnp.asarray(sigma), jnp.asarray(gamma1))
     np.testing.assert_allclose(np.asarray(xi_pred), xi_true, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(np.asarray(omega_pred), omega_true, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(np.asarray(alpha_pred), alpha_true, rtol=1e-5, atol=1e-7)
@@ -69,9 +67,7 @@ def test_dp_to_cp_matches_scipy_moments():
     alphas = np.linspace(-12.0, 12.0, 25)
     omegas = np.full_like(alphas, 0.7)
     xis = np.full_like(alphas, 1.3)
-    mu_pred, sigma_pred, gamma1_pred = sn.dp_to_cp(
-        jnp.asarray(xis), jnp.asarray(omegas), jnp.asarray(alphas)
-    )
+    mu_pred, sigma_pred, gamma1_pred = sn.dp_to_cp(jnp.asarray(xis), jnp.asarray(omegas), jnp.asarray(alphas))
     mean_sp, var_sp, skew_sp = skewnorm.stats(a=alphas, loc=xis, scale=omegas, moments="mvs")
     np.testing.assert_allclose(np.asarray(mu_pred), mean_sp, rtol=1e-6, atol=1e-8)
     np.testing.assert_allclose(np.asarray(sigma_pred), np.sqrt(var_sp), rtol=1e-6, atol=1e-8)
@@ -152,9 +148,9 @@ def test_density_dp_is_differentiable():
     g_xi = jax.grad(f_xi)(jnp.asarray(0.0))
     g_omega = jax.grad(f_omega)(jnp.asarray(1.0))
     g_alpha = jax.grad(f_alpha)(jnp.asarray(2.0))
-    assert jnp.isfinite(g_xi)
-    assert jnp.isfinite(g_omega)
-    assert jnp.isfinite(g_alpha)
+    assert bool(jnp.all(jnp.isfinite(g_xi)))  # type: ignore[arg-type]
+    assert bool(jnp.all(jnp.isfinite(g_omega)))  # type: ignore[arg-type]
+    assert bool(jnp.all(jnp.isfinite(g_alpha)))  # type: ignore[arg-type]
 
 
 def test_mode_dp_zero_alpha_is_xi():
@@ -181,8 +177,10 @@ def test_mode_dp_close_to_numerical_mode():
     from scipy.optimize import minimize_scalar
 
     for a in [-5.0, -1.0, 1.0, 5.0]:
+
         def neg_pdf(x: float, a: float = a) -> float:
             return -float(skewnorm.pdf(x, a=a))
+
         result = minimize_scalar(neg_pdf, bracket=(-5.0, 5.0))
         m_true: float = float(result.x)  # type: ignore[union-attr]
         m_pred = float(sn.mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(a)))
@@ -211,8 +209,8 @@ def test_fwhm_dp_consistent_with_density():
         def f(x: float, a: float = a, xi: float = xi, omega: float = omega, peak: float = peak) -> float:
             return float(skewnorm.pdf(x, a=a, loc=xi, scale=omega)) - peak / 2.0
 
-        x_left = brentq(f, m - 5.0 * omega, m)
-        x_right = brentq(f, m, m + 5.0 * omega)
+        x_left: float = float(brentq(f, m - 5.0 * omega, m))  # type: ignore[arg-type]
+        x_right: float = float(brentq(f, m, m + 5.0 * omega))  # type: ignore[arg-type]
         np.testing.assert_allclose(w, x_right - x_left, rtol=1e-4)
 
 
@@ -268,9 +266,7 @@ def test_sn_asymmetry_round_trip_against_dp_to_cp():
     ratios = sn.hwhm_ratio_dp(np.zeros_like(alphas), np.ones_like(alphas), alphas)
     _, _, gamma1_true = sn.dp_to_cp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alphas))
     gamma1_table = sn.sn_asymmetry_to_gamma1(jnp.asarray(ratios))
-    np.testing.assert_allclose(
-        np.asarray(gamma1_table), np.asarray(gamma1_true), rtol=1e-3, atol=1e-3
-    )
+    np.testing.assert_allclose(np.asarray(gamma1_table), np.asarray(gamma1_true), rtol=1e-3, atol=1e-3)
 
 
 def test_sn_asymmetry_handles_array_input():
