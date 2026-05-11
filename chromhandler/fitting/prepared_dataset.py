@@ -49,6 +49,9 @@ class PreparedDataset:
         baseline_intercept: ``[n_trace]`` per-trace OLS intercept.
         baseline_slope: ``[n_trace]`` per-trace OLS slope.
         noise_per_trace: ``[n_trace]`` MAD-based noise std.
+        is_control: ``[n_trace]`` bool array, True where the trace comes from a
+            control sample (analyte known absent by experimental design). Used by
+            the priors layer to extract direct artefact priors.
     """
 
     time: NDArray[np.float64]
@@ -62,6 +65,7 @@ class PreparedDataset:
     baseline_intercept: NDArray[np.float64]
     baseline_slope: NDArray[np.float64]
     noise_per_trace: NDArray[np.float64]
+    is_control: NDArray[np.bool_]
 
 
 def prepare_dataset(
@@ -69,6 +73,7 @@ def prepare_dataset(
     signals: list[NDArray[np.float64]],
     peak_annotations: list[PeakAnnotation],
     baseline_annotations: list[BaselineAnnotation],
+    is_control: list[bool] | None = None,
 ) -> PreparedDataset:
     """Run the full data-preparation pipeline.
 
@@ -77,14 +82,31 @@ def prepare_dataset(
         signals: List of 1-D signal arrays, matching lengths.
         peak_annotations: User peak windows.
         baseline_annotations: User baseline regions.
+        is_control: Optional per-trace boolean flags marking control traces
+            (analyte known absent). When ``None``, all traces are treated as
+            non-controls (the ``PreparedDataset.is_control`` field is all
+            ``False``). Length must match ``len(times)``.
 
     Returns:
-        :class:`PreparedDataset` with padded arrays, dt, baselines, noise.
+        :class:`PreparedDataset` with padded arrays, dt, baselines, noise,
+        and a per-trace ``is_control`` mask.
 
     Raises:
-        ValueError: If a baseline window overlaps any peak window, or if
-            any preparation step fails (see component functions).
+        ValueError: If a baseline window overlaps any peak window, if any
+            preparation step fails, or if ``is_control`` length does not
+            match the number of traces.
     """
+    n_trace = len(times)
+    if is_control is not None and len(is_control) != n_trace:
+        raise ValueError(
+            f"is_control length ({len(is_control)}) must match number of "
+            f"traces ({n_trace})."
+        )
+    is_control_arr: NDArray[np.bool_] = (
+        np.asarray(is_control, dtype=np.bool_)
+        if is_control is not None
+        else np.zeros(n_trace, dtype=np.bool_)
+    )
     check_baseline_peak_disjoint(peak_annotations, baseline_annotations)
     time, signal = pad_to_common_axis(times, signals)
     valid_mask = ~np.isnan(signal)
@@ -100,10 +122,11 @@ def prepare_dataset(
         valid_mask=valid_mask,
         dt_per_trace=dt_per_trace,
         dt_global=dt_global,
-        n_trace=len(times),
+        n_trace=n_trace,
         peak_annotations=list(peak_annotations),
         baseline_annotations=list(baseline_annotations),
         baseline_intercept=intercept,
         baseline_slope=slope,
         noise_per_trace=noise,
+        is_control=is_control_arr,
     )
