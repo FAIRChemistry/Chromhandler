@@ -21,11 +21,7 @@ from scipy.optimize import brentq
 
 # Skewness of the half-normal distribution = max |γ₁| achievable by any
 # skew-normal. See spec §2.2.
-GAMMA1_MAX: float = (
-    ((4.0 - math.pi) / 2.0)
-    * (math.sqrt(2.0 / math.pi) ** 3)
-    / (1.0 - 2.0 / math.pi) ** 1.5
-)
+GAMMA1_MAX: float = ((4.0 - math.pi) / 2.0) * (math.sqrt(2.0 / math.pi) ** 3) / (1.0 - 2.0 / math.pi) ** 1.5
 
 _B_CONST: float = math.sqrt(2.0 / math.pi)
 
@@ -129,9 +125,7 @@ def density_cp(
     return density_dp(x, xi, omega, alpha)
 
 
-def mode_dp(
-    xi: jnp.ndarray, omega: jnp.ndarray, alpha: jnp.ndarray
-) -> jnp.ndarray:
+def mode_dp(xi: jnp.ndarray, omega: jnp.ndarray, alpha: jnp.ndarray) -> jnp.ndarray:
     """Mode of SN(xi, omega, alpha) via Azzalini's m_0 approximation with Newton refinement.
 
     Initialises from Azzalini's m_0 approximation:
@@ -175,15 +169,13 @@ def mode_dp(
 def _fwhm_scalar(xi: float, omega: float, alpha: float) -> float:
     """Scalar FWHM of SN(xi, omega, alpha) via two brentq solves."""
     mode = float(mode_dp(jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha)))
-    peak = float(
-        density_dp(jnp.asarray(mode), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))
-    )
+    peak = float(density_dp(jnp.asarray(mode), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha)))
     half = peak / 2.0
 
     def shifted(x: float) -> float:
-        return float(
-            density_dp(jnp.asarray(x), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))
-        ) - half
+        return (
+            float(density_dp(jnp.asarray(x), jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha))) - half
+        )
 
     # Walk outward from mode by `omega` until the density drops below half-max.
     x_lo = mode - omega
@@ -200,15 +192,13 @@ def _fwhm_scalar(xi: float, omega: float, alpha: float) -> float:
 def _hwhm_ratio_scalar(alpha: float) -> float:
     """Scalar HWHM_R / HWHM_L of SN(0, 1, alpha). Independent of xi and omega."""
     mode = float(mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha)))
-    peak = float(
-        density_dp(jnp.asarray(mode), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha))
-    )
+    peak = float(density_dp(jnp.asarray(mode), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha)))
     half = peak / 2.0
 
     def shifted(x: float) -> float:
-        return float(
-            density_dp(jnp.asarray(x), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha))
-        ) - half
+        return (
+            float(density_dp(jnp.asarray(x), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha))) - half
+        )
 
     x_lo = mode - 1.0
     while shifted(x_lo) > 0.0:
@@ -286,7 +276,7 @@ def _asymmetry_table() -> (  # type: ignore[return]
     and gamma1 via :func:`dp_to_cp`, then sorts by ratio so the result is
     monotone-increasing in ratio. Cached on the first call.
     """
-    alphas = np.linspace(-50.0, 50.0, 4001)
+    alphas = np.linspace(-50.0, 50.0, 401)
     ratios = np.vectorize(_hwhm_ratio_scalar, otypes=[float])(alphas)
     _, _, gamma1s = dp_to_cp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alphas))
     gamma1s_np = np.asarray(gamma1s)
