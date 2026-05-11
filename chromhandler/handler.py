@@ -10,7 +10,7 @@ from dotted_dict import DottedDict
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import pretty, visualize
-from .annotations import ArtefactSide, PeakAnnotation, PeakMode
+from .annotations import ArtefactSide, BaselineAnnotation, PeakAnnotation, PeakMode
 from .enzymeml import handler_to_enzymeml_document
 from .model import Chromatogram, InitialCondition, Peak, Sample
 from .molecule import Molecule
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from .calibration import LinearCalibration
     from .fitting.fitter import Fitter
+    from .fitting.prepared_dataset import PreparedDataset
     from .readers.abstractreader import AbstractReader
 
 
@@ -663,6 +664,57 @@ class Handler(BaseModel):
             sample = self._get_sample(sample_id)
             if not sample.is_control and all(c == 0.0 for c in declared_concs):
                 sample.is_control = True
+
+    # ------------------------------------------------------------------
+    # Fitter convenience helpers
+    # ------------------------------------------------------------------
+
+    def prepare_dataset(
+        self,
+        peak_annotations: list[PeakAnnotation],
+        baseline_annotations: list[BaselineAnnotation],
+    ) -> PreparedDataset:
+        """Build a :class:`~chromhandler.fitting.prepared_dataset.PreparedDataset`.
+
+        Flattens ``handler.samples → sample.chromatograms`` into the per-trace
+        arrays the fitter consumes. Each sample's ``is_control`` flag is
+        propagated to ``PreparedDataset.is_control`` for every chromatogram
+        that sample contributes.
+
+        Args:
+            peak_annotations: User peak windows.
+            baseline_annotations: User baseline regions.
+
+        Returns:
+            :class:`~chromhandler.fitting.prepared_dataset.PreparedDataset`
+            with controls already marked.
+
+        Raises:
+            ValueError: If the handler has no chromatograms across all samples.
+        """
+        import numpy as np
+
+        from chromhandler.fitting.prepared_dataset import (
+            prepare_dataset as _prepare_dataset,
+        )
+
+        times: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+        signals: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+        is_control: list[bool] = []
+        for sample in self.samples:
+            for chrom in sample.chromatograms:
+                times.append(np.asarray(chrom.time, dtype=np.float64))
+                signals.append(np.asarray(chrom.signal, dtype=np.float64))
+                is_control.append(bool(sample.is_control))
+        if not times:
+            raise ValueError("Handler has no chromatograms across any sample.")
+        return _prepare_dataset(
+            times=times,
+            signals=signals,
+            peak_annotations=peak_annotations,
+            baseline_annotations=baseline_annotations,
+            is_control=is_control,
+        )
 
     # ------------------------------------------------------------------
     # Posterior area collection
