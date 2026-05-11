@@ -106,6 +106,10 @@ class Sample(BaseModel):
         default=None,
         description="""Unit of injection volume.""",
     )
+    is_control: bool = Field(
+        default=False,
+        description="Experimental control flag. Used for artefact peak priors.",
+    )
 
     # JSON-LD fields
     ld_id: str = Field(
