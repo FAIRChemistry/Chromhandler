@@ -648,13 +648,21 @@ class Handler(BaseModel):
             if sample_id not in existing_ids:
                 continue
             added_any = False
+            declared_concs: list[float] = []
             for mol_id in df_mol.columns:
                 val = df_mol.iloc[i, df_mol.columns.get_loc(mol_id)]
                 if not pd.isna(val):  # type: ignore[arg-type]
                     self.add_initial_condition(sample_id, str(mol_id), float(val), conc_unit)  # type: ignore[arg-type]
                     added_any = True
+                    declared_concs.append(float(val))  # type: ignore[arg-type]
             if not added_any:
                 raise ValueError(f"Sample '{sample_id}' has no initial conditions in the file.")
+            # Auto-detect controls: if every declared (non-NaN) concentration is
+            # zero, this is an experimental control. Don't override an explicit
+            # user-set True (only flip False -> True, never True -> False).
+            sample = self._get_sample(sample_id)
+            if not sample.is_control and all(c == 0.0 for c in declared_concs):
+                sample.is_control = True
 
     # ------------------------------------------------------------------
     # Posterior area collection

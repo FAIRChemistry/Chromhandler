@@ -10,6 +10,7 @@ Content: Handler initialization, basic accessors, simple properties.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from chromhandler.handler import Handler
@@ -334,3 +335,67 @@ def test_cut_chromatograms_tolerates_all_nan_chromatogram() -> None:
     assert healthy.trace_stats.sigma_noise == pytest.approx(1.0, rel=0.1)
     # Degenerate chromatogram was skipped — no stats, but the row still exists.
     assert degenerate.trace_stats is None
+
+
+def _handler_with_samples(*sample_ids: str) -> Handler:
+    h = Handler()
+    h.samples = [Sample(id=sid) for sid in sample_ids]
+    return h
+
+
+def test_sample_with_all_zero_concs_marked_as_control() -> None:
+    h = _handler_with_samples("control_1", "treatment_1")
+    df = pd.DataFrame(
+        {
+            "sample_id": ["control_1", "treatment_1"],
+            "Substrate": [0.0, 100.0],
+            "Enzyme": [0.0, 1.0],
+        }
+    )
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    assert h._get_sample("control_1").is_control is True
+    assert h._get_sample("treatment_1").is_control is False
+
+
+def test_partial_zero_concs_not_a_control() -> None:
+    """Mixed-zero is not a control — at least one component is present."""
+    h = _handler_with_samples("partial_zero")
+    df = pd.DataFrame(
+        {
+            "sample_id": ["partial_zero"],
+            "Substrate": [0.0],
+            "Enzyme": [1.0],
+        }
+    )
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    assert h._get_sample("partial_zero").is_control is False
+
+
+def test_nan_treated_as_missing_not_zero() -> None:
+    """NaN entries don't count toward 'all zero'; missing data != zero conc."""
+    h = _handler_with_samples("ambiguous")
+    df = pd.DataFrame(
+        {
+            "sample_id": ["ambiguous"],
+            "Substrate": [0.0],
+            "Enzyme": [float("nan")],
+        }
+    )
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    # Only one declared concentration, and it's zero -> control.
+    # (NaN means "not specified", not "zero".)
+    assert h._get_sample("ambiguous").is_control is True
+
+
+def test_explicit_is_control_preserved_if_already_true() -> None:
+    """If user already set is_control=True, auto-detection doesn't override it."""
+    h = _handler_with_samples("manual_control")
+    h._get_sample("manual_control").is_control = True
+    df = pd.DataFrame(
+        {
+            "sample_id": ["manual_control"],
+            "Substrate": [100.0],  # not a control by concentration, but user said so
+        }
+    )
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    assert h._get_sample("manual_control").is_control is True
