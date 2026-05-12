@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from chromhandler.annotations import PeakAnnotation
+    from chromhandler.fitting.prepared_dataset import PreparedDataset
 
 
 @dataclass(frozen=True)
@@ -690,3 +691,120 @@ def aggregate_doublet_priors(
         log_A_right_loc_per_trace=log_A_right_loc_per_trace,
         log_A_right_scale=log_A_right_scale,
     )
+
+
+def _baseline_subtracted(dataset: PreparedDataset) -> NDArray[np.float64]:
+    intercept = dataset.baseline_intercept[:, None]
+    slope = dataset.baseline_slope[:, None]
+    return dataset.signal - (intercept + slope * dataset.time)
+
+
+def _baseline_se_per_trace(dataset: PreparedDataset) -> NDArray[np.float64]:
+    """OLS baseline residual std per trace, evaluated on the baseline regions
+    the user annotated. Quantifies how uncertain the baseline subtraction is.
+    """
+    n_trace = dataset.n_trace
+    out = np.zeros(n_trace, dtype=np.float64)
+    baseline_sub = _baseline_subtracted(dataset)
+    for tr in range(n_trace):
+        residuals: list[float] = []
+        for ba in dataset.baseline_annotations:
+            mask = (
+                (dataset.time[tr] >= ba.rt_min)
+                & (dataset.time[tr] <= ba.rt_max)
+                & np.isfinite(baseline_sub[tr])
+            )
+            residuals.extend(baseline_sub[tr][mask].tolist())
+        if residuals:
+            out[tr] = float(np.std(np.asarray(residuals, dtype=np.float64), ddof=0))
+        else:
+            out[tr] = float(dataset.noise_per_trace[tr])
+    return out
+
+
+def _count_window_points(time: NDArray[np.float64], low: float, high: float) -> int:
+    masks: NDArray[np.bool_] = (
+        (time >= low) & (time <= high) & np.isfinite(time)
+    )
+    counts: NDArray[np.intp] = masks.sum(axis=1)
+    return int(np.median(counts))
+
+
+def build_priors(
+    dataset: PreparedDataset,
+    config: PriorConfig | None = None,
+) -> list[SkewNormalPriors]:
+    """Build per-annotation :class:`SkewNormalPriors` from a prepared dataset.
+
+    Args:
+        dataset: Output of :func:`prepare_dataset`. Must have ``is_control``
+            populated; if any annotation is ``artefact_doublet``, at least
+            one trace must be a control.
+        config: Optional :class:`PriorConfig`. Defaults to ``PriorConfig()``.
+
+    Returns:
+        One :class:`SkewNormalPriors` per ``dataset.peak_annotations``.
+
+    Raises:
+        ValueError: For ``artefact_doublet`` with no controls in the dataset.
+        NotImplementedError: For ``free_doublet`` annotations.
+    """
+    cfg = config if config is not None else PriorConfig()
+    baseline_sub = _baseline_subtracted(dataset)
+    baseline_se = _baseline_se_per_trace(dataset)
+    non_control_idx = np.where(~dataset.is_control)[0]
+    if non_control_idx.size == 0:
+        raise ValueError("Dataset contains only control traces; cannot build priors.")
+
+    out: list[SkewNormalPriors] = []
+    for ann in dataset.peak_annotations:
+        n_pts = _count_window_points(dataset.time, ann.rt_min, ann.rt_max)
+        if ann.mode == "single":
+            feats = [
+                compute_single_window_features(
+                    dataset.time[tr], baseline_sub[tr], ann.rt_min, ann.rt_max
+                )
+                for tr in non_control_idx
+            ]
+            out.append(aggregate_single_peak_priors(
+                per_trace_features=feats,
+                window_low=ann.rt_min, window_high=ann.rt_max,
+                dt=dataset.dt_global,
+                noise_per_trace=dataset.noise_per_trace[non_control_idx],
+                n_window_points=n_pts, config=cfg,
+            ))
+        elif ann.mode == "artefact_doublet":
+            analyte_feats = [
+                compute_single_window_features(
+                    dataset.time[tr], baseline_sub[tr], ann.rt_min, ann.rt_max
+                )
+                for tr in non_control_idx
+            ]
+            analyte_priors = aggregate_single_peak_priors(
+                per_trace_features=analyte_feats,
+                window_low=ann.rt_min, window_high=ann.rt_max,
+                dt=dataset.dt_global,
+                noise_per_trace=dataset.noise_per_trace[non_control_idx],
+                n_window_points=n_pts, config=cfg,
+            )
+            artefact = extract_artefact_from_controls(
+                time=dataset.time, signal=baseline_sub,
+                is_control=dataset.is_control, annotation=ann,
+                dt=dataset.dt_global, config=cfg,
+            )
+            out.append(aggregate_doublet_priors(
+                analyte_priors=analyte_priors, artefact=artefact,
+                window_low=ann.rt_min, window_high=ann.rt_max,
+                dt=dataset.dt_global, n_window_points=n_pts,
+                noise_per_trace=dataset.noise_per_trace,
+                baseline_se_per_trace=baseline_se, config=cfg,
+            ))
+        elif ann.mode == "free_doublet":
+            raise NotImplementedError(
+                f"Peak {ann.molecule_id}: mode='free_doublet' is not yet "
+                f"supported. Use 'artefact_doublet' with controls or wait "
+                f"for the free_doublet implementation."
+            )
+        else:
+            raise ValueError(f"Unknown peak mode '{ann.mode}'.")
+    return out
