@@ -71,3 +71,16 @@ def test_handler_prepare_dataset_raises_on_empty_samples() -> None:
     ]
     with pytest.raises(ValueError, match="no chromatograms"):
         h.prepare_dataset(peak_anns, base_anns)
+
+
+def test_handler_prepare_dataset_trace_ids_format() -> None:
+    """trace_ids must follow the ``{sample.id}/{chrom.id}`` convention so
+    that error messages from the priors layer can name specific traces."""
+    h = _handler_with_two_samples(control_first=False)
+    peak_anns = [PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=2.9)]
+    base_anns = [
+        BaselineAnnotation(rt_min=2.55, rt_max=2.58),
+        BaselineAnnotation(rt_min=3.50, rt_max=3.55),
+    ]
+    ds = h.prepare_dataset(peak_anns, base_anns)
+    assert ds.trace_ids == ("A/c_a1", "B/c_b1")

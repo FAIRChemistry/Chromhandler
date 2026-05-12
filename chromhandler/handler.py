@@ -678,8 +678,9 @@ class Handler(BaseModel):
 
         Flattens ``handler.samples → sample.chromatograms`` into the per-trace
         arrays the fitter consumes. Each sample's ``is_control`` flag is
-        propagated to ``PreparedDataset.is_control`` for every chromatogram
-        that sample contributes.
+        propagated to ``PreparedDataset.is_control``; each chromatogram's
+        identity ``"{sample.id}/{chrom.id}"`` is recorded in
+        ``PreparedDataset.trace_ids`` for use in error messages.
 
         Args:
             peak_annotations: User peak windows.
@@ -687,7 +688,7 @@ class Handler(BaseModel):
 
         Returns:
             :class:`~chromhandler.fitting.prepared_dataset.PreparedDataset`
-            with controls already marked.
+            with controls and trace IDs already populated.
 
         Raises:
             ValueError: If the handler has no chromatograms across all samples.
@@ -701,11 +702,13 @@ class Handler(BaseModel):
         times: list[np.ndarray[Any, np.dtype[np.float64]]] = []
         signals: list[np.ndarray[Any, np.dtype[np.float64]]] = []
         is_control: list[bool] = []
+        trace_ids: list[str] = []
         for sample in self.samples:
             for chrom in sample.chromatograms:
                 times.append(np.asarray(chrom.time, dtype=np.float64))
                 signals.append(np.asarray(chrom.signal, dtype=np.float64))
                 is_control.append(bool(sample.is_control))
+                trace_ids.append(f"{sample.id}/{chrom.id}")
         if not times:
             raise ValueError("Handler has no chromatograms across any sample.")
         return _prepare_dataset(
@@ -714,6 +717,7 @@ class Handler(BaseModel):
             peak_annotations=peak_annotations,
             baseline_annotations=baseline_annotations,
             is_control=is_control,
+            trace_ids=trace_ids,
         )
 
     # ------------------------------------------------------------------
