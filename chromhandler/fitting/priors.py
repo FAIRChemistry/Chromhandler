@@ -355,6 +355,7 @@ def extract_artefact_from_controls(
     annotation: PeakAnnotation,
     dt: float,
     config: PriorConfig,
+    trace_ids: tuple[str, ...] | None = None,
 ) -> ArtefactMeasurements:
     """Extract raw artefact measurements from control traces; check side.
 
@@ -365,6 +366,9 @@ def extract_artefact_from_controls(
         annotation: doublet :class:`PeakAnnotation` with ``artefact_side``.
         dt: Sampling interval.
         config: :class:`PriorConfig` controlling thresholds.
+        trace_ids: Optional per-trace identifiers used to name specific traces
+            in error messages (e.g. ``"{sample.id}/{chrom.id}"``). When
+            ``None``, generic phrasing is used.
 
     Returns:
         :class:`ArtefactMeasurements`.
@@ -382,10 +386,14 @@ def extract_artefact_from_controls(
 
     control_idx = np.where(is_control)[0]
     if control_idx.size == 0:
+        all_ids = (
+            list(trace_ids) if trace_ids is not None
+            else [f"trace_{i}" for i in range(time.shape[0])]
+        )
         raise ValueError(
             f"Peak {annotation.molecule_id}: no control traces in dataset; "
-            f"cannot extract artefact priors. Mark controls in the conditions "
-            f"CSV or switch annotation mode."
+            f"cannot extract artefact priors. Available traces: {all_ids}. "
+            f"Mark controls in the conditions CSV or switch annotation mode."
         )
 
     control_features = [
@@ -421,14 +429,27 @@ def extract_artefact_from_controls(
         annotation.rt_min, annotation.rt_max,
     )
 
+    # Build human-readable trace identifiers for error messages.
+    control_ids: list[str] = (
+        [trace_ids[i] for i in control_idx]
+        if trace_ids is not None
+        else [f"trace_{i}" for i in control_idx]
+    )
+    ref_id: str = (
+        trace_ids[ref_trace_idx]
+        if trace_ids is not None
+        else f"trace_{ref_trace_idx}"
+    )
+
     delta_signed = mu_artefact - mu_analyte_ref
     epsilon = config.side_check_epsilon_dt_multiplier * dt
     if abs(delta_signed) < epsilon:
         raise ValueError(
             f"Peak {annotation.molecule_id}: artefact apex from controls "
-            f"({mu_artefact:.4f}) and analyte apex from max-total trace "
-            f"({mu_analyte_ref:.4f}) differ by {delta_signed:+.4f} min, which "
-            f"is too close to distinguish at sampling resolution "
+            f"{control_ids} (mean mu={mu_artefact:.4f}) and analyte apex from "
+            f"max-total trace '{ref_id}' (mu={mu_analyte_ref:.4f}) differ by "
+            f"{delta_signed:+.4f} min, which is too close to distinguish at "
+            f"sampling resolution "
             f"({config.side_check_epsilon_dt_multiplier}*dt = {epsilon:.4f}). "
             f"Peaks unresolved; widen the annotation window or pick different "
             f"control traces."
@@ -438,9 +459,11 @@ def extract_artefact_from_controls(
         raise ValueError(
             f"Peak {annotation.molecule_id}: artefact_side="
             f"'{annotation.artefact_side}' but controls indicate artefact is "
-            f"on the {observed_side} side (mu_artefact={mu_artefact:.4f}, "
-            f"mu_analyte_ref={mu_analyte_ref:.4f}, delta={delta_signed:+.4f}). "
-            f"Fix artefact_side or check control trace identity."
+            f"on the {observed_side} side (mu_artefact={mu_artefact:.4f} from "
+            f"controls {control_ids}; mu_analyte_ref={mu_analyte_ref:.4f} from "
+            f"trace '{ref_id}'; delta={delta_signed:+.4f}). "
+            f"Fix artefact_side, or check whether {control_ids} are really "
+            f"controls."
         )
 
     return ArtefactMeasurements(
@@ -864,6 +887,7 @@ def build_priors(
                 time=dataset.time, signal=baseline_sub,
                 is_control=dataset.is_control, annotation=ann,
                 dt=dataset.dt_global, config=cfg,
+                trace_ids=dataset.trace_ids,
             )
             out.append(aggregate_doublet_priors(
                 analyte_priors=analyte_priors, artefact=artefact,

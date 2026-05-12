@@ -143,3 +143,54 @@ def test_config_override_changes_epsilon() -> None:
             annotation=_ann(), dt=0.001,
             config=PriorConfig(side_check_epsilon_dt_multiplier=30.0),
         )
+
+
+def test_side_check_error_names_specific_traces() -> None:
+    """Side-check failures must name the controls and the reference trace."""
+    time, signal, is_control = _make_dataset(mu_artefact=2.95)
+    ids = ("S1/c0", "S1/c1", "S1/c2", "Ctrl/c0", "Ctrl/c1")
+    try:
+        extract_artefact_from_controls(
+            time=time, signal=signal, is_control=is_control,
+            annotation=_ann(side="left"),  # wrong side
+            dt=0.001, config=PriorConfig(), trace_ids=ids,
+        )
+    except ValueError as e:
+        msg = str(e)
+        # Both control IDs must appear, plus the reference trace ID.
+        assert "Ctrl/c0" in msg
+        assert "Ctrl/c1" in msg
+        assert "S1/c0" in msg  # max-A_total non-control trace (first sample)
+        return
+    raise AssertionError("Expected ValueError with trace IDs in message.")
+
+
+def test_too_close_error_names_specific_traces() -> None:
+    """Peaks-too-close failures must also name traces."""
+    time, signal, is_control = _make_dataset(mu_artefact=2.852)  # ~2·dt away
+    ids = ("S1/c0", "S1/c1", "S1/c2", "Ctrl/c0", "Ctrl/c1")
+    try:
+        extract_artefact_from_controls(
+            time=time, signal=signal, is_control=is_control,
+            annotation=_ann(), dt=0.001, config=PriorConfig(), trace_ids=ids,
+        )
+    except ValueError as e:
+        msg = str(e)
+        assert "Ctrl/c0" in msg or "Ctrl/c1" in msg
+        assert "S1/c0" in msg
+        return
+    raise AssertionError("Expected ValueError with trace IDs in message.")
+
+
+def test_trace_ids_default_to_indexed_when_not_provided() -> None:
+    """Without trace_ids, error messages fall back to ``trace_{i}``."""
+    time, signal, is_control = _make_dataset(mu_artefact=2.95)
+    try:
+        extract_artefact_from_controls(
+            time=time, signal=signal, is_control=is_control,
+            annotation=_ann(side="left"), dt=0.001, config=PriorConfig(),
+        )
+    except ValueError as e:
+        assert "trace_3" in str(e) and "trace_4" in str(e)  # control indices
+        return
+    raise AssertionError("Expected ValueError.")
