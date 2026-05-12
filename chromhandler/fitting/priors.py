@@ -730,6 +730,79 @@ def _count_window_points(time: NDArray[np.float64], low: float, high: float) -> 
     return int(np.median(counts))
 
 
+def summarise_priors(
+    priors: list[SkewNormalPriors],
+    config: PriorConfig,
+) -> str:
+    """Format a list of :class:`SkewNormalPriors` as an inspection table.
+
+    Args:
+        priors: Per-peak priors.
+        config: Used to display gamma1 bounds in the table.
+
+    Returns:
+        Multi-line string.
+    """
+    gamma1_low, gamma1_high = _gamma1_bounds(config)
+    lines: list[str] = []
+    header = (
+        f"{'peak':>4} {'site':<22} {'distribution':<16} "
+        f"{'loc':>10} {'scale':>10} {'low':>10} {'high':>10}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    def fmt(v: float | None) -> str:
+        return f"{v:>10.4g}" if v is not None else f"{'-':>10}"
+
+    for i, p in enumerate(priors):
+        lines.append(
+            f"{i:>4} {'mu_anchor_left':<22} {'TruncatedNormal':<16} "
+            f"{fmt(p.mu_left_loc)} {fmt(p.mu_left_scale)} "
+            f"{fmt(p.mu_left_low)} {fmt(p.mu_left_high)}"
+        )
+        lines.append(
+            f"{i:>4} {'log_sigma_left':<22} {'TruncatedNormal':<16} "
+            f"{fmt(p.log_sigma_left_loc)} {fmt(p.log_sigma_left_scale)} "
+            f"{fmt(p.log_sigma_left_low)} {fmt(p.log_sigma_left_high)}"
+        )
+        lines.append(
+            f"{i:>4} {'gamma1_left':<22} {'TruncatedNormal':<16} "
+            f"{fmt(p.gamma1_left_loc)} {fmt(p.gamma1_left_scale)} "
+            f"{fmt(gamma1_low)} {fmt(gamma1_high)}"
+        )
+        log_A_left_mean = float(np.mean(p.log_A_left_loc_per_trace))
+        lines.append(
+            f"{i:>4} {'log_A_left (mean)':<22} {'Normal':<16} "
+            f"{fmt(log_A_left_mean)} {fmt(p.log_A_left_scale)} "
+            f"{fmt(None)} {fmt(None)}"
+        )
+        if p.n_components == 2:
+            lines.append(
+                f"{i:>4} {'Delta':<22} {'TruncatedNormal':<16} "
+                f"{fmt(p.Delta_loc)} {fmt(p.Delta_scale)} "
+                f"{fmt(p.Delta_low)} {fmt(p.Delta_high)}"
+            )
+            lines.append(
+                f"{i:>4} {'log_sigma_right':<22} {'TruncatedNormal':<16} "
+                f"{fmt(p.log_sigma_right_loc)} {fmt(p.log_sigma_right_scale)} "
+                f"{fmt(p.log_sigma_right_low)} {fmt(p.log_sigma_right_high)}"
+            )
+            lines.append(
+                f"{i:>4} {'gamma1_right':<22} {'TruncatedNormal':<16} "
+                f"{fmt(p.gamma1_right_loc)} {fmt(p.gamma1_right_scale)} "
+                f"{fmt(gamma1_low)} {fmt(gamma1_high)}"
+            )
+            assert p.log_A_right_loc_per_trace is not None
+            log_A_right_mean = float(np.mean(p.log_A_right_loc_per_trace))
+            lines.append(
+                f"{i:>4} {'log_A_right (mean)':<22} {'Normal':<16} "
+                f"{fmt(log_A_right_mean)} {fmt(p.log_A_right_scale)} "
+                f"{fmt(None)} {fmt(None)}"
+            )
+    return "\n".join(lines)
+
+
 def build_priors(
     dataset: PreparedDataset,
     config: PriorConfig | None = None,
