@@ -557,3 +557,136 @@ def aggregate_single_peak_priors(
         gamma1_right_loc=None, gamma1_right_scale=None,
         log_A_right_loc_per_trace=None, log_A_right_scale=None,
     )
+
+
+def aggregate_doublet_priors(
+    analyte_priors: SkewNormalPriors,
+    artefact: ArtefactMeasurements,
+    window_low: float,
+    window_high: float,
+    dt: float,
+    n_window_points: int,
+    noise_per_trace: NDArray[np.float64],
+    baseline_se_per_trace: NDArray[np.float64],
+    config: PriorConfig,
+) -> SkewNormalPriors:
+    """Assemble doublet priors from analyte single-peak priors + artefact measurements.
+
+    For n_controls=1, shape and position scales borrow from analyte_priors.
+    For n_controls>=2, scales are ``max(empirical_std, borrowed/sqrt(n))``.
+
+    Args:
+        analyte_priors: Output of :func:`aggregate_single_peak_priors` on
+            non-control traces (must have ``n_components == 1``).
+        artefact: :class:`ArtefactMeasurements` from
+            :func:`extract_artefact_from_controls`.
+        window_low: Annotation lower bound.
+        window_high: Annotation upper bound.
+        dt: Sampling interval.
+        n_window_points: Median in-window sample count.
+        noise_per_trace: ``[n_trace]`` per-trace noise std (full dataset).
+        baseline_se_per_trace: ``[n_trace]`` per-trace OLS baseline standard
+            error (signal units). Used to widen ``log_A_right_scale``.
+        config: :class:`PriorConfig`.
+
+    Returns:
+        :class:`SkewNormalPriors` with ``n_components=2``.
+
+    Raises:
+        ValueError: If ``analyte_priors.n_components != 1``.
+    """
+    if analyte_priors.n_components != 1:
+        raise ValueError(
+            "analyte_priors must be a single-peak prior (n_components=1)."
+        )
+
+    n_c = artefact.mu_per_control.size
+
+    # --- Δ ---
+    delta_loc = abs(artefact.delta_signed)
+    delta_scale_n1 = config.delta_scale_dt_multiplier_n1 * dt
+    if n_c == 1:
+        delta_scale = delta_scale_n1
+    else:
+        per_control_seps = np.abs(artefact.mu_per_control - artefact.mu_analyte_ref)
+        empirical = float(np.std(per_control_seps, ddof=0))
+        delta_scale = max(empirical, delta_scale_n1 / float(np.sqrt(n_c)))
+    delta_low = config.delta_low_dt_multiplier * dt
+    delta_high = (window_high - window_low) / config.delta_high_window_fraction
+
+    # --- Right component shape: borrow from analyte for n=1 ---
+    log_sigma_right_loc = float(np.mean(artefact.log_sigma_per_control))
+    if n_c == 1:
+        log_sigma_right_scale = analyte_priors.log_sigma_left_scale
+    else:
+        empirical_ls = float(np.std(artefact.log_sigma_per_control, ddof=0))
+        log_sigma_right_scale = max(
+            empirical_ls, analyte_priors.log_sigma_left_scale / float(np.sqrt(n_c)),
+        )
+
+    gamma1_right_loc = float(np.mean(artefact.gamma1_per_control))
+    if n_c == 1:
+        gamma1_right_scale = analyte_priors.gamma1_left_scale
+    else:
+        empirical_g1 = float(np.std(artefact.gamma1_per_control, ddof=0))
+        gamma1_right_scale = max(
+            empirical_g1, analyte_priors.gamma1_left_scale / float(np.sqrt(n_c)),
+        )
+    _, gamma1_bound_high = _gamma1_bounds(config)
+    gamma1_right_scale = min(gamma1_right_scale, gamma1_bound_high)
+
+    log_sigma_low, log_sigma_high = _log_sigma_bounds(window_low, window_high, dt, config)
+
+    # --- A_artefact scale: noise + baseline propagation, floored ---
+    median_noise = float(np.median(noise_per_trace))
+    sigma_A_noise = median_noise * float(np.sqrt(n_window_points)) * dt
+    median_baseline_se = float(np.median(baseline_se_per_trace))
+    sigma_A_baseline = median_baseline_se * (window_high - window_low)
+    sigma_A_total = float(np.sqrt(sigma_A_noise**2 + sigma_A_baseline**2))
+    A_artefact_est = max(artefact.A_artefact_est, 1e-9)
+    propagated = float(np.log1p(sigma_A_total / A_artefact_est))
+    if n_c >= 2:
+        empirical_la = float(np.std(artefact.log_area_per_control, ddof=0))
+        log_A_right_scale = max(empirical_la, propagated, config.log_A_artefact_min_scale)
+    else:
+        log_A_right_scale = max(propagated, config.log_A_artefact_min_scale)
+
+    # --- log_A_left from A_total residual; A_floor from noise propagation ---
+    A_floor = sigma_A_noise
+    A_analyte = np.maximum(
+        artefact.A_total_per_trace - artefact.A_artefact_est, A_floor,
+    )
+    log_A_left_loc_per_trace = np.log(A_analyte)
+    log_A_left_scale = _log_A_scale_from_noise_propagation(
+        A_analyte, noise_per_trace, n_window_points, dt,
+        A_analyte.size, config,
+    )
+
+    # --- log_A_right per trace (constant) ---
+    n_total = artefact.A_total_per_trace.size
+    log_A_right_loc_per_trace = np.full(
+        n_total, float(np.log(A_artefact_est)), dtype=np.float64,
+    )
+
+    return SkewNormalPriors(
+        n_components=2,
+        mu_left_loc=analyte_priors.mu_left_loc,
+        mu_left_scale=analyte_priors.mu_left_scale,
+        mu_left_low=window_low, mu_left_high=window_high,
+        log_sigma_left_loc=analyte_priors.log_sigma_left_loc,
+        log_sigma_left_scale=analyte_priors.log_sigma_left_scale,
+        log_sigma_left_low=log_sigma_low, log_sigma_left_high=log_sigma_high,
+        gamma1_left_loc=analyte_priors.gamma1_left_loc,
+        gamma1_left_scale=analyte_priors.gamma1_left_scale,
+        log_A_left_loc_per_trace=log_A_left_loc_per_trace,
+        log_A_left_scale=log_A_left_scale,
+        Delta_loc=delta_loc, Delta_scale=delta_scale,
+        Delta_low=delta_low, Delta_high=delta_high,
+        log_sigma_right_loc=log_sigma_right_loc,
+        log_sigma_right_scale=log_sigma_right_scale,
+        log_sigma_right_low=log_sigma_low, log_sigma_right_high=log_sigma_high,
+        gamma1_right_loc=gamma1_right_loc,
+        gamma1_right_scale=gamma1_right_scale,
+        log_A_right_loc_per_trace=log_A_right_loc_per_trace,
+        log_A_right_scale=log_A_right_scale,
+    )
