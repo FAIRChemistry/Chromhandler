@@ -612,6 +612,16 @@ class Handler(BaseModel):
         extra sample_ids in the file are ignored. Raises if an existing sample
         has no non-null initial conditions in its row.
 
+        Note: when the handler has any molecules registered via
+        :meth:`create_molecule` or :meth:`register_molecule`, CSV columns
+        whose names do not match a registered molecule ID are silently
+        skipped. They are not loaded as :class:`~chromhandler.model.InitialCondition`
+        objects, and they do not count toward the all-zero auto-detection
+        of ``is_control``. This lets the user ignore derivatization
+        reagents, internal standards, or unused species without flagging
+        them in the CSV. When no molecules are registered, every column
+        is parsed (backwards-compatible default).
+
         Example::
 
             # sample_id as column
@@ -645,12 +655,17 @@ class Handler(BaseModel):
             df_mol[col] = pd.to_numeric(df_mol[col], errors="coerce")
 
         existing_ids = {s.id for s in self.samples}
+        registered_mols: set[str] = set(self.molecules.keys())
+        filter_active: bool = bool(registered_mols)
+
         for i, sample_id in enumerate(sample_ids):
             if sample_id not in existing_ids:
                 continue
             added_any = False
             declared_concs: list[float] = []
             for mol_id in df_mol.columns:
+                if filter_active and str(mol_id) not in registered_mols:
+                    continue
                 val = df_mol.iloc[i, df_mol.columns.get_loc(mol_id)]
                 if not pd.isna(val):  # type: ignore[arg-type]
                     self.add_initial_condition(sample_id, str(mol_id), float(val), conc_unit)  # type: ignore[arg-type]

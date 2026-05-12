@@ -399,3 +399,80 @@ def test_explicit_is_control_preserved_if_already_true() -> None:
     )
     h.load_initial_conditions(df, conc_unit="umol / l")
     assert h._get_sample("manual_control").is_control is True
+
+
+def _handler_with_samples_and_molecules(
+    sample_ids: list[str],
+    molecule_ids: list[str],
+) -> Handler:
+    h = Handler()
+    h.samples = [Sample(id=sid) for sid in sample_ids]
+    for mol_id in molecule_ids:
+        h.create_molecule(id=mol_id, pubchem_cid=1)
+    return h
+
+
+def test_load_initial_conditions_filters_by_registered_molecules() -> None:
+    """Columns for unregistered molecules (e.g. derivatization reagent) are
+    silently skipped, even if their value is non-NaN."""
+    h = _handler_with_samples_and_molecules(["CV10"], ["SIH", "Hyp", "Ino"])
+    df = pd.DataFrame({
+        "sample_id": ["CV10"],
+        "SAH": [0.0],
+        "SIH": [50.0],
+        "DTNB": [800.0],
+        "Hyp": [0.0],
+        "Ino": [0.0],
+        "SIHH": [5.0],
+    })
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    sample = h._get_sample("CV10")
+    mol_ids = {ic.molecule_id for ic in sample.initial_conditions}
+    assert mol_ids == {"SIH", "Hyp", "Ino"}
+    assert sample.is_control is False
+
+
+def test_load_initial_conditions_auto_detects_control_with_reagent_present() -> None:
+    """A sample with all registered analytes = 0 is auto-detected as a
+    control, even when an unregistered reagent column is non-zero."""
+    h = _handler_with_samples_and_molecules(["CV4"], ["SIH", "Hyp", "Ino"])
+    df = pd.DataFrame({
+        "sample_id": ["CV4"],
+        "SAH": [0.0],
+        "SIH": [0.0],
+        "DTNB": [800.0],
+        "Hyp": [0.0],
+        "Ino": [0.0],
+        "SIHH": [0.0],
+    })
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    assert h._get_sample("CV4").is_control is True
+
+
+def test_load_initial_conditions_no_molecules_registered_parses_all() -> None:
+    """Backwards-compat: with no molecules registered, every column is parsed."""
+    h = Handler()
+    h.samples = [Sample(id="CV4")]
+    df = pd.DataFrame({
+        "sample_id": ["CV4"],
+        "SIH": [0.0],
+        "DTNB": [800.0],
+    })
+    h.load_initial_conditions(df, conc_unit="umol / l")
+    sample = h._get_sample("CV4")
+    mol_ids = {ic.molecule_id for ic in sample.initial_conditions}
+    assert mol_ids == {"SIH", "DTNB"}
+    assert sample.is_control is False
+
+
+def test_load_initial_conditions_filter_raises_when_no_registered_in_row() -> None:
+    """If filtering leaves zero usable columns, the existing
+    'no initial conditions' ValueError still fires."""
+    h = _handler_with_samples_and_molecules(["CV99"], ["SIH"])
+    df = pd.DataFrame({
+        "sample_id": ["CV99"],
+        "DTNB": [800.0],
+        "SIH": [float("nan")],
+    })
+    with pytest.raises(ValueError, match="no initial conditions"):
+        h.load_initial_conditions(df, conc_unit="umol / l")
