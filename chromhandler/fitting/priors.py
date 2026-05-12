@@ -27,6 +27,8 @@ from chromhandler.fitting.skew_normal import sn_asymmetry_to_gamma1
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+    from chromhandler.annotations import PeakAnnotation
+
 
 @dataclass(frozen=True)
 class PriorConfig:
@@ -287,3 +289,167 @@ def detect_dominant_apex(
     )
     idx = int(np.argmax(s_smooth))
     return float(t[idx]), float(s_smooth[idx])
+
+
+@dataclass(frozen=True)
+class ArtefactMeasurements:
+    """Raw artefact measurements from control traces + analyte-residual inputs.
+
+    Outputs of :func:`extract_artefact_from_controls`. Scale assembly is
+    deferred to :func:`aggregate_doublet_priors`, which has access to
+    analyte-side scales for principled borrowing.
+
+    Attributes:
+        mu_per_control: ``[n_controls]`` per-control apex locations.
+        log_sigma_per_control: ``[n_controls]`` log of per-control sigmas.
+        gamma1_per_control: ``[n_controls]`` per-control gamma1 estimates.
+        log_area_per_control: ``[n_controls]`` log of per-control areas.
+        A_artefact_est: ``mean(area_per_control)`` in linear units.
+        A_total_per_trace: ``[n_trace]`` per-trace total area in the window
+            (trapezoid over baseline-subtracted signal). Used for the analyte
+            residual ``A_analyte[trace] = A_total[trace] - A_artefact_est``.
+        mu_artefact: ``mean(mu_per_control)``.
+        mu_analyte_ref: Apex location in the non-control trace with the
+            largest ``A_total``.
+        delta_signed: ``mu_artefact - mu_analyte_ref`` (positive when
+            artefact is later than analyte, i.e. on the right).
+    """
+
+    mu_per_control: NDArray[np.float64]
+    log_sigma_per_control: NDArray[np.float64]
+    gamma1_per_control: NDArray[np.float64]
+    log_area_per_control: NDArray[np.float64]
+    A_artefact_est: float
+    A_total_per_trace: NDArray[np.float64]
+    mu_artefact: float
+    mu_analyte_ref: float
+    delta_signed: float
+
+
+def _trapezoid_per_trace_in_window(
+    time: NDArray[np.float64],
+    signal_baseline_subtracted: NDArray[np.float64],
+    window_low: float,
+    window_high: float,
+) -> NDArray[np.float64]:
+    n_trace = time.shape[0]
+    out = np.zeros(n_trace, dtype=np.float64)
+    for tr in range(n_trace):
+        mask = (
+            (time[tr] >= window_low)
+            & (time[tr] <= window_high)
+            & np.isfinite(signal_baseline_subtracted[tr])
+        )
+        if mask.sum() >= 2:
+            out[tr] = float(np.trapezoid(
+                signal_baseline_subtracted[tr][mask], time[tr][mask]
+            ))
+    return out
+
+
+def extract_artefact_from_controls(
+    time: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    is_control: NDArray[np.bool_],
+    annotation: PeakAnnotation,
+    dt: float,
+    config: PriorConfig,
+) -> ArtefactMeasurements:
+    """Extract raw artefact measurements from control traces; check side.
+
+    Args:
+        time: ``[n_trace, n_time]`` NaN-padded time array.
+        signal: ``[n_trace, n_time]`` baseline-subtracted signal.
+        is_control: ``[n_trace]`` bool mask.
+        annotation: doublet :class:`PeakAnnotation` with ``artefact_side``.
+        dt: Sampling interval.
+        config: :class:`PriorConfig` controlling thresholds.
+
+    Returns:
+        :class:`ArtefactMeasurements`.
+
+    Raises:
+        ValueError: if no controls, if peaks are too close to distinguish
+            at sampling resolution, or if observed side mismatches
+            ``annotation.artefact_side``.
+    """
+    if annotation.artefact_side is None:
+        raise ValueError(
+            f"annotation.artefact_side must be set for artefact_doublet "
+            f"mode (peak {annotation.molecule_id})."
+        )
+
+    control_idx = np.where(is_control)[0]
+    if control_idx.size == 0:
+        raise ValueError(
+            f"Peak {annotation.molecule_id}: no control traces in dataset; "
+            f"cannot extract artefact priors. Mark controls in the conditions "
+            f"CSV or switch annotation mode."
+        )
+
+    control_features = [
+        compute_single_window_features(
+            time[i], signal[i], annotation.rt_min, annotation.rt_max
+        )
+        for i in control_idx
+    ]
+    mu_per_control = np.array([f.mu for f in control_features])
+    sigma_per_control = np.clip(
+        np.array([f.sigma for f in control_features]), 1e-9, None
+    )
+    log_sigma_per_control = np.log(sigma_per_control)
+    gamma1_per_control = np.array([f.gamma1 for f in control_features])
+    area_per_control = np.array([f.area for f in control_features])
+    log_area_per_control = np.log(np.clip(np.abs(area_per_control), 1e-9, None))
+    mu_artefact = float(np.mean(mu_per_control))
+    A_artefact_est = float(np.mean(area_per_control))
+
+    A_total = _trapezoid_per_trace_in_window(
+        time, signal, annotation.rt_min, annotation.rt_max
+    )
+
+    non_control_mask = ~is_control
+    if not non_control_mask.any():
+        raise ValueError(
+            f"Peak {annotation.molecule_id}: dataset has no non-control traces."
+        )
+    non_control_idx = np.where(non_control_mask)[0]
+    ref_trace_idx = int(non_control_idx[int(np.argmax(A_total[non_control_idx]))])
+    mu_analyte_ref, _ = detect_dominant_apex(
+        time[ref_trace_idx], signal[ref_trace_idx],
+        annotation.rt_min, annotation.rt_max,
+    )
+
+    delta_signed = mu_artefact - mu_analyte_ref
+    epsilon = config.side_check_epsilon_dt_multiplier * dt
+    if abs(delta_signed) < epsilon:
+        raise ValueError(
+            f"Peak {annotation.molecule_id}: artefact apex from controls "
+            f"({mu_artefact:.4f}) and analyte apex from max-total trace "
+            f"({mu_analyte_ref:.4f}) differ by {delta_signed:+.4f} min, which "
+            f"is too close to distinguish at sampling resolution "
+            f"({config.side_check_epsilon_dt_multiplier}*dt = {epsilon:.4f}). "
+            f"Peaks unresolved; widen the annotation window or pick different "
+            f"control traces."
+        )
+    observed_side = "right" if delta_signed > 0 else "left"
+    if observed_side != annotation.artefact_side:
+        raise ValueError(
+            f"Peak {annotation.molecule_id}: artefact_side="
+            f"'{annotation.artefact_side}' but controls indicate artefact is "
+            f"on the {observed_side} side (mu_artefact={mu_artefact:.4f}, "
+            f"mu_analyte_ref={mu_analyte_ref:.4f}, delta={delta_signed:+.4f}). "
+            f"Fix artefact_side or check control trace identity."
+        )
+
+    return ArtefactMeasurements(
+        mu_per_control=mu_per_control,
+        log_sigma_per_control=log_sigma_per_control,
+        gamma1_per_control=gamma1_per_control,
+        log_area_per_control=log_area_per_control,
+        A_artefact_est=A_artefact_est,
+        A_total_per_trace=A_total,
+        mu_artefact=mu_artefact,
+        mu_analyte_ref=mu_analyte_ref,
+        delta_signed=delta_signed,
+    )
