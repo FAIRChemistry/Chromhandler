@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.signal import savgol_filter
 
-from chromhandler.fitting.skew_normal import sn_asymmetry_to_gamma1
+from chromhandler.fitting.skew_normal import GAMMA1_MAX, sn_asymmetry_to_gamma1
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -452,4 +452,108 @@ def extract_artefact_from_controls(
         mu_artefact=mu_artefact,
         mu_analyte_ref=mu_analyte_ref,
         delta_signed=delta_signed,
+    )
+
+
+def _log_sigma_bounds(
+    window_low: float,
+    window_high: float,
+    dt: float,
+    config: PriorConfig,
+) -> tuple[float, float]:
+    sigma_low = config.sigma_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA
+    sigma_high = (window_high - window_low) / config.sigma_high_window_fraction
+    return float(np.log(sigma_low)), float(np.log(sigma_high))
+
+
+def _gamma1_bounds(config: PriorConfig) -> tuple[float, float]:
+    bound = config.gamma1_bound_fraction * GAMMA1_MAX
+    return float(-bound), float(bound)
+
+
+def _log_A_scale_from_noise_propagation(
+    areas: NDArray[np.float64],
+    noise_per_trace: NDArray[np.float64],
+    n_window_points: int,
+    dt: float,
+    n_trace: int,
+    config: PriorConfig,
+) -> float:
+    """log_A scale: noise propagation, floored by config."""
+    median_noise = float(np.median(noise_per_trace))
+    sigma_area = median_noise * float(np.sqrt(n_window_points)) * float(dt)
+    median_area = float(np.median(np.abs(areas))) if areas.size > 0 else 0.0
+    cv = 1.0 if median_area <= 0.0 else sigma_area / median_area
+    propagated = float(np.log1p(cv))
+    if n_trace == 1:
+        return max(propagated, config.log_A_scale_n1_min)
+    return max(propagated, config.log_A_scale_n1_min / float(np.sqrt(n_trace)))
+
+
+def aggregate_single_peak_priors(
+    per_trace_features: list[WindowFeatures],
+    window_low: float,
+    window_high: float,
+    dt: float,
+    noise_per_trace: NDArray[np.float64],
+    n_window_points: int,
+    config: PriorConfig,
+) -> SkewNormalPriors:
+    """Aggregate per-trace single-peak features into a :class:`SkewNormalPriors`.
+
+    All scale fallbacks for the n=1 case come from ``config``.
+    """
+    n = len(per_trace_features)
+    if n == 0:
+        raise ValueError("per_trace_features must be non-empty.")
+
+    mus = np.asarray([f.mu for f in per_trace_features])
+    sigmas = np.asarray([f.sigma for f in per_trace_features])
+    gamma1s = np.asarray([f.gamma1 for f in per_trace_features])
+    areas = np.asarray([f.area for f in per_trace_features])
+    log_sigmas = np.log(np.clip(sigmas, 1e-9, None))
+    log_areas = np.log(np.clip(np.abs(areas), 1e-9, None))
+
+    mu_floor = config.mu_scale_dt_floor_multiplier * dt
+    mu_loc = float(np.mean(mus))
+    mu_scale = float(max(np.std(mus, ddof=0), mu_floor))
+
+    log_sigma_loc = float(np.mean(log_sigmas))
+    if n == 1:
+        log_sigma_scale = config.log_sigma_scale_n1
+    else:
+        log_sigma_scale = float(max(
+            np.std(log_sigmas, ddof=0),
+            config.log_sigma_scale_n1 / float(np.sqrt(n)),
+        ))
+
+    gamma1_loc = float(np.mean(gamma1s))
+    if n == 1:
+        gamma1_scale = config.gamma1_scale_n1
+    else:
+        gamma1_scale = float(max(
+            np.std(gamma1s, ddof=0),
+            config.gamma1_scale_n1 / float(np.sqrt(n)),
+        ))
+    _, gamma1_bound_high = _gamma1_bounds(config)
+    gamma1_scale = min(gamma1_scale, gamma1_bound_high)
+
+    log_sigma_low, log_sigma_high = _log_sigma_bounds(window_low, window_high, dt, config)
+    log_A_scale = _log_A_scale_from_noise_propagation(
+        areas, noise_per_trace, n_window_points, dt, n, config,
+    )
+
+    return SkewNormalPriors(
+        n_components=1,
+        mu_left_loc=mu_loc, mu_left_scale=mu_scale,
+        mu_left_low=window_low, mu_left_high=window_high,
+        log_sigma_left_loc=log_sigma_loc, log_sigma_left_scale=log_sigma_scale,
+        log_sigma_left_low=log_sigma_low, log_sigma_left_high=log_sigma_high,
+        gamma1_left_loc=gamma1_loc, gamma1_left_scale=gamma1_scale,
+        log_A_left_loc_per_trace=log_areas, log_A_left_scale=log_A_scale,
+        Delta_loc=None, Delta_scale=None, Delta_low=None, Delta_high=None,
+        log_sigma_right_loc=None, log_sigma_right_scale=None,
+        log_sigma_right_low=None, log_sigma_right_high=None,
+        gamma1_right_loc=None, gamma1_right_scale=None,
+        log_A_right_loc_per_trace=None, log_A_right_scale=None,
     )
