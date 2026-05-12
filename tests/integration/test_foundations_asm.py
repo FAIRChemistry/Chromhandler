@@ -37,8 +37,10 @@ def test_prepare_dataset_on_asm_kinetic_series() -> None:
     handler = Handler.read_asm(path=ASM_DIR, mode="timecourse")
     times, signals = _times_and_signals_from_handler(handler)
 
-    assert len(times) == 7
-    assert len(signals) == 7
+    # 6 samples in the fixture (CV1, CV2, CV3, CV4, CV5 with 2 timepoints each;
+    # CV10 with 7 timepoints) -> 5*2 + 7 = 17 traces.
+    assert len(times) == 17
+    assert len(signals) == 17
 
     peaks = [
         PeakAnnotation(molecule_id="Ino", rt_min=2.55, rt_max=2.85),
@@ -64,8 +66,8 @@ def test_prepare_dataset_on_asm_kinetic_series() -> None:
 
     ds = prepare_dataset(times, signals, peaks, baselines)
 
-    assert ds.n_trace == 7
-    assert ds.time.shape[0] == 7
+    assert ds.n_trace == 17
+    assert ds.time.shape[0] == 17
     assert ds.dt_global > 0
     assert ds.dt_global < 0.01  # HPLC sampling well below 10 ms
     assert np.all(ds.noise_per_trace > 0)
