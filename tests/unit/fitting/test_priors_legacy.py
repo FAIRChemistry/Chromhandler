@@ -20,7 +20,7 @@ import pytest
 from scipy.stats import skewnorm
 
 from chromhandler.annotations import PeakAnnotation
-from chromhandler.fitting.priors import (
+from chromhandler.fitting._legacy_priors import (
     PeakApexTraces,
     build_peak_priors,
     geometric_priors_to_arrays,
@@ -92,7 +92,7 @@ def test_halfwidth_priors_symmetric_gaussian() -> None:
     sigma = 0.04
     x, y = _make_window(n_trace=8, sigma=sigma, alpha=0.0, area=500.0, noise_std=0.2)
 
-    from chromhandler.fitting.priors import _halfwidth_priors
+    from chromhandler.fitting._legacy_priors import _halfwidth_priors
 
     w_left_loc, _, w_right_loc, _, _ = _halfwidth_priors(x, y)
 
@@ -112,7 +112,7 @@ def test_halfwidth_priors_right_tailing_peak() -> None:
     """Right-tailing peak (alpha > 0): w_right > w_left."""
     x, y = _make_window(n_trace=8, sigma=0.04, alpha=2.0, area=500.0, noise_std=0.2)
 
-    from chromhandler.fitting.priors import _halfwidth_priors
+    from chromhandler.fitting._legacy_priors import _halfwidth_priors
 
     w_left_loc, _, w_right_loc, _, _ = _halfwidth_priors(x, y)
 
@@ -126,7 +126,7 @@ def test_halfwidth_priors_left_tailing_peak() -> None:
     """Left-tailing peak (alpha < 0): w_left > w_right."""
     x, y = _make_window(n_trace=8, sigma=0.04, alpha=-2.0, area=500.0, noise_std=0.2)
 
-    from chromhandler.fitting.priors import _halfwidth_priors
+    from chromhandler.fitting._legacy_priors import _halfwidth_priors
 
     w_left_loc, _, w_right_loc, _, _ = _halfwidth_priors(x, y)
 
@@ -143,7 +143,7 @@ def test_halfwidth_priors_multi_trace_scale_positive() -> None:
     sigmas = rng.uniform(0.035, 0.045, 8)
     y = np.stack([_gaussian(x, 0.5, s, 200.0) + rng.normal(0, 0.3, 200) for s in sigmas])
 
-    from chromhandler.fitting.priors import _halfwidth_priors
+    from chromhandler.fitting._legacy_priors import _halfwidth_priors
 
     _, w_left_scale, _, w_right_scale, _ = _halfwidth_priors(x, y)
 
@@ -160,7 +160,7 @@ def test_halfwidth_priors_low_snr_trace_excluded() -> None:
     y_noise = np.random.default_rng(1).normal(0, 1.0, 200)  # pure noise
     y = np.stack([y_good, y_noise])
 
-    from chromhandler.fitting.priors import _halfwidth_priors
+    from chromhandler.fitting._legacy_priors import _halfwidth_priors
 
     w_left_loc, _, w_right_loc, _, _ = _halfwidth_priors(x, y)
 
@@ -183,7 +183,7 @@ def test_snr_per_trace_known_signal() -> None:
     noise_std = 2.0
     x, y = _make_window(n_trace=5, sigma=sigma, area=area, noise_std=noise_std, rng_seed=7)
 
-    from chromhandler.fitting.priors import _estimate_snr, _trace_fwhm_geometry
+    from chromhandler.fitting._legacy_priors import _estimate_snr, _trace_fwhm_geometry
 
     geo = _trace_fwhm_geometry(x, y)
     snr = _estimate_snr(geo.apex_height, _default_sigma(y.shape[0]))
@@ -204,7 +204,7 @@ def test_snr_per_trace_all_noise_no_crash() -> None:
     x = np.linspace(0.0, 1.0, 100)
     y = rng.normal(0, 1.0, (4, 100))
 
-    from chromhandler.fitting.priors import _estimate_snr, _trace_fwhm_geometry
+    from chromhandler.fitting._legacy_priors import _estimate_snr, _trace_fwhm_geometry
 
     geo = _trace_fwhm_geometry(x, y)
     snr = _estimate_snr(geo.apex_height, _default_sigma(y.shape[0]))
@@ -216,7 +216,7 @@ def test_snr_per_trace_all_noise_no_crash() -> None:
 @pytest.mark.unit
 def test_estimate_snr_uses_supplied_sigma_noise() -> None:
     """_estimate_snr returns apex_height / sigma_noise, elementwise."""
-    from chromhandler.fitting.priors import _estimate_snr
+    from chromhandler.fitting._legacy_priors import _estimate_snr
 
     apex_height = np.array([100.0, 200.0, 50.0])
     sigma_noise = np.array([2.0, 4.0, 1.0])
@@ -227,7 +227,7 @@ def test_estimate_snr_uses_supplied_sigma_noise() -> None:
 @pytest.mark.unit
 def test_build_peak_priors_requires_sigma_noise_kwarg() -> None:
     """build_peak_priors' sigma_noise kwarg is required (no default)."""
-    from chromhandler.fitting.priors import build_peak_priors
+    from chromhandler.fitting._legacy_priors import build_peak_priors
 
     x = np.linspace(0.0, 10.0, 200)
     signal = np.full((1, 200), 100.0) + np.exp(-((x - 5.0) ** 2))[None, :]
@@ -249,7 +249,7 @@ def test_gaussian_area_from_halfwidths_valid_traces() -> None:
     area = 200.0
     x, y = _make_window(n_trace=6, sigma=sigma, area=area, noise_std=0.5)
 
-    from chromhandler.fitting.priors import _gaussian_area_from_halfwidths, _trace_fwhm_geometry
+    from chromhandler.fitting._legacy_priors import _gaussian_area_from_halfwidths, _trace_fwhm_geometry
 
     geo = _trace_fwhm_geometry(x, y)
     area_est = _gaussian_area_from_halfwidths(geo)
@@ -266,7 +266,7 @@ def test_gaussian_area_from_halfwidths_nan_for_invalid() -> None:
     x = np.linspace(0.0, 1.0, 50)
     y = np.ones((3, 50)) * 0.001  # flat — no FWHM crossing
 
-    from chromhandler.fitting.priors import _gaussian_area_from_halfwidths, _trace_fwhm_geometry
+    from chromhandler.fitting._legacy_priors import _gaussian_area_from_halfwidths, _trace_fwhm_geometry
 
     geo = _trace_fwhm_geometry(x, y)
     area_est = np.asarray(_gaussian_area_from_halfwidths(geo))

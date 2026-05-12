@@ -40,13 +40,13 @@ from numpyro.infer import MCMC, NUTS
 from rich import print
 
 from . import model
-from .baseline import BaselinePriors, estimate_baseline
-from .priors import (
+from ._legacy_priors import (
     GeometricPeakPriors,
     build_peak_priors,
     geometric_priors_to_arrays,
     refine_apex_priors_with_trace_shift,
 )
+from .baseline import BaselinePriors, estimate_baseline
 from .types import (
     PEAK_MODE_TO_CODE,
     ModelHyperparams,

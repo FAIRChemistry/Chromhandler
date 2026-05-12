@@ -23,7 +23,7 @@ import numpy as np
 from scipy.stats import median_abs_deviation
 
 from . import model
-from .priors import _trace_fwhm_geometry, fwhm_geometry_to_sigma_alpha
+from ._legacy_priors import _trace_fwhm_geometry, fwhm_geometry_to_sigma_alpha
 
 if TYPE_CHECKING:
     from arviz import InferenceData
