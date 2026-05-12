@@ -31,6 +31,7 @@ class TestPreparedDatasetConstruction:
             baseline_slope=np.zeros(2),
             noise_per_trace=np.full(2, 0.01),
             is_control=np.zeros(2, dtype=np.bool_),
+            trace_ids=("trace_0", "trace_1"),
         )
         assert ds.n_trace == 2
         assert ds.dt_global == 0.1
@@ -52,6 +53,7 @@ class TestPreparedDatasetConstruction:
             baseline_slope=np.zeros(1),
             noise_per_trace=np.full(1, 0.01),
             is_control=np.zeros(1, dtype=np.bool_),
+            trace_ids=("trace_0",),
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             ds.n_trace = 99  # type: ignore[misc]
@@ -169,4 +171,34 @@ def test_prepared_dataset_is_control_length_mismatch_raises() -> None:
         prepare_dataset(
             times, signals, peak_anns, base_anns,
             is_control=[True, False],  # 2 entries, but 3 traces
+        )
+
+
+def test_prepared_dataset_trace_ids_default() -> None:
+    from chromhandler.fitting.prepared_dataset import prepare_dataset
+
+    times, signals, peak_anns, base_anns = _make_inputs_with_n_traces(3)
+    ds = prepare_dataset(times, signals, peak_anns, base_anns)
+    assert ds.trace_ids == ("trace_0", "trace_1", "trace_2")
+
+
+def test_prepared_dataset_trace_ids_propagates() -> None:
+    from chromhandler.fitting.prepared_dataset import prepare_dataset
+
+    times, signals, peak_anns, base_anns = _make_inputs_with_n_traces(3)
+    ds = prepare_dataset(
+        times, signals, peak_anns, base_anns,
+        trace_ids=["s1/c1", "s1/c2", "s2/c1"],
+    )
+    assert ds.trace_ids == ("s1/c1", "s1/c2", "s2/c1")
+
+
+def test_prepared_dataset_trace_ids_length_mismatch_raises() -> None:
+    from chromhandler.fitting.prepared_dataset import prepare_dataset
+
+    times, signals, peak_anns, base_anns = _make_inputs_with_n_traces(3)
+    with pytest.raises(ValueError, match="trace_ids"):
+        prepare_dataset(
+            times, signals, peak_anns, base_anns,
+            trace_ids=["only_one"],  # 1 entry, but 3 traces
         )

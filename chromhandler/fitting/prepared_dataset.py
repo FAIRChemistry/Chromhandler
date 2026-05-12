@@ -52,6 +52,10 @@ class PreparedDataset:
         is_control: ``[n_trace]`` bool array, True where the trace comes from a
             control sample (analyte known absent by experimental design). Used by
             the priors layer to extract direct artefact priors.
+        trace_ids: ``[n_trace]`` tuple of human-readable identifiers for each
+            trace, used to name traces in error messages. When fed via
+            :meth:`~chromhandler.handler.Handler.prepare_dataset`, the format is
+            ``"{sample_id}/{chromatogram_id}"``. Defaults to ``"trace_{i}"``.
     """
 
     time: NDArray[np.float64]
@@ -66,6 +70,7 @@ class PreparedDataset:
     baseline_slope: NDArray[np.float64]
     noise_per_trace: NDArray[np.float64]
     is_control: NDArray[np.bool_]
+    trace_ids: tuple[str, ...]
 
 
 def prepare_dataset(
@@ -74,6 +79,7 @@ def prepare_dataset(
     peak_annotations: list[PeakAnnotation],
     baseline_annotations: list[BaselineAnnotation],
     is_control: list[bool] | None = None,
+    trace_ids: list[str] | None = None,
 ) -> PreparedDataset:
     """Run the full data-preparation pipeline.
 
@@ -86,15 +92,19 @@ def prepare_dataset(
             (analyte known absent). When ``None``, all traces are treated as
             non-controls (the ``PreparedDataset.is_control`` field is all
             ``False``). Length must match ``len(times)``.
+        trace_ids: Optional per-trace string identifiers used to name traces in
+            error messages from the priors / model layers. When ``None``,
+            defaults to ``["trace_0", "trace_1", ...]``. Length must match
+            ``len(times)``.
 
     Returns:
         :class:`PreparedDataset` with padded arrays, dt, baselines, noise,
-        and a per-trace ``is_control`` mask.
+        a per-trace ``is_control`` mask, and per-trace ``trace_ids``.
 
     Raises:
         ValueError: If a baseline window overlaps any peak window, if any
-            preparation step fails, or if ``is_control`` length does not
-            match the number of traces.
+            preparation step fails, or if ``is_control`` / ``trace_ids``
+            length does not match the number of traces.
     """
     n_trace = len(times)
     if is_control is not None and len(is_control) != n_trace:
@@ -102,10 +112,20 @@ def prepare_dataset(
             f"is_control length ({len(is_control)}) must match number of "
             f"traces ({n_trace})."
         )
+    if trace_ids is not None and len(trace_ids) != n_trace:
+        raise ValueError(
+            f"trace_ids length ({len(trace_ids)}) must match number of "
+            f"traces ({n_trace})."
+        )
     is_control_arr: NDArray[np.bool_] = (
         np.asarray(is_control, dtype=np.bool_)
         if is_control is not None
         else np.zeros(n_trace, dtype=np.bool_)
+    )
+    trace_ids_tuple: tuple[str, ...] = (
+        tuple(trace_ids)
+        if trace_ids is not None
+        else tuple(f"trace_{i}" for i in range(n_trace))
     )
     check_baseline_peak_disjoint(peak_annotations, baseline_annotations)
     time, signal = pad_to_common_axis(times, signals)
@@ -129,4 +149,5 @@ def prepare_dataset(
         baseline_slope=slope,
         noise_per_trace=noise,
         is_control=is_control_arr,
+        trace_ids=trace_ids_tuple,
     )
