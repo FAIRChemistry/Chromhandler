@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import jax.numpy as jnp
 import numpy as np
 from scipy.signal import savgol_filter
 
@@ -259,6 +258,32 @@ def compute_single_window_features(
 
     mean_ratio = float(np.mean(ratios))
     sigma = float(np.mean(hwhm_sums)) * _FWHM_TO_SIGMA
-    gamma1 = float(sn_asymmetry_to_gamma1(jnp.asarray([mean_ratio]))[0])
+    gamma1 = float(sn_asymmetry_to_gamma1(mean_ratio))  # type: ignore[arg-type]
     area = float(np.trapezoid(s, t))
     return WindowFeatures(mu=mu, sigma=sigma, gamma1=gamma1, area=area)
+
+
+def detect_dominant_apex(
+    time: NDArray[np.float64],
+    signal_baseline_subtracted: NDArray[np.float64],
+    window_low: float,
+    window_high: float,
+    smoothing_window: int = 5,
+) -> tuple[float, float]:
+    """Locate the dominant apex inside a window via smoothed argmax."""
+    mask = (time >= window_low) & (time <= window_high) & np.isfinite(
+        signal_baseline_subtracted
+    )
+    t = np.asarray(time[mask], dtype=np.float64)
+    s = np.asarray(signal_baseline_subtracted[mask], dtype=np.float64)
+    if s.size < smoothing_window:
+        raise ValueError(
+            f"Window [{window_low}, {window_high}] has only {s.size} valid "
+            f"points; need at least {smoothing_window}."
+        )
+    polyorder = min(3, smoothing_window - 1)
+    s_smooth: NDArray[np.float64] = np.asarray(
+        savgol_filter(s, smoothing_window, polyorder), dtype=np.float64
+    )
+    idx = int(np.argmax(s_smooth))
+    return float(t[idx]), float(s_smooth[idx])
