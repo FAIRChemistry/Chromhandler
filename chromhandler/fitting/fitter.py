@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import arviz
 import numpy as np
 
+from chromhandler.fitting.model import ModelConfig
 from chromhandler.fitting.posterior import (
     compute_posterior_predictive as _compute_pp,
 )
@@ -31,9 +32,8 @@ if TYPE_CHECKING:
     import matplotlib.figure
     import pandas as pd
 
-    from chromhandler.fitting.model import ModelConfig
     from chromhandler.fitting.prepared_dataset import PreparedDataset
-    from chromhandler.fitting.priors import SkewNormalPriors
+    from chromhandler.fitting.priors import PriorConfig, SkewNormalPriors
 
 
 @dataclass(frozen=False)  # mutable: lazy groups added to idata over time
@@ -214,3 +214,29 @@ class FitResult:
             ax.axis("off")
         fig.tight_layout()
         return fig
+
+
+def fit(
+    dataset: PreparedDataset,
+    *,
+    prior_config: PriorConfig | None = None,
+    model_config: ModelConfig | None = None,
+) -> FitResult:
+    """Build priors, run MCMC, return a FitResult.
+
+    Args:
+        dataset: PreparedDataset to fit.
+        prior_config: Optional PriorConfig override. Defaults to PriorConfig().
+        model_config: Optional ModelConfig override. Defaults to ModelConfig().
+
+    Returns:
+        FitResult with .plot_* methods and .idata for raw access.
+    """
+    from chromhandler.fitting.model import run_mcmc
+    from chromhandler.fitting.priors import PriorConfig, build_priors
+
+    pc = prior_config if prior_config is not None else PriorConfig()
+    mc = model_config if model_config is not None else ModelConfig()
+    priors = build_priors(dataset, config=pc)
+    idata = run_mcmc(dataset, priors, mc)
+    return FitResult(idata=idata, dataset=dataset, priors=priors, model_config=mc)

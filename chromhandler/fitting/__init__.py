@@ -1,14 +1,9 @@
-"""Chromatographic peak fitting module.
+"""Bayesian skew-normal peak fitting layer."""
 
-Foundations layer (in this rewrite):
+from __future__ import annotations
 
-- :mod:`chromhandler.fitting.preprocessing` — pad-to-common-axis, dt.
-- :mod:`chromhandler.fitting.baseline` — per-trace OLS from baseline regions.
-- :mod:`chromhandler.fitting.noise` — per-trace MAD noise estimation.
-- :mod:`chromhandler.fitting.prepared_dataset` — immutable input bundle.
+from chromhandler.fitting.fitter import FitResult, fit
+from chromhandler.fitting.model import ModelConfig
+from chromhandler.fitting.priors import PriorConfig
 
-The previous higher-level surface (``Fitter``, ``ModelHyperparams``,
-``priors``, ``model``) is being rewritten on the new foundations and is
-intentionally not re-exported here. Modules that survive the rewrite
-will be re-exported from this file once the follow-up plan lands.
-"""
+__all__ = ["FitResult", "ModelConfig", "PriorConfig", "fit"]
