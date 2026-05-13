@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from rich.console import Console, Group
 
     from .calibration import LinearCalibration
-    from .fitting.fitter import Fitter
+    from .fitting._legacy_fitter import Fitter
     from .fitting.prepared_dataset import PreparedDataset
     from .readers.abstractreader import AbstractReader
 

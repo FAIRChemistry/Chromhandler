@@ -416,7 +416,7 @@ def test_fitter_from_handler_inherits_peak_annotations() -> None:
     import numpy as np
 
     from chromhandler import Handler
-    from chromhandler.fitting import Fitter
+    from chromhandler.fitting._legacy_fitter import Fitter
     from chromhandler.model import Chromatogram, Sample
 
     handler = Handler()
