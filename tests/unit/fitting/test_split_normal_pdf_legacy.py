@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 # These imports will fail until Task 2 implements the functions
-from chromhandler.fitting.model import log_split_normal_pdf, split_normal_pdf
+from chromhandler.fitting._legacy_model import log_split_normal_pdf, split_normal_pdf
 
 _HWHM_FACTOR = math.sqrt(2.0 * math.log(2.0))
 
