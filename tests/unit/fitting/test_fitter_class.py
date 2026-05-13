@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")  # non-interactive backend for tests
+
 from typing import TYPE_CHECKING, Any
 
 import arviz as az
@@ -56,3 +60,36 @@ def test_fitresult_save_and_load(tmp_path: Path) -> None:
     reloaded = az.from_netcdf(out_path)
     assert hasattr(reloaded, "posterior")
     assert "mu_anchor_left" in reloaded.posterior.data_vars  # type: ignore[attr-defined]
+
+
+def test_summary_returns_dataframe() -> None:
+    result = _result_fixture()
+    df = result.summary()
+    import pandas as pd
+    assert isinstance(df, pd.DataFrame)
+    assert "mean" in df.columns
+    assert "r_hat" in df.columns
+    # Sanity: mu_anchor_left should be in the table
+    assert any("mu_anchor_left" in str(idx) for idx in df.index)
+
+
+def test_diagnostics_returns_dict() -> None:
+    result = _result_fixture()
+    d = result.diagnostics()
+    assert isinstance(d, dict)
+    assert "fit_healthy" in d
+    assert "r_hat_max" in d
+
+
+def test_plot_traces_returns_figure() -> None:
+    result = _result_fixture()
+    fig = result.plot_traces()
+    import matplotlib.figure
+    assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_plot_prior_overlay_returns_figure() -> None:
+    result = _result_fixture()
+    fig = result.plot_prior_overlay()
+    import matplotlib.figure
+    assert isinstance(fig, matplotlib.figure.Figure)
