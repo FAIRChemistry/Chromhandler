@@ -177,3 +177,5 @@ ex_simple.ipynb
 .claude/*
 !.claude/CLAUDE.md
 enzymeml.json
+# Brainstorm visual companion session files
+.superpowers/
