@@ -11,9 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import jax.numpy as jnp
 import numpy as np
+import numpyro
+import numpyro.distributions as dist
 
-from chromhandler.fitting.skew_normal import density_cp
+from chromhandler.fitting.skew_normal import GAMMA1_MAX, density_cp
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -170,3 +173,140 @@ class ModelConfig:
     # --- Prior predictive ---
     prior_predictive_n_samples: int = 200
     """Number of prior samples used to compute prior predictive band."""
+
+
+def model(
+    dataset: PreparedDataset,
+    priors_list: list[SkewNormalPriors],
+    config: ModelConfig,
+) -> None:
+    """NumPyro Bayesian model for the skew-normal peak fitter.
+
+    Single-mode peaks only. ``run_mcmc`` calls
+    ``_validate_single_mode_only`` before invoking this function.
+
+    Sample sites (single mode):
+        - mu_anchor_left[peak]
+        - log_sigma_left[peak]
+        - gamma1_left[peak]
+        - log_A_left[trace, peak]
+        - trace_shift[trace]
+        - baseline_intercept[trace]
+        - baseline_slope[trace]
+        - obs (likelihood, NaN-masked)
+
+    TODO(doublet): when adding doublet support,
+        - sample Delta[doublet_peak], log_sigma_right[doublet_peak],
+          gamma1_right[doublet_peak], log_A_right[trace, doublet_peak]
+        - add right-component contribution to predicted
+        - remove the _validate_single_mode_only call from run_mcmc
+    """
+    n_trace = dataset.n_trace
+    n_peak = len(priors_list)
+    dt_global = float(dataset.dt_global)
+
+    # === Left-component shared shape priors ===
+    mu_loc = jnp.asarray([p.mu_left_loc for p in priors_list])
+    mu_scale = jnp.asarray([p.mu_left_scale for p in priors_list])
+    mu_low = jnp.asarray([p.mu_left_low for p in priors_list])
+    mu_high = jnp.asarray([p.mu_left_high for p in priors_list])
+    mu_anchor_left = numpyro.sample(
+        "mu_anchor_left",
+        dist.TruncatedNormal(loc=mu_loc, scale=mu_scale, low=mu_low, high=mu_high),
+    )  # [n_peak]
+
+    log_sigma_loc = jnp.asarray([p.log_sigma_left_loc for p in priors_list])
+    log_sigma_scale = jnp.asarray([p.log_sigma_left_scale for p in priors_list])
+    log_sigma_low = jnp.asarray([p.log_sigma_left_low for p in priors_list])
+    log_sigma_high = jnp.asarray([p.log_sigma_left_high for p in priors_list])
+    log_sigma_left = numpyro.sample(
+        "log_sigma_left",
+        dist.TruncatedNormal(
+            loc=log_sigma_loc,
+            scale=log_sigma_scale,
+            low=log_sigma_low,
+            high=log_sigma_high,
+        ),
+    )
+
+    gamma1_loc = jnp.asarray([p.gamma1_left_loc for p in priors_list])
+    gamma1_scale = jnp.asarray([p.gamma1_left_scale for p in priors_list])
+    gamma1_bound = 0.99 * float(GAMMA1_MAX)
+    gamma1_left = numpyro.sample(
+        "gamma1_left",
+        dist.TruncatedNormal(
+            loc=gamma1_loc,
+            scale=gamma1_scale,
+            low=-gamma1_bound,
+            high=gamma1_bound,
+        ),
+    )
+
+    # === Per-trace amplitude: Normal(loc_per_trace, scale) ===
+    log_A_loc = jnp.asarray(
+        np.stack([p.log_A_left_loc_per_trace for p in priors_list], axis=1)
+    )  # [n_trace, n_peak]
+    log_A_scale = jnp.asarray([p.log_A_left_scale for p in priors_list])  # [n_peak]
+    log_A_left = numpyro.sample(
+        "log_A_left",
+        dist.Normal(loc=log_A_loc, scale=log_A_scale[None, :]),
+    )
+
+    # === Per-trace nuisance ===
+    drift_scale = config.trace_shift_scale_dt_multiplier * dt_global
+    trace_shift = numpyro.sample(
+        "trace_shift",
+        dist.Normal(loc=jnp.zeros(n_trace), scale=drift_scale),
+    )
+
+    intercept_se, slope_se = _compute_baseline_se(dataset)
+    intercept_se_eff = np.maximum(intercept_se, config.baseline_intercept_se_floor)
+    slope_se_eff = np.maximum(slope_se, config.baseline_slope_se_floor)
+    baseline_intercept = numpyro.sample(
+        "baseline_intercept",
+        dist.Normal(
+            loc=jnp.asarray(dataset.baseline_intercept),
+            scale=jnp.asarray(intercept_se_eff),
+        ),
+    )
+    baseline_slope = numpyro.sample(
+        "baseline_slope",
+        dist.Normal(
+            loc=jnp.asarray(dataset.baseline_slope),
+            scale=jnp.asarray(slope_se_eff),
+        ),
+    )
+
+    # === DOUBLET EXTENSION HOOK ===
+    # TODO(doublet): sample right-component params here:
+    #   Delta, log_sigma_right, gamma1_right, log_A_right
+    # and add right_contrib = ... to `predicted` below.
+
+    # === Predicted signal (JAX-native; do NOT call _left_component_contribution) ===
+    sigma_left = jnp.exp(log_sigma_left)
+    A_left = jnp.exp(log_A_left)
+    mu = mu_anchor_left[None, :] + trace_shift[:, None]  # [n_trace, n_peak]
+
+    time_arr = jnp.asarray(dataset.time)
+    baseline = baseline_intercept[:, None] + baseline_slope[:, None] * time_arr
+
+    left_contrib = jnp.zeros_like(time_arr)
+    for peak in range(n_peak):
+        dens = density_cp(
+            time_arr,
+            mu[:, peak : peak + 1],  # type: ignore[arg-type]
+            sigma_left[peak],
+            gamma1_left[peak],  # type: ignore[arg-type]
+        )
+        left_contrib = left_contrib + A_left[:, peak : peak + 1] * dens
+    # TODO(doublet): + right_contrib
+    predicted = baseline + left_contrib
+
+    # === Likelihood (NaN-masked) ===
+    noise = jnp.asarray(dataset.noise_per_trace)
+    with numpyro.handlers.mask(mask=jnp.asarray(dataset.valid_mask)):
+        numpyro.sample(
+            "obs",
+            dist.Normal(predicted, noise[:, None]),
+            obs=jnp.asarray(dataset.signal),
+        )
