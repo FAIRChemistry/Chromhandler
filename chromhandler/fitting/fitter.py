@@ -15,7 +15,15 @@ from typing import TYPE_CHECKING, Any
 import arviz
 import numpy as np
 
-from chromhandler.fitting.posterior import diagnostics as _diagnostics_fn
+from chromhandler.fitting.posterior import (
+    compute_posterior_predictive as _compute_pp,
+)
+from chromhandler.fitting.posterior import (
+    compute_prior_predictive as _compute_prior_pp,
+)
+from chromhandler.fitting.posterior import (
+    diagnostics as _diagnostics_fn,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -118,5 +126,91 @@ class FitResult:
                 ax.axhline(0, color="k", lw=0.3, alpha=0.3)
                 if col == 0 and peak_idx == 0:
                     ax.legend(fontsize=7)
+        fig.tight_layout()
+        return fig
+
+    def plot_fit(self) -> matplotlib.figure.Figure:
+        """Posterior predictive 95% HDI band + median + observed data per trace.
+
+        Lazily computes posterior predictive on first call; caches in `idata`.
+
+        TODO(doublet): for doublet peaks, overlay separate dashed lines for
+        left and right components.
+        """
+        if not hasattr(self.idata, "posterior_predictive"):
+            _compute_pp(self.idata, self.dataset, self.priors, self.model_config)
+
+        return self._plot_band(
+            samples_group="posterior_predictive",
+            label="posterior",
+            band_color="tab:blue",
+        )
+
+    def plot_prior_predictive(self) -> matplotlib.figure.Figure:
+        """Prior predictive 95% HDI band + median + observed data per trace.
+
+        Lazily computes prior + prior_predictive on first call; caches both.
+        """
+        if not hasattr(self.idata, "prior_predictive"):
+            _compute_prior_pp(self.idata, self.dataset, self.priors, self.model_config)
+
+        return self._plot_band(
+            samples_group="prior_predictive",
+            label="prior",
+            band_color="tab:purple",
+        )
+
+    def _plot_band(
+        self,
+        samples_group: str,
+        label: str,
+        band_color: str,
+    ) -> matplotlib.figure.Figure:
+        """Shared implementation for plot_fit + plot_prior_predictive."""
+        import matplotlib.pyplot as plt
+
+        group = getattr(self.idata, samples_group)
+        # obs shape: [chain, draw, trace, time_idx]
+        obs = np.asarray(group["obs"])
+        flat = obs.reshape(-1, obs.shape[-2], obs.shape[-1])  # [draws, trace, time]
+        n_trace = self.dataset.n_trace
+        ncols = min(4, n_trace)
+        nrows = (n_trace + ncols - 1) // ncols
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=(3.6 * ncols, 2.6 * nrows),
+            squeeze=False, sharex=False,
+        )
+        ax_flat = axes.flatten()
+        for tr in range(n_trace):
+            ax = ax_flat[tr]
+            t = self.dataset.time[tr]
+            s = self.dataset.signal[tr]
+            valid = np.isfinite(s)
+            # 95% HDI per time-point
+            samples_tr = flat[:, tr, :]  # [draws, time]
+            # arviz.hdi expects shape [chain, draw, ...] or [draw, ...];
+            # pass [1, draws, time] so ArviZ sees a single chain.
+            try:
+                hdi_da = arviz.hdi(samples_tr[None, :, :], hdi_prob=0.95)
+                # hdi_da is an xarray.Dataset; extract the single data variable
+                hdi_arr = np.asarray(next(iter(hdi_da.data_vars.values())))  # type: ignore[union-attr]
+                # Normalise to [time, 2] — some ArviZ versions return [2, time]
+                if hdi_arr.shape[0] == 2 and hdi_arr.shape[-1] != 2:
+                    hdi_arr = hdi_arr.T
+            except Exception:
+                # Fallback: symmetric 95% quantile interval (not HDI proper)
+                hdi_arr = np.quantile(samples_tr, [0.025, 0.975], axis=0).T  # [time, 2]
+            median = np.median(samples_tr, axis=0)
+            ax.fill_between(
+                t[valid], hdi_arr[valid, 0], hdi_arr[valid, 1],
+                color=band_color, alpha=0.35, label=f"{label} 95% HDI",
+            )
+            ax.plot(t[valid], median[valid], color=band_color, lw=1.4, label=f"{label} median")
+            ax.plot(t[valid], s[valid], color="k", lw=0.8, label="data")
+            ax.set_title(self.dataset.trace_ids[tr], fontsize=8)
+            if tr == 0:
+                ax.legend(fontsize=7)
+        for ax in ax_flat[n_trace:]:
+            ax.axis("off")
         fig.tight_layout()
         return fig

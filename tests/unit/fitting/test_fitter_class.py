@@ -93,3 +93,22 @@ def test_plot_prior_overlay_returns_figure() -> None:
     fig = result.plot_prior_overlay()
     import matplotlib.figure
     assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_plot_fit_returns_figure_and_caches() -> None:
+    result = _result_fixture()
+    assert not hasattr(result.idata, "posterior_predictive")
+    fig = result.plot_fit()
+    import matplotlib.figure
+    assert isinstance(fig, matplotlib.figure.Figure)
+    # Lazy cache
+    assert hasattr(result.idata, "posterior_predictive")
+
+
+def test_plot_prior_predictive_returns_figure_and_caches() -> None:
+    result = _result_fixture()
+    assert not hasattr(result.idata, "prior_predictive")
+    fig = result.plot_prior_predictive()
+    import matplotlib.figure
+    assert isinstance(fig, matplotlib.figure.Figure)
+    assert hasattr(result.idata, "prior_predictive")
