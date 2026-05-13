@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import arviz as az
 import jax
 import numpy as np
 import numpyro
 from scipy.stats import skewnorm
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
-from chromhandler.fitting.model import ModelConfig, model
+from chromhandler.fitting.model import ModelConfig, model, run_mcmc
 from chromhandler.fitting.prepared_dataset import prepare_dataset
 from chromhandler.fitting.priors import PriorConfig, build_priors
 
@@ -61,3 +62,38 @@ def test_model_obs_values_are_finite_under_prior() -> None:
     samples = predictive(rng_key, ds, priors, config)
     # `obs` from prior predictive can be large but should be finite
     assert np.all(np.isfinite(np.asarray(samples["obs"])))
+
+
+def test_run_mcmc_returns_inferencedata() -> None:
+    ds, priors = _toy_setup(n_trace=3)
+    config = ModelConfig(num_warmup=20, num_samples=20, num_chains=2, seed=0)
+    idata = run_mcmc(ds, priors, config)
+    assert isinstance(idata, az.InferenceData)
+    # posterior group exists
+    assert hasattr(idata, "posterior")
+    # expected variables
+    posterior_vars = set(idata.posterior.data_vars)  # type: ignore[reportAttributeAccessIssue, union-attr]
+    assert "mu_anchor_left" in posterior_vars
+    assert "log_sigma_left" in posterior_vars
+    assert "gamma1_left" in posterior_vars
+    assert "log_A_left" in posterior_vars
+
+
+def test_run_mcmc_validates_single_mode() -> None:
+    import dataclasses
+
+    ds, priors = _toy_setup(n_trace=3)
+    p = priors[0]
+    p_doublet = dataclasses.replace(
+        p,
+        n_components=2,
+        Delta_loc=0.05, Delta_scale=0.005, Delta_low=0.003, Delta_high=0.125,
+        log_sigma_right_loc=p.log_sigma_left_loc, log_sigma_right_scale=p.log_sigma_left_scale,
+        log_sigma_right_low=p.log_sigma_left_low, log_sigma_right_high=p.log_sigma_left_high,
+        gamma1_right_loc=p.gamma1_left_loc, gamma1_right_scale=p.gamma1_left_scale,
+        log_A_right_loc_per_trace=p.log_A_left_loc_per_trace, log_A_right_scale=p.log_A_left_scale,
+    )
+    config = ModelConfig(num_warmup=10, num_samples=10, num_chains=1)
+    import pytest
+    with pytest.raises(NotImplementedError, match="single"):
+        run_mcmc(ds, [p_doublet], config)

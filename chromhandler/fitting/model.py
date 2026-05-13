@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import arviz
+import jax
 import jax.numpy as jnp
 import numpy as np
 import numpyro
@@ -310,3 +312,42 @@ def model(
             dist.Normal(predicted, noise[:, None]),
             obs=jnp.asarray(dataset.signal),
         )
+
+
+def run_mcmc(
+    dataset: PreparedDataset,
+    priors_list: list[SkewNormalPriors],
+    config: ModelConfig,
+) -> arviz.InferenceData:
+    """Run NUTS sampling and return an ArviZ InferenceData.
+
+    Args:
+        dataset: PreparedDataset to fit.
+        priors_list: One SkewNormalPriors per peak annotation.
+        config: ModelConfig with HMC settings.
+
+    Returns:
+        arviz.InferenceData with `posterior` and `observed_data` groups.
+
+    Raises:
+        NotImplementedError: If any prior has n_components > 1.
+    """
+    _validate_single_mode_only(priors_list)
+
+    kernel = numpyro.infer.NUTS(
+        model,
+        target_accept_prob=config.target_accept_prob,
+        max_tree_depth=config.max_tree_depth,
+    )
+    mcmc = numpyro.infer.MCMC(
+        kernel,
+        num_warmup=config.num_warmup,
+        num_samples=config.num_samples,
+        num_chains=config.num_chains,
+        progress_bar=True,
+    )
+    mcmc.run(
+        jax.random.PRNGKey(config.seed),
+        dataset, priors_list, config,
+    )
+    return arviz.from_numpyro(mcmc)  # type: ignore[return-value]
