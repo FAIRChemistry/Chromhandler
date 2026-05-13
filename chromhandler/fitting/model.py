@@ -338,6 +338,7 @@ def run_mcmc(
         model,
         target_accept_prob=config.target_accept_prob,
         max_tree_depth=config.max_tree_depth,
+        init_strategy=numpyro.infer.init_to_median(num_samples=20),
     )
     mcmc = numpyro.infer.MCMC(
         kernel,
