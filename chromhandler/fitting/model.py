@@ -995,3 +995,50 @@ INTERNAL_POSTERIOR_VARS: frozenset[str] = frozenset({
     "sr_l",
     "sr_r",
 })
+
+
+# ---------------------------------------------------------------------------
+# User-facing configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """User-facing configuration for the NumPyro fit.
+
+    Tuned defaults for fast development iteration on chromatographic data.
+    Override fields directly when constructing for publication-quality runs.
+    """
+
+    # --- HMC / NUTS settings ---
+    num_warmup: int = 500
+    """Number of NUTS warmup samples per chain."""
+
+    num_samples: int = 500
+    """Number of NUTS post-warmup samples per chain."""
+
+    num_chains: int = 4
+    """Number of parallel NUTS chains."""
+
+    target_accept_prob: float = 0.9
+    """Target acceptance probability for the NUTS step-size adaptor."""
+
+    max_tree_depth: int = 10
+    """Maximum tree depth for the NUTS integrator."""
+
+    seed: int = 0
+    """Random seed for the NUTS sampler."""
+
+    # --- Model-layer priors (per-trace, not per-peak) ---
+    trace_shift_scale_dt_multiplier: float = 5.0
+    """drift_scale = N * dt_global. trace_shift ~ Normal(0, drift_scale)."""
+
+    baseline_intercept_se_floor: float = 1.0
+    """Minimum SE for the baseline intercept prior (signal units)."""
+
+    baseline_slope_se_floor: float = 0.01
+    """Minimum SE for the baseline slope prior (signal units per minute)."""
+
+    # --- Prior predictive ---
+    prior_predictive_n_samples: int = 200
+    """Number of prior samples used to compute prior predictive band."""
