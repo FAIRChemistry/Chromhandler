@@ -16,6 +16,7 @@ same drift and shape variation).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -862,12 +863,27 @@ def build_priors(
                 )
                 for tr in non_control_idx
             ]
-            out.append(aggregate_single_peak_priors(
+            subset_priors = aggregate_single_peak_priors(
                 per_trace_features=feats,
                 window_low=ann.rt_min, window_high=ann.rt_max,
                 dt=dataset.dt_global,
                 noise_per_trace=dataset.noise_per_trace[non_control_idx],
                 n_window_points=n_pts, config=cfg,
+            )
+            # Pad log_A_left_loc_per_trace to length n_trace.
+            # Control entries get log(A_floor) — the prior says "no analyte
+            # expected here" (model layer fits them uniformly with a wide
+            # amplitude prior; their posterior naturally pins at the floor).
+            A_floor = (
+                float(np.median(dataset.noise_per_trace))
+                * float(np.sqrt(n_pts))
+                * dataset.dt_global
+            )
+            log_A_full = np.full(dataset.n_trace, float(np.log(A_floor)), dtype=np.float64)
+            log_A_full[non_control_idx] = subset_priors.log_A_left_loc_per_trace
+            out.append(dataclasses.replace(
+                subset_priors,
+                log_A_left_loc_per_trace=log_A_full,
             ))
         elif ann.mode == "artefact_doublet":
             analyte_feats = [
