@@ -144,9 +144,11 @@ def diagnostics(idata: arviz.InferenceData) -> dict[str, Any]:
     n_draw = int(idata.posterior.sizes["draw"])  # type: ignore[attr-defined]
     n_samples_total = n_chain * n_draw
 
-    fit_healthy = bool(
-        r_hat_max < 1.01 and ess_min_bulk > 400 and n_divergent == 0
-    )
+    # NaN-guard r_hat: ArviZ returns NaN when within-chain variance is zero
+    # (degenerate high-SNR posterior — chains lock on the same value). Such
+    # a fit is not pathological, so treat NaN as "healthy" on this axis.
+    rhat_ok = bool(np.isnan(r_hat_max) or r_hat_max < 1.01)
+    fit_healthy = bool(rhat_ok and ess_min_bulk > 400 and n_divergent == 0)
 
     return {
         "r_hat_max": r_hat_max,
