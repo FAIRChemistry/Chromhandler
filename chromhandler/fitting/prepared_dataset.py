@@ -129,7 +129,21 @@ def prepare_dataset(
     )
     check_baseline_peak_disjoint(peak_annotations, baseline_annotations)
     time, signal = pad_to_common_axis(times, signals)
-    valid_mask = ~np.isnan(signal)
+
+    # Restrict the likelihood mask to only the annotated windows: baseline
+    # regions + peak windows. Points outside these windows are not part of the
+    # model and should not contribute to the likelihood. Evaluating the full
+    # chromatogram with a narrow noise prior (estimated from quiet baseline
+    # regions) causes catastrophic divergences when other large peaks are
+    # present in the run.
+    n_time = time.shape[1]
+    window_mask_1d = np.zeros(n_time, dtype=np.bool_)
+    for ann in peak_annotations:
+        window_mask_1d |= (time[0] >= ann.rt_min) & (time[0] <= ann.rt_max)
+    for ann in baseline_annotations:
+        window_mask_1d |= (time[0] >= ann.rt_min) & (time[0] <= ann.rt_max)
+
+    valid_mask = ~np.isnan(signal) & window_mask_1d[None, :]
     dt_per_trace = compute_dt_per_trace(time)
     dt_global = compute_global_dt(dt_per_trace)
     intercept, slope = estimate_baselines(time, signal, baseline_annotations)

@@ -211,7 +211,10 @@ class TestAddModel:
             assert isinstance(t_obj, np.ndarray)
             t: NDArray[np.float64] = t_obj
             assert not np.any(np.isnan(t))  # NaN padding masked out
-            assert t.shape == (101,)
+            # valid_mask now restricts to annotated windows only:
+            # baseline [0.5-1.0]: 11 pts, peak [2.0-3.0]: 21 pts,
+            # baseline [4.0-4.5]: 11 pts → 43 total (step 0.05 on [0,5])
+            assert t.shape == (43,)
         finally:
             plt.close(fig)
 
