@@ -66,16 +66,81 @@ def compute_posterior_predictive(
     return idata
 
 
+def _weakly_informative_priors(
+    dataset: PreparedDataset,
+    priors_list: list[SkewNormalPriors],
+) -> list[SkewNormalPriors]:
+    """Construct weakly-informative versions of the input priors for the
+    prior-predictive visualisation.
+
+    The data-derived priors that ``build_priors`` produces are tight — each
+    per-trace amplitude prior is centred on that trace's *measured* area —
+    so sampling from them gives a prior predictive band that trivially
+    overlaps the data, which is uninformative as a check.
+
+    The "canonical" prior predictive should reflect what the model believes
+    *before* conditioning on the per-trace data. We rebuild each
+    :class:`SkewNormalPriors` with:
+
+    - ``mu`` centred at the annotation-window centre, scale = window_width / 4
+    - ``log_sigma`` at the geometric centre of its bounds, scale = bounds-range / 4
+    - ``gamma1`` centred at 0, scale 0.3 (covers typical chromatographic shapes)
+    - ``log_A`` anchored at the *median* across measured trace areas — a
+      magnitude reference — with scale ``log(10)`` (factor-of-10 uncertainty
+      in either direction), shared across all traces (no per-trace lock-in)
+
+    Window bounds (mu_low/high, log_sigma_low/high) are kept unchanged so the
+    truncation still respects the user's annotation geometry.
+    """
+    import dataclasses
+
+    weak: list[SkewNormalPriors] = []
+    for p in priors_list:
+        window_width = p.mu_left_high - p.mu_left_low
+        log_sigma_range = p.log_sigma_left_high - p.log_sigma_left_low
+
+        # Magnitude anchor: median of the measured per-trace log areas.
+        # Wide scale (log(10) ≈ 2.30) makes the prior predictive span ~2 orders
+        # of magnitude in amplitude.
+        log_A_anchor = float(np.median(p.log_A_left_loc_per_trace))
+        weak_log_A = np.full(dataset.n_trace, log_A_anchor, dtype=np.float64)
+
+        weak.append(dataclasses.replace(
+            p,
+            mu_left_loc=(p.mu_left_low + p.mu_left_high) / 2,
+            mu_left_scale=window_width / 4,
+            log_sigma_left_loc=(p.log_sigma_left_low + p.log_sigma_left_high) / 2,
+            log_sigma_left_scale=log_sigma_range / 4,
+            gamma1_left_loc=0.0,
+            gamma1_left_scale=0.3,
+            log_A_left_loc_per_trace=weak_log_A,
+            log_A_left_scale=float(np.log(10.0)),
+        ))
+    return weak
+
+
 def compute_prior_predictive(
     idata: arviz.InferenceData,
     dataset: PreparedDataset,
     priors_list: list[SkewNormalPriors],
     config: ModelConfig,
 ) -> arviz.InferenceData:
-    """Sample from the prior, run model forward; adds `prior` + `prior_predictive`."""
+    """Sample from a weakly-informative prior, run model forward; adds
+    ``prior`` + ``prior_predictive`` groups to ``idata``.
+
+    The "prior" used here is NOT the data-derived ``priors_list`` (which
+    would produce a predictive band trivially overlapping the data, because
+    per-trace amplitude priors are centred on per-trace measurements).
+    Instead, we substitute a weakly-informative version that reflects what
+    the model believes before conditioning on data — see
+    :func:`_weakly_informative_priors`. This is the canonical Bayesian
+    prior-predictive check: "given my priors, what data would my model
+    generate?"
+    """
+    weak_priors = _weakly_informative_priors(dataset, priors_list)
     predictive = numpyro.infer.Predictive(model, num_samples=config.prior_predictive_n_samples)
     rng_key = jax.random.PRNGKey(config.seed + 2)
-    samples = predictive(rng_key, dataset, priors_list, config)
+    samples = predictive(rng_key, dataset, weak_priors, config)
 
     n_samples = config.prior_predictive_n_samples
     n_trace = dataset.n_trace
