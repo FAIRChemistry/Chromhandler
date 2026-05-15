@@ -77,6 +77,10 @@ def test_run_mcmc_returns_inferencedata() -> None:
     assert "log_sigma_left" in posterior_vars
     assert "gamma1_left" in posterior_vars
     assert "log_A_left" in posterior_vars
+    # arviz.from_numpyro should still emit observed_data even though the
+    # observation is now applied via numpyro.handlers.condition rather than
+    # the inline obs= argument that used to live in model().
+    assert hasattr(idata, "observed_data")
 
 
 def test_run_mcmc_validates_single_mode() -> None:

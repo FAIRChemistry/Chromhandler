@@ -27,7 +27,13 @@ def compute_posterior_predictive(
     priors_list: list[SkewNormalPriors],
     config: ModelConfig,
 ) -> arviz.InferenceData:
-    """Sample posterior predictive `obs` and add a `posterior_predictive` group.
+    """Sample posterior predictive ``obs`` and add a ``posterior_predictive`` group.
+
+    Because the model is unconditioned at the ``"obs"`` site (see
+    ``model.py``), ``numpyro.infer.Predictive`` with ``posterior_samples=...``
+    substitutes the posterior values into every latent site and samples
+    ``"obs"`` freely from the likelihood at those values — exactly the
+    posterior predictive we want, with no extra plumbing.
 
     Mutates the passed InferenceData and returns it.
     """
