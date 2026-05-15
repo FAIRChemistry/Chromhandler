@@ -103,6 +103,9 @@ def test_plot_fit_returns_figure_and_caches() -> None:
     assert isinstance(fig, matplotlib.figure.Figure)
     # Lazy cache
     assert hasattr(result.idata, "posterior_predictive")
+    # Layout must be n_trace x n_peak after the per-(trace, peak) grid
+    # refactor. The fixture has 3 traces x 1 peak.
+    assert len(fig.axes) == 3 * 1
 
 
 def test_plot_prior_predictive_returns_figure_and_caches() -> None:
@@ -112,3 +115,6 @@ def test_plot_prior_predictive_returns_figure_and_caches() -> None:
     import matplotlib.figure
     assert isinstance(fig, matplotlib.figure.Figure)
     assert hasattr(result.idata, "prior_predictive")
+    # Layout must be n_trace x n_peak after the per-(trace, peak) grid
+    # refactor. The fixture has 3 traces x 1 peak.
+    assert len(fig.axes) == 3 * 1

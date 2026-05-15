@@ -166,69 +166,88 @@ class FitResult:
         label: str,
         band_color: str,
     ) -> matplotlib.figure.Figure:
-        """Shared implementation for plot_fit + plot_prior_predictive."""
+        """Shared implementation for plot_fit + plot_prior_predictive.
+
+        Layout: one axis per (trace, annotated peak window). Each axis
+        is restricted to ``[ann.rt_min, ann.rt_max]`` so narrow peaks
+        are actually legible and the band is comparable to data inside
+        the window the model is fitting.
+        """
         import matplotlib.pyplot as plt
 
         group = getattr(self.idata, samples_group)
-        # obs shape: [chain, draw, trace, time_idx]
-        obs = np.asarray(group["obs"])
+        obs = np.asarray(group["obs"])  # [chain, draw, trace, time_idx]
         flat = obs.reshape(-1, obs.shape[-2], obs.shape[-1])  # [draws, trace, time]
         n_trace = self.dataset.n_trace
-        ncols = min(4, n_trace)
-        nrows = (n_trace + ncols - 1) // ncols
+        peak_anns = self.dataset.peak_annotations
+        n_peak = len(peak_anns)
+        if n_peak == 0:
+            # Degenerate dataset: no peak windows. Fall back to a single
+            # full-trace strip so the method still produces a figure.
+            peak_anns_for_plot: list[Any] = [None]
+            n_cols = 1
+        else:
+            peak_anns_for_plot = list(peak_anns)
+            n_cols = n_peak
+
         fig, axes = plt.subplots(
-            nrows, ncols, figsize=(3.6 * ncols, 2.6 * nrows),
+            n_trace, n_cols,
+            figsize=(3.8 * n_cols, 2.2 * n_trace),
             squeeze=False, sharex=False,
         )
-        # Restrict the x-range to the union of peak-annotation windows so the
-        # model fit is actually visible. Plotting the full chromatogram makes
-        # narrow peaks invisible against the y-axis scale and brings in big
-        # peaks elsewhere that the model wasn't fitting.
-        peak_windows = [
-            (ann.rt_min, ann.rt_max) for ann in self.dataset.peak_annotations
-        ]
-        if not peak_windows:
-            # No annotations — fall back to plotting all valid points.
-            peak_windows = [(float("-inf"), float("inf"))]
 
-        ax_flat = axes.flatten()
         for tr in range(n_trace):
-            ax = ax_flat[tr]
             t = self.dataset.time[tr]
             s = self.dataset.signal[tr]
+            for col, ann in enumerate(peak_anns_for_plot):
+                ax = axes[tr, col]
+                if ann is None:
+                    mask = np.isfinite(s)
+                else:
+                    mask = (
+                        (t >= ann.rt_min) & (t <= ann.rt_max)
+                        & np.isfinite(s)
+                    )
 
-            # Mask: only points inside any peak window AND with real signal.
-            plot_mask = np.zeros_like(t, dtype=bool)
-            for low, high in peak_windows:
-                plot_mask |= ((t >= low) & (t <= high))
-            plot_mask &= np.isfinite(s)
+                samples_tr = flat[:, tr, :]  # [draws, time]
+                try:
+                    hdi_da = arviz.hdi(samples_tr[None, :, :], hdi_prob=0.95)
+                    if hasattr(hdi_da, "data_vars"):
+                        hdi_arr = np.asarray(  # type: ignore[reportUnknownArgumentType]
+                            next(iter(hdi_da.data_vars.values()))  # type: ignore[attr-defined,reportUnknownArgumentType]
+                        )
+                    else:
+                        hdi_arr = np.asarray(hdi_da)
+                    if hdi_arr.shape[0] == 2 and hdi_arr.shape[-1] != 2:
+                        hdi_arr = hdi_arr.T
+                except Exception:
+                    hdi_arr = np.quantile(
+                        samples_tr, [0.025, 0.975], axis=0,
+                    ).T  # [time, 2]
+                median = np.median(samples_tr, axis=0)
 
-            # 95% HDI per time-point
-            samples_tr = flat[:, tr, :]  # [draws, time]
-            # arviz.hdi expects shape [chain, draw, ...] or [draw, ...];
-            # pass [1, draws, time] so ArviZ sees a single chain.
-            try:
-                hdi_da = arviz.hdi(samples_tr[None, :, :], hdi_prob=0.95)
-                # hdi_da is an xarray.Dataset; extract the single data variable
-                hdi_arr = np.asarray(next(iter(hdi_da.data_vars.values())))  # type: ignore[union-attr]
-                # Normalise to [time, 2] — some ArviZ versions return [2, time]
-                if hdi_arr.shape[0] == 2 and hdi_arr.shape[-1] != 2:
-                    hdi_arr = hdi_arr.T
-            except Exception:
-                # Fallback: symmetric 95% quantile interval (not HDI proper)
-                hdi_arr = np.quantile(samples_tr, [0.025, 0.975], axis=0).T  # [time, 2]
-            median = np.median(samples_tr, axis=0)
-            ax.fill_between(
-                t[plot_mask], hdi_arr[plot_mask, 0], hdi_arr[plot_mask, 1],
-                color=band_color, alpha=0.35, label=f"{label} 95% HDI",
-            )
-            ax.plot(t[plot_mask], median[plot_mask], color=band_color, lw=1.4, label=f"{label} median")
-            ax.plot(t[plot_mask], s[plot_mask], color="k", lw=0.8, label="data")
-            ax.set_title(self.dataset.trace_ids[tr], fontsize=8)
-            if tr == 0:
-                ax.legend(fontsize=7)
-        for ax in ax_flat[n_trace:]:
-            ax.axis("off")
+                ax.fill_between(
+                    t[mask], hdi_arr[mask, 0], hdi_arr[mask, 1],
+                    color=band_color, alpha=0.35,
+                    label=f"{label} 95% HDI",
+                )
+                ax.plot(
+                    t[mask], median[mask],
+                    color=band_color, lw=1.4, label=f"{label} median",
+                )
+                ax.plot(t[mask], s[mask], color="k", lw=0.8, label="data")
+                if ann is not None:
+                    ax.axvline(ann.rt_min, color="0.6", lw=0.5, ls="--")
+                    ax.axvline(ann.rt_max, color="0.6", lw=0.5, ls="--")
+                    title = (
+                        f"{self.dataset.trace_ids[tr]} — "
+                        f"{ann.molecule_id} ({ann.rt_min:.2f}-{ann.rt_max:.2f})"
+                    )
+                else:
+                    title = self.dataset.trace_ids[tr]
+                ax.set_title(title, fontsize=8)
+                if tr == 0 and col == 0:
+                    ax.legend(fontsize=7)
         fig.tight_layout()
         return fig
 
