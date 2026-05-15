@@ -47,11 +47,41 @@ def test_compute_posterior_predictive_adds_group() -> None:
 
 
 def test_compute_prior_predictive_adds_group() -> None:
+    """The prior predictive must sample from the actual model priors —
+    the band must have non-zero variance and must NOT be byte-equal to
+    the observed signal (that would be the obs= conditioning bug)."""
     idata, ds, priors, config = _idata_fixture()
+    # Snapshot priors to assert non-mutation.
+    snap_mu_loc = priors[0].mu_left_loc
+    snap_log_A_scale = priors[0].log_A_left_scale
+    snap_log_A_loc = np.asarray(priors[0].log_A_left_loc_per_trace).copy()
+
     out = compute_prior_predictive(idata, ds, priors, config)
     assert isinstance(out, az.InferenceData)
     assert hasattr(out, "prior")
     assert hasattr(out, "prior_predictive")
+
+    # The bug we are guarding against: every draw == observed signal.
+    pp_obs = np.asarray(out.prior_predictive["obs"])  # type: ignore[attr-defined]  # (1, draws, trace, time)
+    assert pp_obs.var(axis=1).max() > 0.0, (
+        "prior predictive has zero variance across draws — obs= is still "
+        "conditioned somewhere"
+    )
+    flat = pp_obs[0]  # (draws, trace, time)
+    matches_data = np.array([
+        np.allclose(flat[i], np.asarray(ds.signal), equal_nan=True)
+        for i in range(flat.shape[0])
+    ])
+    assert not matches_data.any(), (
+        "at least one prior-predictive draw is bit-equal to dataset.signal"
+    )
+
+    # priors_list must not be mutated by compute_prior_predictive.
+    assert priors[0].mu_left_loc == snap_mu_loc
+    assert priors[0].log_A_left_scale == snap_log_A_scale
+    assert np.array_equal(
+        np.asarray(priors[0].log_A_left_loc_per_trace), snap_log_A_loc,
+    )
 
 
 def test_derived_areas_shape() -> None:
