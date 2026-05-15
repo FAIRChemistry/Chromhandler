@@ -180,12 +180,29 @@ class FitResult:
             nrows, ncols, figsize=(3.6 * ncols, 2.6 * nrows),
             squeeze=False, sharex=False,
         )
+        # Restrict the x-range to the union of peak-annotation windows so the
+        # model fit is actually visible. Plotting the full chromatogram makes
+        # narrow peaks invisible against the y-axis scale and brings in big
+        # peaks elsewhere that the model wasn't fitting.
+        peak_windows = [
+            (ann.rt_min, ann.rt_max) for ann in self.dataset.peak_annotations
+        ]
+        if not peak_windows:
+            # No annotations — fall back to plotting all valid points.
+            peak_windows = [(float("-inf"), float("inf"))]
+
         ax_flat = axes.flatten()
         for tr in range(n_trace):
             ax = ax_flat[tr]
             t = self.dataset.time[tr]
             s = self.dataset.signal[tr]
-            valid = np.isfinite(s)
+
+            # Mask: only points inside any peak window AND with real signal.
+            plot_mask = np.zeros_like(t, dtype=bool)
+            for low, high in peak_windows:
+                plot_mask |= ((t >= low) & (t <= high))
+            plot_mask &= np.isfinite(s)
+
             # 95% HDI per time-point
             samples_tr = flat[:, tr, :]  # [draws, time]
             # arviz.hdi expects shape [chain, draw, ...] or [draw, ...];
@@ -202,11 +219,11 @@ class FitResult:
                 hdi_arr = np.quantile(samples_tr, [0.025, 0.975], axis=0).T  # [time, 2]
             median = np.median(samples_tr, axis=0)
             ax.fill_between(
-                t[valid], hdi_arr[valid, 0], hdi_arr[valid, 1],
+                t[plot_mask], hdi_arr[plot_mask, 0], hdi_arr[plot_mask, 1],
                 color=band_color, alpha=0.35, label=f"{label} 95% HDI",
             )
-            ax.plot(t[valid], median[valid], color=band_color, lw=1.4, label=f"{label} median")
-            ax.plot(t[valid], s[valid], color="k", lw=0.8, label="data")
+            ax.plot(t[plot_mask], median[plot_mask], color=band_color, lw=1.4, label=f"{label} median")
+            ax.plot(t[plot_mask], s[plot_mask], color="k", lw=0.8, label="data")
             ax.set_title(self.dataset.trace_ids[tr], fontsize=8)
             if tr == 0:
                 ax.legend(fontsize=7)
