@@ -97,3 +97,47 @@ def test_run_mcmc_validates_single_mode() -> None:
     import pytest
     with pytest.raises(NotImplementedError, match="single"):
         run_mcmc(ds, [p_doublet], config)
+
+
+def test_model_prior_predictive_obs_varies_across_draws() -> None:
+    """Regression for the `obs=` conditioning bug.
+
+    Before the fix, `numpyro.infer.Predictive(model, num_samples=N)` returned
+    `dataset.signal` byte-for-byte at every draw, because the `"obs"` site in
+    `model()` was conditioned via `obs=jnp.asarray(dataset.signal)`. The fix
+    drops the `obs=` from the model body and applies the data externally via
+    `numpyro.handlers.condition` in `run_mcmc`, so `Predictive` actually
+    samples from the likelihood.
+
+    This test asserts the post-fix behaviour: prior-predictive draws have
+    strictly positive variance per (trace, time) and are not byte-equal to
+    the observed signal.
+    """
+    import jax
+    import numpyro
+
+    ds, priors = _toy_setup(n_trace=3)
+    config = ModelConfig(num_warmup=1, num_samples=1, num_chains=1)
+    predictive = numpyro.infer.Predictive(model, num_samples=64)
+    samples = predictive(jax.random.PRNGKey(0), ds, priors, config)
+    obs = np.asarray(samples["obs"])  # (64, n_trace, n_time)
+
+    # 1) draws differ from each other at the peak apex on every trace.
+    t = np.asarray(ds.time[0])
+    apex_idx = int(np.argmin(np.abs(t - priors[0].mu_left_loc)))
+    apex_var = obs[:, :, apex_idx].var(axis=0)              # (n_trace,)
+    assert np.all(apex_var > 0.0), (
+        f"prior predictive collapsed to a point at the apex (var={apex_var}); "
+        f"this means obs= is still conditioned"
+    )
+
+    # 2) no draw is byte-equal to dataset.signal (the smoking-gun fingerprint
+    #    of the old bug — Predictive returned the data verbatim).
+    matches_data = np.array([
+        np.allclose(obs[i], np.asarray(ds.signal), equal_nan=True)
+        for i in range(obs.shape[0])
+    ])
+    assert not matches_data.any(), (
+        "at least one prior-predictive draw is bit-equal to dataset.signal — "
+        "obs= is still being conditioned inside model()"
+    )
