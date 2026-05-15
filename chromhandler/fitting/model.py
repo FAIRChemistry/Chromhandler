@@ -305,12 +305,16 @@ def model(
     predicted = baseline + left_contrib
 
     # === Likelihood (NaN-masked) ===
+    # Note: the `"obs"` site is UNCONDITIONED here. The observation is
+    # applied externally via `numpyro.handlers.condition` in `run_mcmc`.
+    # This keeps `numpyro.infer.Predictive(model, ...)` honest — both
+    # prior and posterior predictive sample from the likelihood instead
+    # of short-circuiting on the `obs=` argument.
     noise = jnp.asarray(dataset.noise_per_trace)
     with numpyro.handlers.mask(mask=jnp.asarray(dataset.valid_mask)):
         numpyro.sample(
             "obs",
             dist.Normal(predicted, noise[:, None]),
-            obs=jnp.asarray(dataset.signal),
         )
 
 
@@ -320,6 +324,12 @@ def run_mcmc(
     config: ModelConfig,
 ) -> arviz.InferenceData:
     """Run NUTS sampling and return an ArviZ InferenceData.
+
+    The observation is applied to the unconditioned `model` via
+    ``numpyro.handlers.condition(model, data={"obs": dataset.signal})``
+    so that `model` itself stays a pure generative program. This is the
+    idiomatic numpyro pattern and makes prior/posterior predictive work
+    correctly without per-call workarounds.
 
     Args:
         dataset: PreparedDataset to fit.
@@ -334,8 +344,11 @@ def run_mcmc(
     """
     _validate_single_mode_only(priors_list)
 
+    conditioned_model = numpyro.handlers.condition(
+        model, data={"obs": jnp.asarray(dataset.signal)},
+    )
     kernel = numpyro.infer.NUTS(
-        model,
+        conditioned_model,
         target_accept_prob=config.target_accept_prob,
         max_tree_depth=config.max_tree_depth,
         init_strategy=numpyro.infer.init_to_median(num_samples=20),
