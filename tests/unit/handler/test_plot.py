@@ -78,3 +78,81 @@ def test_group_chromatograms_empty_raises() -> None:
     handler = Handler()
     with pytest.raises(ValueError, match="no chromatograms"):
         _group_chromatograms(handler, overlay="single")
+
+
+import matplotlib.pyplot as plt  # noqa: E402
+
+from chromhandler.plotting import plot_traces  # noqa: E402
+
+
+def test_plot_traces_single_default() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=2)
+    fig, axes = plot_traces(handler)
+    try:
+        assert axes.shape == (4, 1)
+        for ax in axes.flatten():
+            lines = ax.get_lines()
+            assert len(lines) == 1
+            assert tuple(lines[0].get_color()[:3]) == matplotlib.colors.to_rgba("tab:blue")[:3]
+    finally:
+        plt.close(fig)
+
+
+def test_plot_traces_sample_mode_groups_per_sample() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=2)
+    fig, axes = plot_traces(handler, overlay="sample")
+    try:
+        assert axes.shape == (2, 1)
+        for ax in axes.flatten():
+            assert len(ax.get_lines()) == 2
+            colors = [tuple(line.get_color()) for line in ax.get_lines()]
+            assert colors[0] != colors[1]
+    finally:
+        plt.close(fig)
+
+
+def test_plot_traces_all_mode_one_ax() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=2)
+    fig, axes = plot_traces(handler, overlay="all")
+    try:
+        assert axes.shape == (1, 1)
+        ax = axes[0, 0]
+        assert len(ax.get_lines()) == 4
+    finally:
+        plt.close(fig)
+
+
+def test_plot_traces_ax_size_drives_figsize() -> None:
+    handler = _make_handler(n_samples=3, chroms_per_sample=1)
+    fig, axes = plot_traces(handler, overlay="single", ax_size=(2.5, 1.5))
+    try:
+        assert fig.get_size_inches()[0] == pytest.approx(2.5)
+        assert fig.get_size_inches()[1] == pytest.approx(3 * 1.5)
+        assert axes.shape == (3, 1)
+    finally:
+        plt.close(fig)
+
+
+def test_plot_traces_share_y() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=1)
+    # Give the two chromatograms different signal magnitudes so y-limits would
+    # differ when not shared.
+    handler.samples[1].chromatograms[0].signal = [
+        v * 10.0 for v in handler.samples[1].chromatograms[0].signal
+    ]
+    fig, axes = plot_traces(handler, overlay="single", share_y=True)
+    try:
+        ylims = [ax.get_ylim() for ax in axes.flatten()]
+        assert ylims[0] == ylims[1]
+    finally:
+        plt.close(fig)
+
+
+def test_plot_traces_save_writes_file(tmp_path) -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=1)
+    out = tmp_path / "plot.png"
+    fig, _ = plot_traces(handler, save=out)
+    try:
+        assert out.exists() and out.stat().st_size > 0
+    finally:
+        plt.close(fig)

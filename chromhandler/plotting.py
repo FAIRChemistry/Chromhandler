@@ -11,12 +11,18 @@ that drive both builders.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import numpy as np
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from matplotlib.figure import Figure
+    from numpy.typing import NDArray
+
     from chromhandler.handler import Handler
     from chromhandler.model import Chromatogram
 
@@ -54,7 +60,7 @@ def _group_chromatograms(handler: Handler, overlay: OverlayMode) -> list[list[Ch
 def _line_colors(n: int) -> list[tuple[float, float, float, float]]:
     """Return ``n`` line colors per the project rule.
 
-    1 line → ``tab:blue``; ≥ 2 lines → viridis evenly spaced over ``[0, 1]``.
+    1 line → ``tab:blue``; >= 2 lines → viridis evenly spaced over ``[0, 1]``.
     """
     if n <= 0:
         return []
@@ -62,3 +68,60 @@ def _line_colors(n: int) -> list[tuple[float, float, float, float]]:
         return [mcolors.to_rgba("tab:blue")]
     cmap = plt.get_cmap("viridis")
     return [cmap(i / (n - 1)) for i in range(n)]
+
+
+def plot_traces(
+    handler: Handler,
+    *,
+    overlay: OverlayMode = "single",
+    ax_size: tuple[float, float] = (4.0, 3.0),
+    share_y: bool = False,
+    save: Path | str | None = None,
+) -> tuple[Figure, NDArray[Any]]:
+    """Plot raw chromatograms with the project overlay/color rules.
+
+    Args:
+        handler: Source of chromatograms.
+        overlay: ``"single"`` = one ax per chromatogram (flat);
+            ``"sample"`` = one ax per sample, chromatograms overlaid;
+            ``"all"`` = one ax containing every chromatogram.
+        ax_size: ``(width, height)`` in inches per axis. Total ``figsize`` is
+            ``(width, n_rows * height)``.
+        share_y: If ``True``, all axes share y-limits.
+        save: If given, write the figure to this path before returning.
+
+    Returns:
+        ``(fig, axes)`` where ``axes`` is a 2-D ``ndarray`` of shape
+        ``(n_groups, 1)``.
+    """
+    groups = _group_chromatograms(handler, overlay)
+    n_rows = len(groups)
+    width, height = ax_size
+    fig, axes = plt.subplots(
+        n_rows,
+        1,
+        figsize=(width, n_rows * height),
+        squeeze=False,
+        sharey=share_y,
+    )
+    for row, group in enumerate(groups):
+        ax = axes[row, 0]
+        colors = _line_colors(len(group))
+        for chrom, color in zip(group, colors, strict=True):
+            ax.plot(
+                np.asarray(chrom.time),
+                np.asarray(chrom.signal),
+                color=color,
+                lw=1.0,
+                label=chrom.id,
+            )
+        ax.set_xlabel("retention time (min)")
+        ax.set_ylabel("signal")
+        if overlay == "sample":
+            ax.set_title(group[0].sample_id)
+        elif overlay == "single":
+            ax.set_title(group[0].id)
+    fig.tight_layout()
+    if save is not None:
+        fig.savefig(save)
+    return fig, axes
