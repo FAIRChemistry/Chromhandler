@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -30,6 +31,32 @@ if TYPE_CHECKING:
     from .fitting.prepared_dataset import PreparedDataset
     from .readers.abstractreader import AbstractReader
 
+
+
+@dataclass(frozen=True)
+class AlignmentResult:
+    """Result of :meth:`Handler.align_chromatograms`.
+
+    Attributes:
+        shifts_samples: Raw per-trace shifts in common-grid sample-index
+            units (float; positive = trace shifted to the right).
+        delta_rt: Per-trace shift in minutes (``shifts_samples * dt``).
+            This is the offset that was added to each chromatogram's
+            ``time`` and to every ``Peak.location.mean``.
+        dt: Common sampling interval (minutes) used to resample traces
+            onto a shared grid before alignment.
+        trace_ids: ``"{sample_id}/{chromatogram_id}"`` for each row of
+            ``shifts_samples`` / ``delta_rt``, in flatten order.
+        loss_initial: Alignment loss before optimization.
+        loss_final: Alignment loss after optimization.
+    """
+
+    shifts_samples: np.ndarray[Any, np.dtype[np.float64]]
+    delta_rt: np.ndarray[Any, np.dtype[np.float64]]
+    dt: float
+    trace_ids: list[str]
+    loss_initial: float
+    loss_final: float
 
 
 class Handler(BaseModel):
@@ -733,6 +760,136 @@ class Handler(BaseModel):
             baseline_annotations=baseline_annotations,
             is_control=is_control,
             trace_ids=trace_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # Retention-time alignment
+    # ------------------------------------------------------------------
+
+    def align_chromatograms(
+        self,
+        lower_rt: float,
+        upper_rt: float,
+        *,
+        max_shift_rt: float | None = None,
+        enforce_zero_mean: bool = True,
+        n_starts: int = 16,
+        lr: float = 1e-1,
+        n_steps: int = 1500,
+        seed: int = 0,
+    ) -> AlignmentResult:
+        """Align retention times across all chromatograms in this handler.
+
+        Computes one shift per chromatogram by aligning the signal inside
+        ``[lower_rt, upper_rt]`` against a shared template, then mutates each
+        :class:`~chromhandler.model.Chromatogram` *in place*: ``time`` is
+        offset by ``delta_rt`` and every :class:`~chromhandler.model.Peak`'s
+        ``location`` (``mean`` field of the :class:`Estimate`) is shifted by
+        the same amount.
+
+        Args:
+            lower_rt: Lower bound of the alignment window (minutes).
+            upper_rt: Upper bound of the alignment window (minutes).
+            max_shift_rt: Hard bound on the per-trace shift magnitude
+                (minutes). ``None`` lets the optimizer auto-size.
+            enforce_zero_mean: Re-centre shifts to mean zero each step so
+                the absolute time origin is preserved.
+            n_starts: Multi-start Adam runs in parallel (1 = single start).
+            lr: Adam learning rate (in sample-index units per step).
+            n_steps: Adam iterations per start.
+            seed: PRNG seed for multi-start perturbation noise.
+
+        Returns:
+            :class:`AlignmentResult` with raw shifts (sample-index units),
+            per-trace ``delta_rt`` (minutes), the common ``dt``, ordered
+            ``trace_ids``, and pre/post alignment losses.
+
+        Raises:
+            ValueError: If the handler has no chromatograms, or if some
+                trace has fewer than three finite samples inside the
+                alignment window.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+
+        from chromhandler.fitting.shift import align_chromatograms as _align
+
+        chroms: list[Chromatogram] = []
+        trace_ids: list[str] = []
+        times: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+        signals: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+        for sample in self.samples:
+            for chrom in sample.chromatograms:
+                chroms.append(chrom)
+                trace_ids.append(f"{sample.id}/{chrom.id}")
+                times.append(np.asarray(chrom.time, dtype=np.float64))
+                signals.append(np.asarray(chrom.signal, dtype=np.float64))
+        if not chroms:
+            raise ValueError("Handler has no chromatograms across any sample.")
+
+        dt_per_trace = np.array(
+            [float(np.median(np.diff(t))) if t.size >= 2 else np.nan for t in times],
+            dtype=np.float64,
+        )
+        dt = float(np.nanmedian(dt_per_trace))
+        if not np.isfinite(dt) or dt <= 0.0:
+            raise ValueError(f"Could not derive a positive sampling interval (dt={dt}).")
+
+        t_min = float(min(float(t.min()) for t in times))
+        t_max = float(max(float(t.max()) for t in times))
+        n_common = int(np.floor((t_max - t_min) / dt)) + 1
+        t_common = t_min + dt * np.arange(n_common, dtype=np.float64)
+
+        n_trace = len(chroms)
+        signal_resampled = np.full((n_trace, n_common), np.nan, dtype=np.float64)
+        for c, (t, s) in enumerate(zip(times, signals, strict=True)):
+            order = np.argsort(t)
+            t_sorted = t[order]
+            s_sorted = s[order]
+            signal_resampled[c] = np.interp(t_common, t_sorted, s_sorted, left=np.nan, right=np.nan)
+
+        in_window = (t_common >= lower_rt) & (t_common <= upper_rt)
+        mask = np.broadcast_to(in_window[None, :], (n_trace, n_common)).copy()
+        mask &= np.isfinite(signal_resampled)
+        per_row = mask.sum(axis=1)
+        bad = [int(i) for i in np.where(per_row < 3)[0]]
+        if bad:
+            offenders = ", ".join(trace_ids[i] for i in bad)
+            raise ValueError(
+                f"Alignment window [{lower_rt}, {upper_rt}] has fewer than 3 finite "
+                f"samples for trace(s): {offenders}"
+            )
+
+        max_shift_samples = (max_shift_rt / dt) if max_shift_rt is not None else None
+        result = _align(
+            jnp.asarray(signal_resampled, dtype=jnp.float32),
+            mask=jnp.asarray(mask, dtype=bool),
+            max_shift_samples=max_shift_samples,
+            enforce_zero_mean=enforce_zero_mean,
+            n_starts=n_starts,
+            lr=lr,
+            n_steps=n_steps,
+            seed=seed,
+        )
+
+        shifts_samples = np.asarray(result.shifts_samples, dtype=np.float64)
+        delta_rt = shifts_samples * dt
+
+        for chrom, d in zip(chroms, delta_rt, strict=True):
+            shift = float(d)
+            chrom.time = [t + shift for t in chrom.time]
+            for peak in chrom.peaks:
+                peak.location = peak.location.model_copy(
+                    update={"mean": peak.location.mean + shift}
+                )
+
+        return AlignmentResult(
+            shifts_samples=shifts_samples,
+            delta_rt=delta_rt,
+            dt=dt,
+            trace_ids=trace_ids,
+            loss_initial=float(result.loss_initial),
+            loss_final=float(result.loss_final),
         )
 
     # ------------------------------------------------------------------
