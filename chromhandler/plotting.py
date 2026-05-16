@@ -158,6 +158,7 @@ def plot_window_grid(
     """
     if not annotations:
         raise ValueError("plot_window_grid: need at least one PeakAnnotation.")
+    annotations = sorted(annotations, key=lambda a: a.rt_min)
     groups = _group_chromatograms(handler, overlay)
     n_rows = len(groups)
     n_cols = len(annotations)

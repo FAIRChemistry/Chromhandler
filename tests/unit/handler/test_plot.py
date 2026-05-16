@@ -254,6 +254,22 @@ def test_handler_plot_windows_uses_registered_annotations() -> None:
         plt.close(fig)
 
 
+def test_plot_window_grid_sorts_columns_by_rt_min() -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=1)
+    unsorted = [
+        PeakAnnotation(molecule_id="B", rt_min=4.0, rt_max=6.0),
+        PeakAnnotation(molecule_id="A", rt_min=1.0, rt_max=2.0),
+    ]
+    fig, axes = plot_window_grid(handler, unsorted, overlay="single")
+    try:
+        assert axes[0, 0].get_xlim() == pytest.approx((1.0, 2.0))
+        assert axes[0, 1].get_xlim() == pytest.approx((4.0, 6.0))
+        assert axes[0, 0].get_title() == "A"
+        assert axes[0, 1].get_title() == "B"
+    finally:
+        plt.close(fig)
+
+
 def test_handler_plot_windows_no_annotations_no_registry_raises() -> None:
     handler = _make_handler(n_samples=1, chroms_per_sample=1)
     with pytest.raises(ValueError, match="no registered peak_annotations"):
