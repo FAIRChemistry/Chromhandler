@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import numpy as np
+    import numpy.typing as npt
+    from matplotlib.figure import Figure
     from rich.console import Console, Group
 
     from .calibration import LinearCalibration
@@ -1699,6 +1701,44 @@ class Handler(BaseModel):
         """
         data = json.loads(Path(path).read_text())
         return cls(**data)
+
+    # ------------------------------------------------------------------
+    # Plotting
+    # ------------------------------------------------------------------
+
+    def plot(
+        self,
+        *,
+        overlay: Literal["all", "sample", "single"] = "single",
+        ax_size: tuple[float, float] = (4.0, 3.0),
+        share_y: bool = False,
+        save: Path | str | None = None,
+    ) -> tuple[Figure, npt.NDArray[Any]]:
+        """Plot raw chromatograms.
+
+        Thin wrapper over :func:`chromhandler.plotting.plot_traces`.
+
+        Args:
+            overlay: Grouping mode. ``"single"`` puts each chromatogram on its
+                own axis (``tab:blue``). ``"sample"`` groups chromatograms per
+                sample (viridis within each axis). ``"all"`` overlays all
+                chromatograms on one axis (viridis).
+            ax_size: ``(width, height)`` in inches per axis.
+            share_y: If ``True``, all axes share y-limits.
+            save: If set, write the figure to this path before returning.
+
+        Returns:
+            ``(fig, axes)`` with ``axes`` shape ``(n_groups, 1)``.
+        """
+        from chromhandler.plotting import plot_traces
+
+        return plot_traces(
+            self,
+            overlay=overlay,
+            ax_size=ax_size,
+            share_y=share_y,
+            save=save,
+        )
 
     def rich_display(self, console: Console | None = None, debug: bool = False) -> None:
         """Display a rich-formatted overview of this Handler."""

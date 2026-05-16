@@ -156,3 +156,13 @@ def test_plot_traces_save_writes_file(tmp_path) -> None:
         assert out.exists() and out.stat().st_size > 0
     finally:
         plt.close(fig)
+
+
+def test_handler_plot_delegates_to_plot_traces() -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=2)
+    fig, axes = handler.plot(overlay="sample")
+    try:
+        assert axes.shape == (1, 1)
+        assert len(axes[0, 0].get_lines()) == 2
+    finally:
+        plt.close(fig)
