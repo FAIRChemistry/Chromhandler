@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from numpy.typing import NDArray
 
+    from chromhandler.annotations import PeakAnnotation
     from chromhandler.handler import Handler
     from chromhandler.model import Chromatogram
 
@@ -121,6 +122,74 @@ def plot_traces(
             ax.set_title(group[0].sample_id)
         elif overlay == "single":
             ax.set_title(group[0].id)
+    fig.tight_layout()
+    if save is not None:
+        fig.savefig(save)
+    return fig, axes
+
+
+def plot_window_grid(
+    handler: Handler,
+    annotations: list[PeakAnnotation],
+    *,
+    overlay: OverlayMode = "single",
+    ax_size: tuple[float, float] = (4.0, 3.0),
+    share_y: bool = False,
+    save: Path | str | None = None,
+) -> tuple[Figure, NDArray[Any]]:
+    """Plot per-window panels in a ``(group, window)`` grid.
+
+    Each row is a group (defined by ``overlay`` as in :func:`plot_traces`)
+    and each column corresponds to one ``PeakAnnotation``. The panel's
+    x-axis is clipped to ``[rt_min, rt_max]`` (no bounds are drawn -- the
+    clip is implicit).
+
+    Args:
+        handler: Source of chromatograms.
+        annotations: One :class:`PeakAnnotation` per column. Must be
+            non-empty.
+        overlay: Same semantics as :func:`plot_traces`.
+        ax_size: ``(width, height)`` in inches per panel.
+        share_y: If ``True``, all panels share y-limits.
+        save: If given, write the figure to this path before returning.
+
+    Returns:
+        ``(fig, axes)`` with ``axes`` shape ``(n_groups, len(annotations))``.
+    """
+    if not annotations:
+        raise ValueError("plot_window_grid: need at least one PeakAnnotation.")
+    groups = _group_chromatograms(handler, overlay)
+    n_rows = len(groups)
+    n_cols = len(annotations)
+    width, height = ax_size
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(n_cols * width, n_rows * height),
+        squeeze=False,
+        sharey=share_y,
+    )
+    for row, group in enumerate(groups):
+        colors = _line_colors(len(group))
+        for col, ann in enumerate(annotations):
+            ax = axes[row, col]
+            for chrom, color in zip(group, colors, strict=True):
+                t = np.asarray(chrom.time)
+                s = np.asarray(chrom.signal)
+                in_window = (t >= ann.rt_min) & (t <= ann.rt_max)
+                ax.plot(t[in_window], s[in_window], color=color, lw=1.0, label=chrom.id)
+            ax.set_xlim(ann.rt_min, ann.rt_max)
+            if row == n_rows - 1:
+                ax.set_xlabel("retention time (min)")
+            if col == 0:
+                if overlay == "sample":
+                    ax.set_ylabel(group[0].sample_id)
+                elif overlay == "single":
+                    ax.set_ylabel(group[0].id)
+                else:
+                    ax.set_ylabel("signal")
+            if row == 0:
+                ax.set_title(ann.molecule_id)
     fig.tight_layout()
     if save is not None:
         fig.savefig(save)

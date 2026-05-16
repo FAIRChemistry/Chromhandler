@@ -9,6 +9,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pytest
 
+from chromhandler.annotations import PeakAnnotation
 from chromhandler.handler import Handler
 from chromhandler.model import Chromatogram, Estimate, Peak, Sample
 from chromhandler.plotting import _group_chromatograms, _line_colors
@@ -166,3 +167,66 @@ def test_handler_plot_delegates_to_plot_traces() -> None:
         assert len(axes[0, 0].get_lines()) == 2
     finally:
         plt.close(fig)
+
+
+from chromhandler.plotting import plot_window_grid  # noqa: E402
+
+
+def _annotations() -> list[PeakAnnotation]:
+    return [
+        PeakAnnotation(molecule_id="A", rt_min=1.0, rt_max=2.0),
+        PeakAnnotation(molecule_id="B", rt_min=4.0, rt_max=6.0),
+    ]
+
+
+def test_plot_window_grid_single_shape_and_xlim() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=2)
+    fig, axes = plot_window_grid(handler, _annotations(), overlay="single")
+    try:
+        assert axes.shape == (4, 2)
+        for row in range(4):
+            assert axes[row, 0].get_xlim() == pytest.approx((1.0, 2.0))
+            assert axes[row, 1].get_xlim() == pytest.approx((4.0, 6.0))
+            for col in range(2):
+                assert len(axes[row, col].get_lines()) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_plot_window_grid_sample_shape() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=3)
+    fig, axes = plot_window_grid(handler, _annotations(), overlay="sample")
+    try:
+        assert axes.shape == (2, 2)
+        for row in range(2):
+            for col in range(2):
+                assert len(axes[row, col].get_lines()) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_plot_window_grid_all_shape() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=2)
+    fig, axes = plot_window_grid(handler, _annotations(), overlay="all")
+    try:
+        assert axes.shape == (1, 2)
+        for col in range(2):
+            assert len(axes[0, col].get_lines()) == 4
+    finally:
+        plt.close(fig)
+
+
+def test_plot_window_grid_save_writes_file(tmp_path) -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=1)
+    out = tmp_path / "windows.png"
+    fig, _ = plot_window_grid(handler, _annotations(), save=out)
+    try:
+        assert out.exists() and out.stat().st_size > 0
+    finally:
+        plt.close(fig)
+
+
+def test_plot_window_grid_empty_annotations_raises() -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=1)
+    with pytest.raises(ValueError, match="at least one"):
+        plot_window_grid(handler, [], overlay="single")
