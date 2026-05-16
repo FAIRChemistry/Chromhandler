@@ -230,3 +230,12 @@ def test_plot_window_grid_empty_annotations_raises() -> None:
     handler = _make_handler(n_samples=1, chroms_per_sample=1)
     with pytest.raises(ValueError, match="at least one"):
         plot_window_grid(handler, [], overlay="single")
+
+
+def test_handler_plot_windows_delegates() -> None:
+    handler = _make_handler(n_samples=2, chroms_per_sample=2)
+    fig, axes = handler.plot_windows(_annotations(), overlay="sample")
+    try:
+        assert axes.shape == (2, 2)
+    finally:
+        plt.close(fig)
