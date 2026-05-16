@@ -239,3 +239,22 @@ def test_handler_plot_windows_delegates() -> None:
         assert axes.shape == (2, 2)
     finally:
         plt.close(fig)
+
+
+def test_handler_plot_windows_uses_registered_annotations() -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=1)
+    for ann in _annotations():
+        handler.peak_annotations[ann.molecule_id] = ann
+    fig, axes = handler.plot_windows()
+    try:
+        assert axes.shape == (1, 2)
+        assert axes[0, 0].get_xlim() == pytest.approx((1.0, 2.0))
+        assert axes[0, 1].get_xlim() == pytest.approx((4.0, 6.0))
+    finally:
+        plt.close(fig)
+
+
+def test_handler_plot_windows_no_annotations_no_registry_raises() -> None:
+    handler = _make_handler(n_samples=1, chroms_per_sample=1)
+    with pytest.raises(ValueError, match="no registered peak_annotations"):
+        handler.plot_windows()

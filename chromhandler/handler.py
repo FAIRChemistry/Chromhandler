@@ -1742,7 +1742,7 @@ class Handler(BaseModel):
 
     def plot_windows(
         self,
-        annotations: list[PeakAnnotation],
+        annotations: list[PeakAnnotation] | None = None,
         *,
         overlay: Literal["all", "sample", "single"] = "single",
         ax_size: tuple[float, float] = (4.0, 3.0),
@@ -1754,7 +1754,9 @@ class Handler(BaseModel):
         Thin wrapper over :func:`chromhandler.plotting.plot_window_grid`.
 
         Args:
-            annotations: One :class:`PeakAnnotation` per column.
+            annotations: One :class:`PeakAnnotation` per column. When
+                ``None`` (default), the handler's registered
+                :attr:`peak_annotations` are used.
             overlay: Same semantics as :meth:`plot`.
             ax_size: ``(width, height)`` in inches per panel.
             share_y: If ``True``, all panels share y-limits.
@@ -1763,8 +1765,21 @@ class Handler(BaseModel):
         Returns:
             ``(fig, axes)`` with ``axes`` shape
             ``(n_groups, len(annotations))``.
+
+        Raises:
+            ValueError: If ``annotations`` is ``None`` and the handler has
+                no registered peak annotations.
         """
         from chromhandler.plotting import plot_window_grid
+
+        if annotations is None:
+            annotations = list(self.peak_annotations.values())
+            if not annotations:
+                raise ValueError(
+                    "plot_windows: no annotations passed and the handler has no "
+                    "registered peak_annotations. Pass annotations explicitly or "
+                    "register them on the handler first."
+                )
 
         return plot_window_grid(
             self,
