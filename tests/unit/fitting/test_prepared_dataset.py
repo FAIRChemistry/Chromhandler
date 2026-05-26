@@ -83,8 +83,10 @@ class TestPrepareDataset:
         ds = prepare_dataset(times, signals, peaks, baselines)
 
         assert ds.n_trace == 3
-        assert ds.time.shape == (3, 501)
-        assert ds.signal.shape == (3, 501)
+        assert ds.time.shape == (3, 303)
+        assert ds.signal.shape == (3, 303)
+        assert ds.valid_mask.shape == (3, 303)
+        assert ds.valid_mask.all()  # every kept column has valid data
         np.testing.assert_allclose(ds.dt_global, 0.01, rtol=1e-3)
         np.testing.assert_allclose(ds.baseline_intercept, [1.0] * 3, atol=0.05)
         np.testing.assert_allclose(ds.baseline_slope, [0.1] * 3, atol=0.05)
@@ -119,9 +121,12 @@ class TestPrepareDataset:
 
         ds = prepare_dataset(times, signals, peaks, baselines)
 
-        assert ds.time.shape == (2, 501)
-        assert np.isnan(ds.signal[1, 401:]).all()
-        np.testing.assert_array_equal(ds.valid_mask[1, 401:], False)
+        assert ds.time.shape == (2, 202)
+        assert ds.signal.shape == (2, 202)
+        # Both windows lie within trace 1's range (≤4.0), so no padded NaN
+        # survives after pruning.
+        assert not np.isnan(ds.signal).any()
+        assert ds.valid_mask.all()
 
 
 def _make_inputs_with_n_traces(n_trace: int = 3):

@@ -136,20 +136,33 @@ def prepare_dataset(
     # chromatogram with a narrow noise prior (estimated from quiet baseline
     # regions) causes catastrophic divergences when other large peaks are
     # present in the run.
-    n_time = time.shape[1]
-    window_mask_1d = np.zeros(n_time, dtype=np.bool_)
+    # Per-trace window mask: True where the trace's time lies inside any
+    # peak or baseline window. NaN comparisons are False, so padded cells
+    # are excluded automatically.
+    window_mask = np.zeros_like(time, dtype=np.bool_)
     for ann in peak_annotations:
-        window_mask_1d |= (time[0] >= ann.rt_min) & (time[0] <= ann.rt_max)
+        window_mask |= (time >= ann.rt_min) & (time <= ann.rt_max)
     for ann in baseline_annotations:
-        window_mask_1d |= (time[0] >= ann.rt_min) & (time[0] <= ann.rt_max)
+        window_mask |= (time >= ann.rt_min) & (time <= ann.rt_max)
+    valid_mask = ~np.isnan(signal) & window_mask
 
-    valid_mask = ~np.isnan(signal) & window_mask_1d[None, :]
+    # dt / baselines / noise are computed on the FULL padded arrays so
+    # they reflect the original sampling, not pruned gaps.
     dt_per_trace = compute_dt_per_trace(time)
     dt_global = compute_global_dt(dt_per_trace)
     intercept, slope = estimate_baselines(time, signal, baseline_annotations)
     noise = estimate_noise_per_trace(
         time, signal, baseline_annotations, intercept, slope
     )
+
+    # Prune: keep columns where at least one trace contributes a valid
+    # likelihood point. Downstream readers index by valid_mask or by
+    # retention-time ranges, so column count is invariant for them.
+    keep_cols = np.any(valid_mask, axis=0)
+    time = time[:, keep_cols]
+    signal = signal[:, keep_cols]
+    valid_mask = valid_mask[:, keep_cols]
+
     return PreparedDataset(
         time=time,
         signal=signal,
