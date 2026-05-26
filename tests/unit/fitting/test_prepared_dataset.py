@@ -83,6 +83,10 @@ class TestPrepareDataset:
         ds = prepare_dataset(times, signals, peaks, baselines)
 
         assert ds.n_trace == 3
+        # Pruning must drop columns outside (peak or baseline) windows.
+        # Windows cover [0.5,1.5] + [2.0,3.0] + [3.5,4.5] = 3.0 of 5.0 total
+        # range at dt=0.01 -> ~303 columns (incl. endpoints), << padded 501.
+        assert ds.time.shape[1] < 501
         assert ds.time.shape == (3, 303)
         assert ds.signal.shape == (3, 303)
         assert ds.valid_mask.shape == (3, 303)
@@ -121,6 +125,8 @@ class TestPrepareDataset:
 
         ds = prepare_dataset(times, signals, peaks, baselines)
 
+        # Two windows ([0.5,1.5] + [2.0,3.0]) cover 2.0 of the 5.0 padded range.
+        assert ds.time.shape[1] < 501
         assert ds.time.shape == (2, 202)
         assert ds.signal.shape == (2, 202)
         # Both windows lie within trace 1's range (≤4.0), so no padded NaN

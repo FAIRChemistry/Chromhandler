@@ -136,9 +136,10 @@ def prepare_dataset(
     # chromatogram with a narrow noise prior (estimated from quiet baseline
     # regions) causes catastrophic divergences when other large peaks are
     # present in the run.
-    # Per-trace window mask: True where the trace's time lies inside any
-    # peak or baseline window. NaN comparisons are False, so padded cells
-    # are excluded automatically.
+    # Per-trace window mask (shape == time.shape): True where the trace's
+    # OWN time axis lies inside any peak/baseline window. Earlier code used
+    # time[0] only, which silently mis-masked traces with different padding
+    # lengths. NaN padded cells compare False and are excluded automatically.
     window_mask = np.zeros_like(time, dtype=np.bool_)
     for ann in peak_annotations:
         window_mask |= (time >= ann.rt_min) & (time <= ann.rt_max)
