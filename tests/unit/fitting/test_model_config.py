@@ -15,8 +15,7 @@ def test_model_config_defaults() -> None:
     assert c.seed == 0
     assert c.baseline_intercept_se_floor == 1.0
     assert c.baseline_slope_se_floor == 0.01
-    assert c.sigma_L_prior_loc == 0.05
-    assert c.signal_shift_buffer == 100.0
+    assert c.log_noise_scale == 2.0
     assert c.prior_predictive_n_samples == 200
 
 
