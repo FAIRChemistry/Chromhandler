@@ -125,7 +125,8 @@ def model(
         - ``gamma1[peak]``          = GAMMA1_MAX * tanh((gamma1_loc + gamma1_scale * gamma1_raw) / GAMMA1_MAX)
         - ``A[trace, peak]``        = softplus(area_loc + area_scale * A_raw)
         - ``sigma_shift``           = dt_global * exp(log_sigma_shift_raw)
-        - ``mu_shift[trace, peak]`` = sigma_shift * mu_shift_raw  (hierarchical)
+        - ``mu_shift[trace, peak]`` = sigma_shift * mu_shift_raw, centred so
+          sum_traces(mu_shift[:, peak]) == 0 (breaks anchor-shift degeneracy)
         - ``baseline_intercept[trace]`` / ``baseline_slope[trace]``
         - ``log_noise[trace]``      = log(baseline_noise) + log_noise_scale * log_noise_raw
     """
@@ -190,7 +191,16 @@ def model(
     mu_shift_raw = numpyro.sample(
         "mu_shift_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
     )
-    mu_shift = numpyro.deterministic("mu_shift", sigma_shift * mu_shift_raw)
+    # Apply per-peak sum-to-zero centring to break the
+    # mu_anchor[peak] <-> mu_shift[:, peak] translation degeneracy.
+    # The constraint is exact and the implied per-shift prior is the
+    # conditional Normal(0, sigma_shift) given sum=0, which differs from
+    # the unconstrained prior by a factor ~ sqrt(1 - 1/n_trace) ≈ 1 for
+    # n_trace >> 1.
+    _ms = sigma_shift * mu_shift_raw
+    mu_shift = numpyro.deterministic(
+        "mu_shift", _ms - jnp.mean(_ms, axis=0, keepdims=True),
+    )
 
     intercept_se, slope_se = _compute_baseline_se(dataset)
     intercept_se_eff = np.maximum(intercept_se, config.baseline_intercept_se_floor)
