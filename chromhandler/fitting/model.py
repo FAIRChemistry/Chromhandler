@@ -41,7 +41,7 @@ SAMPLED_PARAMETER_NAMES: tuple[str, ...] = (
     "mu_anchor", "log_sigma", "gamma1", "A",
     "a", "b",
     "mu_eff", "sigma_eff",
-    "baseline_intercept", "baseline_slope", "log_noise",
+    "baseline_intercept", "baseline_slope", "log_noise", "sigma_rel",
 )
 
 
@@ -105,6 +105,16 @@ class ModelConfig:
     # inflation per 1 sigma -- weakly informative.
     log_noise_scale: float = 2.0
 
+    # --- Per-trace fractional noise prior (heteroscedastic component) ---
+    # sigma_rel[trace] ~ LogNormal(log(sigma_rel_prior_loc), log_sigma_rel_scale)
+    # Likelihood: noise²[t, x] = sigma_abs[t]² + (sigma_rel[t] * predicted[t, x])²
+    # Anchored at 2% (typical HPLC peak-area RSD); scale=1 is weakly informative
+    # (95% prior CI on sigma_rel: ~ [0.3%, 15%]). Per-trace so identifiability
+    # is local to each trace: baseline points pin sigma_abs, apex points pin
+    # sigma_rel — no cross-trace fight.
+    sigma_rel_prior_loc: float = 0.02
+    log_sigma_rel_scale: float = 1.0
+
     # --- Per-trace linear time-axis warp: t' = a[trace] + b[trace] * t ---
     # a (additive, time units): anchored at ~5*dt -- typical injection-timing
     # offset scale. b (multiplicative, dimensionless): anchored near 1 with
@@ -139,6 +149,7 @@ def model(
         - ``sigma_eff[trace, peak]`` = sigma[peak] / b[trace]
         - ``baseline_intercept[trace]`` / ``baseline_slope[trace]``
         - ``log_noise[trace]``      = log(baseline_noise) + log_noise_scale * log_noise_raw
+        - ``sigma_rel[trace]``      = exp(log(sigma_rel_prior_loc) + log_sigma_rel_scale * log_sigma_rel_raw)
     """
     n_trace = dataset.n_trace
     n_peak = len(priors_list)
@@ -218,6 +229,21 @@ def model(
     )
     noise = jnp.exp(log_noise)
 
+    # === Per-trace fractional noise (heteroscedastic component) ===
+    # sigma_rel[t] absorbs amplitude-scaling residuals (e.g., peak-shape
+    # misfit at high-amplitude apexes). Non-centred LogNormal anchored at
+    # sigma_rel_prior_loc; scale=1.0 on the log axis is weakly informative.
+    log_sigma_rel_raw = numpyro.sample(
+        "log_sigma_rel_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    )
+    sigma_rel = numpyro.deterministic(
+        "sigma_rel",
+        jnp.exp(
+            jnp.log(config.sigma_rel_prior_loc)
+            + config.log_sigma_rel_scale * log_sigma_rel_raw
+        ),
+    )
+
     # === Per-trace linear time-axis warp ===
     # t' = a[trace] + b[trace] * t. Captures additive offsets (a) and
     # proportional column drift (b). Both follow the non-centred +
@@ -266,13 +292,20 @@ def model(
         peak_contrib = peak_contrib + A[:, peak : peak + 1] * dens
     predicted = baseline + peak_contrib
 
-    # === Likelihood (NaN-masked additive Gaussian) ===
-    # Sanitise any NaN/Inf in `predicted` so Normal never sees an invalid
-    # location. Masked positions are zeroed out of the likelihood so the
-    # substitution is loss-free.
+    # === Likelihood (NaN-masked, heteroscedastic per-trace noise) ===
+    # Per-point noise: additive sigma_abs[t] (from log_noise) plus
+    # proportional sigma_rel[t] * predicted[t, x]. sigma_abs is constant
+    # per trace; sigma_rel scales with the predicted signal level so
+    # baseline regions see small noise and peak apexes see larger noise.
+    # Per-trace independence keeps identifiability local: baseline-window
+    # points pin sigma_abs, apex points pin sigma_rel.
     predicted = jnp.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
+    sigma_abs = noise  # per-trace, [n_trace]; renamed for clarity in this block
+    obs_noise = jnp.sqrt(
+        sigma_abs[:, None] ** 2 + (sigma_rel[:, None] * predicted) ** 2
+    )
     with numpyro.handlers.mask(mask=jnp.asarray(dataset.valid_mask)):
-        numpyro.sample("obs", dist.Normal(predicted, noise[:, None]))
+        numpyro.sample("obs", dist.Normal(predicted, obs_noise))
 
 
 def run_mcmc(
