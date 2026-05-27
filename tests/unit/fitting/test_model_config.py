@@ -13,9 +13,9 @@ def test_model_config_defaults() -> None:
     assert c.target_accept_prob == 0.9
     assert c.max_tree_depth == 10
     assert c.seed == 0
-    assert c.trace_shift_scale_dt_multiplier == 5.0
     assert c.baseline_intercept_se_floor == 1.0
     assert c.baseline_slope_se_floor == 0.01
+    assert c.sigma_rel_prior_loc == 0.02
     assert c.prior_predictive_n_samples == 200
 
 
