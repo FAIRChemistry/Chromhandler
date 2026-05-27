@@ -16,7 +16,8 @@ def test_model_config_defaults() -> None:
     assert c.baseline_intercept_se_floor == 1.0
     assert c.baseline_slope_se_floor == 0.01
     assert c.log_noise_scale == 2.0
-    assert c.shape_dev_hyperprior_fraction == 0.5
+    assert c.warp_shift_scale_dt_multiplier == 5.0
+    assert c.warp_stretch_scale == 0.01
     assert c.prior_predictive_n_samples == 200
 
 

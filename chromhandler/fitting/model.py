@@ -39,10 +39,8 @@ if TYPE_CHECKING:
 
 SAMPLED_PARAMETER_NAMES: tuple[str, ...] = (
     "mu_anchor", "log_sigma", "gamma1", "A",
-    "sigma_shift", "mu_shift",
-    "tau_log_sigma", "tau_gamma1",
-    "log_sigma_dev", "gamma1_dev",
-    "log_sigma_eff", "gamma1_eff",
+    "a", "b",
+    "mu_eff", "sigma_eff",
     "baseline_intercept", "baseline_slope", "log_noise",
 )
 
@@ -107,14 +105,13 @@ class ModelConfig:
     # inflation per 1 sigma -- weakly informative.
     log_noise_scale: float = 2.0
 
-    # --- Per-trace shape-deviation hyperprior ---
-    # tau_log_sigma[peak] ~ HalfNormal(fraction * priors[peak].log_sigma_scale)
-    # tau_gamma1[peak]    ~ HalfNormal(fraction * priors[peak].gamma1_scale)
-    # Anchors the per-(trace, peak) shape-deviation hyperpriors at a
-    # fraction of the within-trace prior uncertainty. fraction=0.5 says
-    # "across-trace variation is at most ~half of within-trace prior
-    # uncertainty by default; the data can pull tau larger if needed".
-    shape_dev_hyperprior_fraction: float = 0.5
+    # --- Per-trace linear time-axis warp: t' = a[trace] + b[trace] * t ---
+    # a (additive, time units): anchored at ~5*dt -- typical injection-timing
+    # offset scale. b (multiplicative, dimensionless): anchored near 1 with
+    # ~1% deviation -- typical HPLC column drift. Both have sum-to-zero
+    # centring per trace, which breaks the global anchor<->warp degeneracy.
+    warp_shift_scale_dt_multiplier: float = 5.0
+    warp_stretch_scale: float = 0.01
 
     # --- Prior predictive ---
     prior_predictive_n_samples: int = 200
@@ -135,18 +132,11 @@ def model(
         - ``mu_anchor[peak]``       = mu_loc + mu_scale * mu_anchor_raw
         - ``log_sigma[peak]``       = log_sigma_loc + log_sigma_scale * log_sigma_raw
         - ``gamma1[peak]``          = GAMMA1_MAX * tanh((gamma1_loc + gamma1_scale * gamma1_raw) / GAMMA1_MAX)
-        - ``tau_log_sigma[peak]``   = log_sigma_anchor * HalfNormal(1)
-        - ``tau_gamma1[peak]``      = gamma1_anchor * HalfNormal(1)
-        - ``log_sigma_dev[trace, peak]`` = tau_log_sigma * dev_raw,
-          centred so sum_traces(log_sigma_dev[:, peak]) == 0
-        - ``gamma1_dev[trace, peak]``    = tau_gamma1 * dev_raw,
-          same per-peak centring
-        - ``log_sigma_eff[trace, peak]`` = log_sigma[peak] + log_sigma_dev
-        - ``gamma1_eff[trace, peak]``    = tanh-bounded gamma1 + deviation
         - ``A[trace, peak]``        = softplus(area_loc + area_scale * A_raw)
-        - ``sigma_shift``           = dt_global * exp(log_sigma_shift_raw)
-        - ``mu_shift[trace, peak]`` = sigma_shift * mu_shift_raw, centred so
-          sum_traces(mu_shift[:, peak]) == 0 (breaks anchor-shift degeneracy)
+        - ``a[trace]``              = shift_scale * a_raw, centred so mean(a) == 0
+        - ``b[trace]``              = exp(log_b_raw * stretch_scale), centred so mean(log b) == 0
+        - ``mu_eff[trace, peak]``   = (mu_anchor[peak] - a[trace]) / b[trace]
+        - ``sigma_eff[trace, peak]`` = sigma[peak] / b[trace]
         - ``baseline_intercept[trace]`` / ``baseline_slope[trace]``
         - ``log_noise[trace]``      = log(baseline_noise) + log_noise_scale * log_noise_raw
     """
@@ -176,68 +166,8 @@ def model(
     gamma1_max = float(GAMMA1_MAX)
     gamma1_raw = numpyro.sample("gamma1_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
     gamma1_unconstrained = gamma1_loc + gamma1_scale * gamma1_raw
-    # Register the population-level deterministic site; the value itself is
-    # consumed downstream only via gamma1_eff, so we don't keep a local.
-    numpyro.deterministic(
+    gamma1 = numpyro.deterministic(
         "gamma1", gamma1_max * jnp.tanh(gamma1_unconstrained / gamma1_max),
-    )
-
-    # === Per-peak hyperpriors on shape-deviation magnitude ===
-    # tau_*[peak] anchored at fraction * priors[peak].<param>_scale.
-    # Non-centred via HalfNormal: tau_raw ~ HalfNormal(1) anchored by
-    # multiplication, equivalent to tau ~ HalfNormal(anchor).
-    log_sigma_anchor = config.shape_dev_hyperprior_fraction * jnp.asarray(
-        [p.log_sigma_scale for p in priors_list]
-    )  # [n_peak]
-    gamma1_anchor = config.shape_dev_hyperprior_fraction * jnp.asarray(
-        [p.gamma1_scale for p in priors_list]
-    )  # [n_peak]
-    tau_log_sigma_raw = numpyro.sample(
-        "tau_log_sigma_raw", dist.HalfNormal(jnp.ones(n_peak)),
-    )
-    tau_log_sigma = numpyro.deterministic(
-        "tau_log_sigma", log_sigma_anchor * tau_log_sigma_raw,
-    )
-    tau_gamma1_raw = numpyro.sample(
-        "tau_gamma1_raw", dist.HalfNormal(jnp.ones(n_peak)),
-    )
-    tau_gamma1 = numpyro.deterministic(
-        "tau_gamma1", gamma1_anchor * tau_gamma1_raw,
-    )
-
-    # === Per-(trace, peak) shape deviations (non-centred, sum-to-zero) ===
-    # Centring per peak breaks the same anchor<->dev degeneracy we broke
-    # for mu_shift: the chain cannot trade a constant epsilon between
-    # log_sigma[peak] and all log_sigma_dev[:, peak] without changing
-    # the likelihood, so the per-peak sum is forced to zero.
-    log_sigma_dev_raw = numpyro.sample(
-        "log_sigma_dev_raw",
-        dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
-    )
-    _lsd = tau_log_sigma * log_sigma_dev_raw  # broadcasts to [n_trace, n_peak]
-    log_sigma_dev = numpyro.deterministic(
-        "log_sigma_dev", _lsd - jnp.mean(_lsd, axis=0, keepdims=True),
-    )
-    gamma1_dev_raw = numpyro.sample(
-        "gamma1_dev_raw",
-        dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
-    )
-    _g1d = tau_gamma1 * gamma1_dev_raw
-    gamma1_dev = numpyro.deterministic(
-        "gamma1_dev", _g1d - jnp.mean(_g1d, axis=0, keepdims=True),
-    )
-
-    # === Effective per-(trace, peak) shape ===
-    # log_sigma: deviation added in log-space.
-    log_sigma_eff = numpyro.deterministic(
-        "log_sigma_eff", log_sigma[None, :] + log_sigma_dev,
-    )
-    # gamma1: deviation added in UNCONSTRAINED space, then tanh-bound
-    # so the per-trace value stays within (-GAMMA1_MAX, GAMMA1_MAX).
-    gamma1_unconstrained_eff = gamma1_unconstrained[None, :] + gamma1_dev
-    gamma1_eff = numpyro.deterministic(
-        "gamma1_eff",
-        gamma1_max * jnp.tanh(gamma1_unconstrained_eff / gamma1_max),
     )
 
     # === Per-(trace, peak) area: softplus(non-centred Normal) ===
@@ -255,32 +185,6 @@ def model(
         "A_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
     )
     A = numpyro.deterministic("A", jax.nn.softplus(area_loc + area_scale * A_raw))
-
-    # === Per-(trace, peak) retention shift (hierarchical) ===
-    # Hyperprior on the shift scale, anchored at dt (sampling resolution).
-    # LogNormal(log dt, 1) is weakly informative: 95% prior CI ~ [dt/7, 7*dt].
-    # Hierarchical shrinkage: small shifts pull sigma_shift down, which
-    # pulls all per-(trace, peak) shifts toward zero. Large data-driven
-    # shifts grow sigma_shift to let them through.
-    log_sigma_shift_raw = numpyro.sample(
-        "log_sigma_shift_raw", dist.Normal(0.0, 1.0),
-    )
-    sigma_shift = numpyro.deterministic(
-        "sigma_shift", dt_global * jnp.exp(log_sigma_shift_raw),
-    )
-    mu_shift_raw = numpyro.sample(
-        "mu_shift_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
-    )
-    # Apply per-peak sum-to-zero centring to break the
-    # mu_anchor[peak] <-> mu_shift[:, peak] translation degeneracy.
-    # The constraint is exact and the implied per-shift prior is the
-    # conditional Normal(0, sigma_shift) given sum=0, which differs from
-    # the unconstrained prior by a factor ~ sqrt(1 - 1/n_trace) ≈ 1 for
-    # n_trace >> 1.
-    _ms = sigma_shift * mu_shift_raw
-    mu_shift = numpyro.deterministic(
-        "mu_shift", _ms - jnp.mean(_ms, axis=0, keepdims=True),
-    )
 
     intercept_se, slope_se = _compute_baseline_se(dataset)
     intercept_se_eff = np.maximum(intercept_se, config.baseline_intercept_se_floor)
@@ -314,10 +218,39 @@ def model(
     )
     noise = jnp.exp(log_noise)
 
+    # === Per-trace linear time-axis warp ===
+    # t' = a[trace] + b[trace] * t. Captures additive offsets (a) and
+    # proportional column drift (b). Both follow the non-centred +
+    # sum-to-zero pattern: the centring breaks the global anchor<->warp
+    # degeneracy (translating mu_anchor by epsilon is equivalent to
+    # all a[trace] += epsilon; scaling mu_anchor by k is equivalent
+    # to all b[trace] /= k).
+    shift_scale = config.warp_shift_scale_dt_multiplier * dt_global
+    a_raw = numpyro.sample(
+        "a_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    )
+    _a = shift_scale * a_raw
+    a = numpyro.deterministic("a", _a - jnp.mean(_a))
+
+    log_b_raw = numpyro.sample(
+        "log_b_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    )
+    _log_b = config.warp_stretch_scale * log_b_raw
+    log_b = _log_b - jnp.mean(_log_b)
+    b = numpyro.deterministic("b", jnp.exp(log_b))
+
     # === Predicted signal ===
-    # sigma and gamma1 are now per-(trace, peak) effective values.
-    sigma_eff = jnp.exp(log_sigma_eff)            # [n_trace, n_peak]
-    mu = mu_anchor[None, :] + mu_shift            # [n_trace, n_peak]
+    # Effective per-(trace, peak) shape derived from the linear warp.
+    # Physics: when the time axis stretches by b, peak position scales
+    # as (mu - a)/b and peak width scales as sigma/b. gamma1 is
+    # dimensionless (skewness coefficient) and does not transform.
+    sigma = jnp.exp(log_sigma)
+    mu_eff = numpyro.deterministic(
+        "mu_eff", (mu_anchor[None, :] - a[:, None]) / b[:, None],
+    )  # [n_trace, n_peak]
+    sigma_eff = numpyro.deterministic(
+        "sigma_eff", sigma[None, :] / b[:, None],
+    )  # [n_trace, n_peak]
 
     time_arr = jnp.asarray(dataset.time)
     baseline = baseline_intercept[:, None] + baseline_slope[:, None] * time_arr
@@ -326,9 +259,9 @@ def model(
     for peak in range(n_peak):
         dens = density_cp(
             time_arr,
-            mu[:, peak : peak + 1],                       # type: ignore[arg-type]
+            mu_eff[:, peak : peak + 1],                   # type: ignore[arg-type]
             sigma_eff[:, peak : peak + 1],                # type: ignore[arg-type]
-            gamma1_eff[:, peak : peak + 1],               # type: ignore[arg-type]
+            gamma1[peak],                                  # type: ignore[arg-type]
         )
         peak_contrib = peak_contrib + A[:, peak : peak + 1] * dens
     predicted = baseline + peak_contrib

@@ -57,20 +57,14 @@ def test_fit_on_sih_kinetic_subset() -> None:
     # and ESS are meaningless (within-chain variance ≈ 0).  We do not assert
     # on r_hat_max here.  The scientific validity check below is the real gate.
 
-    # Effective peak position: mu_anchor + median(trace_shift) should land
-    # near the priors_demo reference of 3.008 min (tolerance ±0.03 min).
-    # We use the median over (chain, draw, trace) to marginalise the
-    # mu_anchor ↔ trace_shift composition degeneracy described in the plan.
-    posterior_mu = np.asarray(  # type: ignore[reportUnknownArgumentType]
-        result.idata.posterior["mu_anchor_left"]  # type: ignore[reportAttributeAccessIssue]
-    )  # [chain, draw, n_peak]
-    posterior_ts = np.asarray(  # type: ignore[reportUnknownArgumentType]
-        result.idata.posterior["trace_shift"]  # type: ignore[reportAttributeAccessIssue]
-    )  # [chain, draw, n_trace]
-
-    # Effective mu per (chain, draw, trace) = mu_anchor + trace_shift
-    eff_mu = posterior_mu[:, :, 0:1] + posterior_ts  # [chain, draw, trace]
-    median_eff_mu = float(np.median(eff_mu))
+    # Effective peak position: median of mu_eff = (mu_anchor - a) / b
+    # should land near the priors_demo reference of 3.008 min
+    # (tolerance ±0.03 min). mu_eff is already exposed as a deterministic
+    # site (per-(trace, peak)), so we use it directly without recomposing.
+    posterior_mu_eff = np.asarray(  # type: ignore[reportUnknownArgumentType]
+        result.idata.posterior["mu_eff"]  # type: ignore[reportAttributeAccessIssue]
+    )  # [chain, draw, n_trace, n_peak]
+    median_eff_mu = float(np.median(posterior_mu_eff))  # type: ignore[reportUnknownArgumentType]
     assert abs(median_eff_mu - 3.008) < 0.03, (
         f"effective mu {median_eff_mu:.4f} too far from priors_demo value 3.008"
     )
