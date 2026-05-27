@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 SAMPLED_PARAMETER_NAMES: tuple[str, ...] = (
     "mu_anchor", "log_sigma", "gamma1", "A",
     "sigma_shift", "mu_shift",
-    "baseline_intercept", "baseline_slope", "log_noise", "sigma_rel",
+    "baseline_intercept", "baseline_slope", "sigma_L",
 )
 
 
@@ -96,21 +96,20 @@ class ModelConfig:
     baseline_intercept_se_floor: float = 1.0
     baseline_slope_se_floor: float = 0.01
 
-    # --- Effective noise prior ---
-    # log_noise[trace] ~ Normal(log(baseline_noise[trace]), log_noise_scale).
-    # Lets the model discover effective noise > baseline RMS to absorb
-    # model-form mismatch (peak shape, prior loc bias, etc.). A scale of
-    # 2.0 allows ~7x noise inflation per 1 sigma.
-    log_noise_scale: float = 2.0
+    # --- Multiplicative LogNormal noise prior ---
+    # Likelihood: obs ~ LogNormal(log(predicted + shift), sigma_L[trace]),
+    # transformed back to original signal space via an AffineTransform.
+    # sigma_L is the fractional measurement uncertainty (HPLC peak-area
+    # RSD is typically 1-5%). Hyperprior is LogNormal(log(loc), 1.0), so
+    # the 95% prior CI is roughly [0.14 * loc, 7.4 * loc]; with loc=0.05
+    # that is ~ [0.7%, 37%].
+    sigma_L_prior_loc: float = 0.05
 
-    # --- Heteroscedastic noise prior ---
-    # Global fractional noise component: noise[t, x]^2 = sigma_abs[t]^2 +
-    # (sigma_rel * predicted[t, x])^2. Captures shape-mismatch residuals
-    # that scale with peak amplitude (typical HPLC peak-area RSD is 1-3%).
-    # Hyperprior is LogNormal(log(sigma_rel_prior_loc), 1.0), so the 95%
-    # prior CI on sigma_rel is roughly [0.14 * loc, 7.4 * loc]; with the
-    # default loc=0.02 that is ~ [0.3%, 15%].
-    sigma_rel_prior_loc: float = 0.02
+    # Counts of additive headroom above -min(signal) so the LogNormal mode
+    # is well-defined under mild baseline negativity. 100 is well below any
+    # real peak amplitude in HPLC and keeps the shift's effect on the
+    # multiplicative scaling negligible at peak apex.
+    signal_shift_buffer: float = 100.0
 
     # --- Prior predictive ---
     prior_predictive_n_samples: int = 200
@@ -135,8 +134,7 @@ def model(
         - ``sigma_shift``           = dt_global * exp(log_sigma_shift_raw)
         - ``mu_shift[trace, peak]`` = sigma_shift * mu_shift_raw  (hierarchical)
         - ``baseline_intercept[trace]`` / ``baseline_slope[trace]``
-        - ``log_noise[trace]``      = log(baseline_noise) + log_noise_scale * log_noise_raw
-        - ``sigma_rel``             = sigma_rel_prior_loc * exp(log_sigma_rel_raw)
+        - ``sigma_L[trace]``        = sigma_L_prior_loc * exp(log_sigma_L_raw)
     """
     n_trace = dataset.n_trace
     n_peak = len(priors_list)
@@ -221,28 +219,16 @@ def model(
         baseline_slope_loc + jnp.asarray(slope_se_eff) * baseline_slope_raw,
     )
 
-    # === Effective noise (per trace, log-space, non-centred) ===
-    # Anchor on the baseline-RMS noise estimate but let the model
-    # discover larger effective noise to absorb peak-shape mismatch.
-    log_noise_loc = jnp.log(jnp.asarray(dataset.noise_per_trace))
-    log_noise_raw = numpyro.sample(
-        "log_noise_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    # === Per-trace fractional noise (multiplicative LogNormal) ===
+    # sigma_L[t] is the per-trace fractional measurement uncertainty.
+    # Non-centred LogNormal hyperprior anchored at sigma_L_prior_loc;
+    # scale=1.0 on the log axis is weakly informative.
+    log_sigma_L_raw = numpyro.sample(
+        "log_sigma_L_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
     )
-    log_noise = numpyro.deterministic(
-        "log_noise", log_noise_loc + config.log_noise_scale * log_noise_raw,
-    )
-    sigma_abs = jnp.exp(log_noise)  # per-trace additive noise component
-
-    # === Global fractional noise (heteroscedastic) ===
-    # sigma_rel captures shape-mismatch residuals that scale with the
-    # predicted signal level. Non-centred LogNormal anchored at
-    # sigma_rel_prior_loc; scale=1 on the log axis is weakly informative.
-    log_sigma_rel_raw = numpyro.sample(
-        "log_sigma_rel_raw", dist.Normal(0.0, 1.0),
-    )
-    sigma_rel = numpyro.deterministic(
-        "sigma_rel",
-        config.sigma_rel_prior_loc * jnp.exp(log_sigma_rel_raw),
+    sigma_L = numpyro.deterministic(
+        "sigma_L",
+        config.sigma_L_prior_loc * jnp.exp(log_sigma_L_raw),
     )
 
     # === Predicted signal ===
@@ -263,17 +249,35 @@ def model(
         peak_contrib = peak_contrib + A[:, peak : peak + 1] * dens
     predicted = baseline + peak_contrib
 
-    # === Likelihood (NaN-masked, heteroscedastic noise) ===
-    # Replace any NaN/Inf in `predicted` with zero so the
-    # ``Normal(loc=predicted, ...)`` construction never sees an invalid
-    # location parameter. These positions are masked out of the
-    # likelihood so the substitution is loss-free.
+    # === Likelihood (NaN-masked, multiplicative LogNormal) ===
+    # Sanitise any NaN/Inf in `predicted` so the LogNormal base distribution
+    # never sees an invalid location. Masked positions are zeroed out of
+    # the likelihood downstream so the substitution is loss-free.
     predicted = jnp.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
-    # Heteroscedastic noise: small at baseline, grows with predicted signal.
-    # sigma_abs is per-trace (broadcast over time); sigma_rel is global.
-    noise = jnp.sqrt(sigma_abs[:, None] ** 2 + (sigma_rel * predicted) ** 2)
-    with numpyro.handlers.mask(mask=jnp.asarray(dataset.valid_mask)):
-        numpyro.sample("obs", dist.Normal(predicted, noise))
+
+    # Shift `c` so signal + c > 0 everywhere inside the valid mask, with
+    # `signal_shift_buffer` counts of headroom for mild baseline negativity
+    # the model may introduce. The shift is a constant (no posterior); it
+    # only enters via the AffineTransform that maps the LogNormal back into
+    # original signal space.
+    signal_arr = jnp.asarray(dataset.signal)
+    valid_arr = jnp.asarray(dataset.valid_mask)
+    masked_min = jnp.min(jnp.where(valid_arr, signal_arr, jnp.inf))
+    shift = jnp.maximum(0.0, -masked_min) + config.signal_shift_buffer
+
+    # obs ~ LogNormal(log(predicted + shift), sigma_L) - shift
+    # Implemented via TransformedDistribution so the obs site is in
+    # ORIGINAL signal space; external `condition(...)` and downstream
+    # posterior-predictive consumers need no awareness of the shift.
+    base = dist.LogNormal(
+        loc=jnp.log(jnp.maximum(predicted + shift, 1e-6)),
+        scale=sigma_L[:, None],
+    )
+    shifted = dist.TransformedDistribution(
+        base, dist.transforms.AffineTransform(loc=-shift, scale=1.0),
+    )
+    with numpyro.handlers.mask(mask=valid_arr):
+        numpyro.sample("obs", shifted)
 
 
 def run_mcmc(
