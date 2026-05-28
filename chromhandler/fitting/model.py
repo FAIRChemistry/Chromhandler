@@ -2,18 +2,25 @@
 
 One mixture component per :class:`~chromhandler.annotations.PeakAnnotation`.
 
-All sample sites are unit-scale ``Normal(0, 1)`` (non-centred); the
-physically meaningful quantities (``mu_anchor``, ``log_sigma``, ``gamma1``,
-``A``, ...) are recovered via deterministic transforms. Hard
-``TruncatedNormal`` bounds are replaced by soft priors plus, where a
-physical constraint is real, a smooth bijector:
+All sample sites are unit-scale ``Normal(0, 1)`` (non-centred, suffix
+``_raw``); the physically meaningful quantities (``mu``, ``width``,
+``skew``, ``area``, ``time_shift``, ``time_stretch``, ``noise``, ...) are
+exposed as ``numpyro.deterministic`` sites in their natural (unconstrained)
+space. Log-space parameterisations of ``width`` and ``noise`` stay inside
+the model body — they are implementation, not interface.
 
-- ``mu``, ``log_sigma`` : unconstrained ``Normal`` priors. The likelihood
-  + a positive area prior identify them; no walls needed.
-- ``gamma1`` : has a real physical bound ``|gamma1| < GAMMA1_MAX`` from
-  skew-normal math; enforced via ``tanh`` so the boundary is smooth.
-- ``A`` : positivity enforced via ``softplus`` of the non-centred draw,
+Hard ``TruncatedNormal`` bounds are replaced by soft priors plus, where
+a physical constraint is real, a smooth bijector:
+
+- ``mu``, ``width`` : ``width`` is sampled in log-space (LogNormal,
+  non-centred) and exposed in natural space; ``mu`` is an unconstrained
+  ``Normal``. The likelihood + a positive area prior identify them.
+- ``skew`` : has a real physical bound ``|skew| < GAMMA1_MAX`` from
+  skew-normal math (max skewness of any SN equals that of the half-normal);
+  enforced via ``tanh`` so the boundary is smooth.
+- ``area`` : positivity enforced via ``softplus`` of the non-centred draw,
   not by truncation.
+- ``noise`` : sampled in log-space, exposed in natural space.
 """
 
 from __future__ import annotations
@@ -35,14 +42,6 @@ if TYPE_CHECKING:
 
     from chromhandler.fitting.prepared_dataset import PreparedDataset
     from chromhandler.fitting.priors import SkewNormalPriors
-
-
-SAMPLED_PARAMETER_NAMES: tuple[str, ...] = (
-    "mu_anchor", "log_sigma", "gamma1", "A",
-    "a", "b",
-    "mu_eff", "sigma_eff",
-    "baseline_intercept", "baseline_slope", "log_noise",
-)
 
 
 def _compute_baseline_se(
@@ -98,18 +97,20 @@ class ModelConfig:
     baseline_slope_se_floor: float = 0.01
 
     # --- Effective noise prior ---
-    # log_noise[trace] ~ Normal(log(baseline_noise[trace]), log_noise_scale).
-    # Scalar additive Gaussian likelihood per trace. The hyperprior anchor
-    # is the data-derived baseline RMS; the data can inflate it to absorb
-    # model-form mismatch. scale=2.0 on the log axis allows up to ~7x
-    # inflation per 1 sigma -- weakly informative.
+    # noise[trace] is LogNormal: log(noise) ~ Normal(log(baseline_noise),
+    # log_noise_scale). Scalar additive Gaussian likelihood per trace.
+    # The hyperprior anchor is the data-derived baseline RMS; the data can
+    # inflate it to absorb model-form mismatch. scale=2.0 on the log axis
+    # allows up to ~7x inflation per 1 sigma -- weakly informative.
     log_noise_scale: float = 2.0
 
-    # --- Per-trace linear time-axis warp: t' = a[trace] + b[trace] * t ---
-    # a (additive, time units): anchored at ~5*dt -- typical injection-timing
-    # offset scale. b (multiplicative, dimensionless): anchored near 1 with
-    # ~1% deviation -- typical HPLC column drift. Both have sum-to-zero
-    # centring per trace, which breaks the global anchor<->warp degeneracy.
+    # --- Per-trace linear time-axis warp: ---
+    #   t' = time_shift[trace] + time_stretch[trace] * t
+    # time_shift (additive, time units): anchored at ~5*dt -- typical
+    # injection-timing offset scale. time_stretch (multiplicative,
+    # dimensionless): anchored near 1 with ~1% deviation -- typical HPLC
+    # column drift. Both have sum-to-zero centring per trace, which breaks
+    # the global mu <-> warp degeneracy.
     warp_shift_scale_dt_multiplier: float = 5.0
     warp_stretch_scale: float = 0.01
 
@@ -127,18 +128,20 @@ def model(
     All ``numpyro.sample`` sites are ``Normal(0, 1)`` (suffix ``_raw``).
     The physical quantities are exposed as ``numpyro.deterministic``
     sites so downstream summary/plotting code can read them unchanged.
+    Log-space parameterisations of ``width`` and ``noise`` are internal:
+    only the natural-space sites are exposed.
 
     Deterministic sites:
-        - ``mu_anchor[peak]``       = mu_loc + mu_scale * mu_anchor_raw
-        - ``log_sigma[peak]``       = log_sigma_loc + log_sigma_scale * log_sigma_raw
-        - ``gamma1[peak]``          = GAMMA1_MAX * tanh((gamma1_loc + gamma1_scale * gamma1_raw) / GAMMA1_MAX)
-        - ``A[trace, peak]``        = softplus(area_loc + area_scale * A_raw)
-        - ``a[trace]``              = shift_scale * a_raw, centred so mean(a) == 0
-        - ``b[trace]``              = exp(log_b_raw * stretch_scale), centred so mean(log b) == 0
-        - ``mu_eff[trace, peak]``   = (mu_anchor[peak] - a[trace]) / b[trace]
-        - ``sigma_eff[trace, peak]`` = sigma[peak] / b[trace]
+        - ``mu[peak]``              = mu_loc + mu_scale * mu_raw
+        - ``width[peak]``           = exp(log_width_loc + log_width_scale * width_raw)
+        - ``skew[peak]``            = GAMMA1_MAX * tanh((skew_loc + skew_scale * skew_raw) / GAMMA1_MAX)
+        - ``area[trace, peak]``     = softplus(area_loc + area_scale * area_raw)
+        - ``time_shift[trace]``     = shift_scale * time_shift_raw, centred so mean == 0
+        - ``time_stretch[trace]``   = exp(stretch_scale * time_stretch_raw), centred so mean(log) == 0
+        - ``mu_warped[trace, peak]``    = (mu[peak] - time_shift[trace]) / time_stretch[trace]
+        - ``width_warped[trace, peak]`` = width[peak] / time_stretch[trace]
         - ``baseline_intercept[trace]`` / ``baseline_slope[trace]``
-        - ``log_noise[trace]``      = log(baseline_noise) + log_noise_scale * log_noise_raw
+        - ``noise[trace]``          = exp(log(baseline_noise) + log_noise_scale * noise_raw)
     """
     n_trace = dataset.n_trace
     n_peak = len(priors_list)
@@ -147,44 +150,49 @@ def model(
     # === Shared per-peak shape priors (non-centred Normal(0,1)) ===
     mu_loc = jnp.asarray([p.mu_loc for p in priors_list])
     mu_scale = jnp.asarray([p.mu_scale for p in priors_list])
-    mu_raw = numpyro.sample("mu_anchor_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
-    mu_anchor = numpyro.deterministic("mu_anchor", mu_loc + mu_scale * mu_raw)
+    mu_raw = numpyro.sample("mu_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
+    mu = numpyro.deterministic("mu", mu_loc + mu_scale * mu_raw)
 
-    log_sigma_loc = jnp.asarray([p.log_sigma_loc for p in priors_list])
-    log_sigma_scale = jnp.asarray([p.log_sigma_scale for p in priors_list])
-    log_sigma_raw = numpyro.sample(
-        "log_sigma_raw", dist.Normal(jnp.zeros(n_peak), 1.0),
+    # width: sampled LogNormal (non-centred in log-space), exposed in
+    # natural space. The log-space parameterisation is implementation,
+    # not interface — downstream code reads ``width`` directly.
+    log_width_loc = jnp.asarray([p.log_width_loc for p in priors_list])
+    log_width_scale = jnp.asarray([p.log_width_scale for p in priors_list])
+    width_raw = numpyro.sample(
+        "width_raw", dist.Normal(jnp.zeros(n_peak), 1.0),
     )
-    log_sigma = numpyro.deterministic(
-        "log_sigma", log_sigma_loc + log_sigma_scale * log_sigma_raw,
+    width = numpyro.deterministic(
+        "width", jnp.exp(log_width_loc + log_width_scale * width_raw),
     )
 
-    # gamma1: real physical bound |gamma1| < GAMMA1_MAX (skew-normal math).
+    # skew: real physical bound |skew| < GAMMA1_MAX (skew-normal math).
     # Smooth bijector instead of TruncatedNormal wall.
-    gamma1_loc = jnp.asarray([p.gamma1_loc for p in priors_list])
-    gamma1_scale = jnp.asarray([p.gamma1_scale for p in priors_list])
-    gamma1_max = float(GAMMA1_MAX)
-    gamma1_raw = numpyro.sample("gamma1_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
-    gamma1_unconstrained = gamma1_loc + gamma1_scale * gamma1_raw
-    gamma1 = numpyro.deterministic(
-        "gamma1", gamma1_max * jnp.tanh(gamma1_unconstrained / gamma1_max),
+    skew_loc = jnp.asarray([p.skew_loc for p in priors_list])
+    skew_scale = jnp.asarray([p.skew_scale for p in priors_list])
+    skew_max = float(GAMMA1_MAX)
+    skew_raw = numpyro.sample("skew_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
+    skew_unconstrained = skew_loc + skew_scale * skew_raw
+    skew = numpyro.deterministic(
+        "skew", skew_max * jnp.tanh(skew_unconstrained / skew_max),
     )
 
     # === Per-(trace, peak) area: softplus(non-centred Normal) ===
     # Positivity enforced smoothly; no truncation wall. For supported
     # traces (area_loc >> area_scale) softplus is essentially identity.
     # For unsupported traces (area_loc=0) softplus collapses to ~0 but
-    # the likelihood can pull A>0 without fighting a vanishing prior.
+    # the likelihood can pull area>0 without fighting a vanishing prior.
     area_loc = jnp.asarray(
         np.stack([p.area_loc_per_trace for p in priors_list], axis=1)
     )  # [n_trace, n_peak]
     area_scale = jnp.asarray(
         np.stack([p.area_scale_per_trace for p in priors_list], axis=1)
     )  # [n_trace, n_peak]
-    A_raw = numpyro.sample(
-        "A_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
+    area_raw = numpyro.sample(
+        "area_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0),
     )
-    A = numpyro.deterministic("A", jax.nn.softplus(area_loc + area_scale * A_raw))
+    area = numpyro.deterministic(
+        "area", jax.nn.softplus(area_loc + area_scale * area_raw),
+    )
 
     intercept_se, slope_se = _compute_baseline_se(dataset)
     intercept_se_eff = np.maximum(intercept_se, config.baseline_intercept_se_floor)
@@ -206,50 +214,51 @@ def model(
         baseline_slope_loc + jnp.asarray(slope_se_eff) * baseline_slope_raw,
     )
 
-    # === Per-trace additive noise (non-centred LogNormal in log-space) ===
-    # log_noise[t] anchored at the data-derived baseline RMS; the data
+    # === Per-trace additive noise (LogNormal, non-centred in log-space) ===
+    # noise[trace] is anchored at the data-derived baseline RMS; the data
     # can shift it to absorb model-form mismatch within the scale prior.
+    # Sampled in log-space internally; exposed in natural space.
     log_noise_loc = jnp.log(jnp.asarray(dataset.noise_per_trace))
-    log_noise_raw = numpyro.sample(
-        "log_noise_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    noise_raw = numpyro.sample(
+        "noise_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
     )
-    log_noise = numpyro.deterministic(
-        "log_noise", log_noise_loc + config.log_noise_scale * log_noise_raw,
+    noise = numpyro.deterministic(
+        "noise", jnp.exp(log_noise_loc + config.log_noise_scale * noise_raw),
     )
-    noise = jnp.exp(log_noise)
 
     # === Per-trace linear time-axis warp ===
-    # t' = a[trace] + b[trace] * t. Captures additive offsets (a) and
-    # proportional column drift (b). Both follow the non-centred +
-    # sum-to-zero pattern: the centring breaks the global anchor<->warp
-    # degeneracy (translating mu_anchor by epsilon is equivalent to
-    # all a[trace] += epsilon; scaling mu_anchor by k is equivalent
-    # to all b[trace] /= k).
+    # t' = time_shift[trace] + time_stretch[trace] * t. Captures additive
+    # offsets (time_shift) and proportional column drift (time_stretch).
+    # Both follow the non-centred + sum-to-zero pattern: the centring
+    # breaks the global mu<->warp degeneracy (translating mu by epsilon is
+    # equivalent to all time_shift[trace] += epsilon; scaling mu by k is
+    # equivalent to all time_stretch[trace] /= k).
     shift_scale = config.warp_shift_scale_dt_multiplier * dt_global
-    a_raw = numpyro.sample(
-        "a_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    time_shift_raw = numpyro.sample(
+        "time_shift_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
     )
-    _a = shift_scale * a_raw
-    a = numpyro.deterministic("a", _a - jnp.mean(_a))
+    _shift = shift_scale * time_shift_raw
+    time_shift = numpyro.deterministic("time_shift", _shift - jnp.mean(_shift))
 
-    log_b_raw = numpyro.sample(
-        "log_b_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
+    time_stretch_raw = numpyro.sample(
+        "time_stretch_raw", dist.Normal(jnp.zeros(n_trace), 1.0),
     )
-    _log_b = config.warp_stretch_scale * log_b_raw
-    log_b = _log_b - jnp.mean(_log_b)
-    b = numpyro.deterministic("b", jnp.exp(log_b))
+    _log_stretch = config.warp_stretch_scale * time_stretch_raw
+    log_stretch_centred = _log_stretch - jnp.mean(_log_stretch)
+    time_stretch = numpyro.deterministic("time_stretch", jnp.exp(log_stretch_centred))
 
     # === Predicted signal ===
-    # Effective per-(trace, peak) shape derived from the linear warp.
-    # Physics: when the time axis stretches by b, peak position scales
-    # as (mu - a)/b and peak width scales as sigma/b. gamma1 is
-    # dimensionless (skewness coefficient) and does not transform.
-    sigma = jnp.exp(log_sigma)
-    mu_eff = numpyro.deterministic(
-        "mu_eff", (mu_anchor[None, :] - a[:, None]) / b[:, None],
+    # Warped per-(trace, peak) shape derived from the linear warp.
+    # Physics: when the time axis stretches by time_stretch, peak position
+    # scales as (mu - time_shift)/time_stretch and peak width scales as
+    # width/time_stretch. skew is dimensionless (skewness coefficient)
+    # and does not transform.
+    mu_warped = numpyro.deterministic(
+        "mu_warped",
+        (mu[None, :] - time_shift[:, None]) / time_stretch[:, None],
     )  # [n_trace, n_peak]
-    sigma_eff = numpyro.deterministic(
-        "sigma_eff", sigma[None, :] / b[:, None],
+    width_warped = numpyro.deterministic(
+        "width_warped", width[None, :] / time_stretch[:, None],
     )  # [n_trace, n_peak]
 
     time_arr = jnp.asarray(dataset.time)
@@ -259,16 +268,16 @@ def model(
     # n_peak separate density_cp calls inside a Python loop). Broadcasting:
     #   time:   [n_trace, 1,      n_time]
     #   mu:     [n_trace, n_peak, 1     ]
-    #   sigma:  [n_trace, n_peak, 1     ]
-    #   gamma1: [1,       n_peak, 1     ]
+    #   width:  [n_trace, n_peak, 1     ]
+    #   skew:   [1,       n_peak, 1     ]
     # → dens_all shape [n_trace, n_peak, n_time], then weighted-sum over peaks.
     dens_all = density_cp(
         time_arr[:, None, :],                 # type: ignore[arg-type]
-        mu_eff[:, :, None],                   # type: ignore[arg-type]
-        sigma_eff[:, :, None],                # type: ignore[arg-type]
-        gamma1[None, :, None],                # type: ignore[arg-type]
+        mu_warped[:, :, None],                # type: ignore[arg-type]
+        width_warped[:, :, None],             # type: ignore[arg-type]
+        skew[None, :, None],                  # type: ignore[arg-type]
     )
-    peak_contrib = jnp.sum(A[:, :, None] * dens_all, axis=1)  # [n_trace, n_time]
+    peak_contrib = jnp.sum(area[:, :, None] * dens_all, axis=1)  # [n_trace, n_time]
     predicted = baseline + peak_contrib
 
     # === Likelihood (NaN-masked additive Gaussian) ===

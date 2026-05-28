@@ -127,7 +127,7 @@ def derived_areas(idata: arviz.InferenceData) -> np.ndarray[Any, np.dtype[np.flo
     Returns:
         Array shape ``[n_chain, n_draw, n_trace, n_peak]``.
     """
-    return np.asarray(idata.posterior["A"])  # type: ignore[attr-defined,return-value]
+    return np.asarray(idata.posterior["area"])  # type: ignore[attr-defined,return-value]
 
 
 def diagnostics(idata: arviz.InferenceData) -> dict[str, Any]:

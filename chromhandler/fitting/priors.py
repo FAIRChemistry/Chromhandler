@@ -4,12 +4,12 @@ Builds one :class:`SkewNormalPriors` per :class:`PeakAnnotation` from a
 :class:`PreparedDataset`. The flow per window is:
 
 1. Per-trace FWHM measurement (via Savitzky-Golay + half-max crossings)
-   yields ``(mu, sigma, gamma1, area)`` for traces that pass the gate.
+   yields ``(mu, width, skew, area)`` for traces that pass the gate.
 2. Per-trace gating: a trace is *supported* iff its max raw signal in the
    window is at least :attr:`PriorConfig.signal_threshold` (absolute, no
    baseline subtraction) AND the relative-height gate passes.
 3. Aggregation across supported traces yields shared shape priors
-   ``(mu_loc, mu_scale, log_sigma_*, gamma1_*)``.
+   ``(mu_loc, mu_scale, log_width_*, skew_*)``.
 4. Per-trace **linear-space** area priors:
    - Supported: ``TruncatedNormal(area_measured, cv * area_measured, low=0)``.
    - Unsupported: ``TruncatedNormal(0, noise * window_width * multiplier, low=0)``
@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.signal import savgol_filter
 
-from chromhandler.fitting.skew_normal import GAMMA1_MAX, sn_asymmetry_to_gamma1
+from chromhandler.fitting.skew_normal import GAMMA1_MAX, cp_from_peak_features
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -60,13 +60,13 @@ class PriorConfig:
     dataset's max in-window height for the same window."""
 
     # --- Shape-prior bounds ---
-    gamma1_bound_fraction: float = 0.99
-    sigma_low_n_points_per_fwhm: int = 8
-    sigma_high_window_fraction: float = 6.0
+    skew_bound_fraction: float = 0.99
+    width_low_n_points_per_fwhm: int = 8
+    width_high_window_fraction: float = 6.0
 
     # --- n_supported = 1 fallbacks ---
-    log_sigma_scale_n1: float = 0.15
-    gamma1_scale_n1: float = 0.20
+    log_width_scale_n1: float = 0.15
+    skew_scale_n1: float = 0.20
 
     # --- Area prior ---
     area_cv: float = 0.3
@@ -88,11 +88,14 @@ class SkewNormalPriors:
     Each field maps to exactly one NumPyro sample site in :mod:`model`:
 
     - ``mu ~ TruncatedNormal(mu_loc, mu_scale, mu_low, mu_high)``
-    - ``log_sigma ~ TruncatedNormal(log_sigma_loc, log_sigma_scale,
-      log_sigma_low, log_sigma_high)``
-    - ``gamma1 ~ TruncatedNormal(gamma1_loc, gamma1_scale,
-      -GAMMA1_MAX*frac, +GAMMA1_MAX*frac)``
-    - ``A[trace] ~ TruncatedNormal(area_loc_per_trace[trace],
+    - ``width ~ LogNormal(log_width_loc, log_width_scale)`` truncated to
+      ``[exp(log_width_low), exp(log_width_high)]``. Stored in log-space
+      because that is the natural parameterisation of the hyperprior;
+      the model exposes ``width`` (natural space) as the public site.
+    - ``skew ~ TruncatedNormal(skew_loc, skew_scale,
+      -GAMMA1_MAX*frac, +GAMMA1_MAX*frac)`` — bounded by the skew-normal
+      family's max attainable skewness coefficient.
+    - ``area[trace] ~ TruncatedNormal(area_loc_per_trace[trace],
       area_scale_per_trace[trace], low=0)`` — half-normal-at-zero for
       unsupported traces.
 
@@ -106,13 +109,13 @@ class SkewNormalPriors:
     mu_low: float
     mu_high: float
 
-    log_sigma_loc: float
-    log_sigma_scale: float
-    log_sigma_low: float
-    log_sigma_high: float
+    log_width_loc: float
+    log_width_scale: float
+    log_width_low: float
+    log_width_high: float
 
-    gamma1_loc: float
-    gamma1_scale: float
+    skew_loc: float
+    skew_scale: float
 
     area_loc_per_trace: NDArray[np.float64]
     area_scale_per_trace: NDArray[np.float64]
@@ -124,8 +127,8 @@ class WindowFeatures:
     """Per-trace, per-window FWHM-based features. ``None`` when unmeasurable."""
 
     mu: float
-    sigma: float
-    gamma1: float
+    width: float
+    skew: float
     area: float
     apex_height: float
 
@@ -157,12 +160,21 @@ def compute_window_features(
     window_high: float,
     smoothing_window: int = 5,
 ) -> WindowFeatures | None:
-    """Per-trace FWHM features for one peak window.
+    """Per-trace skew-normal CP features for one peak window.
+
+    Measures three quantities from the smoothed signal — apex location,
+    full width at half maximum, and right/left HWHM ratio — then inverts
+    them to centred-parameter ``(mu, width, skew)`` via
+    :func:`cp_from_peak_features`. Returning CP directly keeps the priors
+    aligned with the model's parameterisation (apex != mean, and the
+    Gaussian FWHM-to-sigma rule does not hold for skewed peaks).
+
+    Ratios and FWHM are averaged across multiple smoothing scales before
+    inversion, which suppresses noise without Jensen-biasing the final
+    CP parameters.
 
     Returns ``None`` if too few valid points or if half-max cannot be
-    bracketed at any smoothing scale. Ratios across multiple smoothing
-    widths are averaged before the ``sn_asymmetry_to_gamma1`` transform
-    to avoid Jensen-bias from averaging ``gamma1`` directly.
+    bracketed at any smoothing scale.
     """
     mask = (
         (time >= window_low)
@@ -188,7 +200,7 @@ def compute_window_features(
         savgol_filter(s, smoothing_window, poly_min), dtype=np.float64
     )
     apex_idx = int(np.argmax(s_ref))
-    mu = float(t[apex_idx])
+    apex = float(t[apex_idx])
     apex_height = float(s_ref[apex_idx])
 
     ratios: list[float] = []
@@ -216,11 +228,11 @@ def compute_window_features(
         return None
 
     mean_ratio = float(np.mean(ratios))
-    sigma = float(np.mean(hwhm_sums)) * _FWHM_TO_SIGMA
-    gamma1 = float(sn_asymmetry_to_gamma1(mean_ratio))  # type: ignore[arg-type]
+    mean_fwhm = float(np.mean(hwhm_sums))
+    mu, width, skew = cp_from_peak_features(apex, mean_fwhm, mean_ratio)
     area = float(np.trapezoid(np.maximum(s, 0.0), t))
     return WindowFeatures(
-        mu=mu, sigma=sigma, gamma1=gamma1, area=area, apex_height=apex_height,
+        mu=mu, width=width, skew=skew, area=area, apex_height=apex_height,
     )
 
 
@@ -256,19 +268,19 @@ def _trapezoid_in_window(
     ))
 
 
-def _log_sigma_bounds(
+def _log_width_bounds(
     window_low: float,
     window_high: float,
     dt: float,
     config: PriorConfig,
 ) -> tuple[float, float]:
-    sigma_low = config.sigma_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA
-    sigma_high = (window_high - window_low) / config.sigma_high_window_fraction
-    return float(np.log(sigma_low)), float(np.log(sigma_high))
+    width_low = config.width_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA
+    width_high = (window_high - window_low) / config.width_high_window_fraction
+    return float(np.log(width_low)), float(np.log(width_high))
 
 
-def _gamma1_bounds(config: PriorConfig) -> tuple[float, float]:
-    bound = config.gamma1_bound_fraction * GAMMA1_MAX
+def _skew_bounds(config: PriorConfig) -> tuple[float, float]:
+    bound = config.skew_bound_fraction * GAMMA1_MAX
     return float(-bound), float(bound)
 
 
@@ -283,59 +295,59 @@ def _aggregate_shape_priors(
 
     Returns
     -------
-    (mu_loc, mu_scale, log_sigma_loc, log_sigma_scale, gamma1_loc, gamma1_scale)
+    (mu_loc, mu_scale, log_width_loc, log_width_scale, skew_loc, skew_scale)
     """
     n = len(features)
     if n == 0:
         # No supported traces — fall back to window-geometry priors.
         mu_loc = 0.5 * (window_low + window_high)
         mu_scale = (window_high - window_low) / 4.0
-        # Geometric sigma: span / 6 (~ +/- 3 std-dev across the window).
-        sigma_fallback = max(
+        # Geometric width: span / 6 (~ +/- 3 std-dev across the window).
+        width_fallback = max(
             (window_high - window_low) / 6.0,
-            config.sigma_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA,
+            config.width_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA,
         )
-        log_sigma_loc = float(np.log(sigma_fallback))
-        log_sigma_scale = config.log_sigma_scale_n1
-        gamma1_loc = 0.0
-        gamma1_scale = config.gamma1_scale_n1
+        log_width_loc = float(np.log(width_fallback))
+        log_width_scale = config.log_width_scale_n1
+        skew_loc = 0.0
+        skew_scale = config.skew_scale_n1
         return (
-            mu_loc, mu_scale, log_sigma_loc, log_sigma_scale,
-            gamma1_loc, gamma1_scale,
+            mu_loc, mu_scale, log_width_loc, log_width_scale,
+            skew_loc, skew_scale,
         )
 
     mus = np.asarray([f.mu for f in features], dtype=np.float64)
-    sigmas = np.asarray([f.sigma for f in features], dtype=np.float64)
-    gamma1s = np.asarray([f.gamma1 for f in features], dtype=np.float64)
-    log_sigmas = np.log(np.clip(sigmas, 1e-9, None))
+    widths = np.asarray([f.width for f in features], dtype=np.float64)
+    skews = np.asarray([f.skew for f in features], dtype=np.float64)
+    log_widths = np.log(np.clip(widths, 1e-9, None))
 
     mu_floor = config.mu_scale_dt_floor_multiplier * dt
     mu_loc = float(np.mean(mus))
     mu_scale = float(max(np.std(mus, ddof=0), mu_floor))
 
-    log_sigma_loc = float(np.mean(log_sigmas))
+    log_width_loc = float(np.mean(log_widths))
     if n == 1:
-        log_sigma_scale = config.log_sigma_scale_n1
+        log_width_scale = config.log_width_scale_n1
     else:
-        log_sigma_scale = float(max(
-            np.std(log_sigmas, ddof=0),
-            config.log_sigma_scale_n1 / float(np.sqrt(n)),
+        log_width_scale = float(max(
+            np.std(log_widths, ddof=0),
+            config.log_width_scale_n1 / float(np.sqrt(n)),
         ))
 
-    gamma1_loc = float(np.mean(gamma1s))
+    skew_loc = float(np.mean(skews))
     if n == 1:
-        gamma1_scale = config.gamma1_scale_n1
+        skew_scale = config.skew_scale_n1
     else:
-        gamma1_scale = float(max(
-            np.std(gamma1s, ddof=0),
-            config.gamma1_scale_n1 / float(np.sqrt(n)),
+        skew_scale = float(max(
+            np.std(skews, ddof=0),
+            config.skew_scale_n1 / float(np.sqrt(n)),
         ))
-    _, gamma1_bound_high = _gamma1_bounds(config)
-    gamma1_scale = min(gamma1_scale, gamma1_bound_high)
+    _, skew_bound_high = _skew_bounds(config)
+    skew_scale = min(skew_scale, skew_bound_high)
 
     return (
-        mu_loc, mu_scale, log_sigma_loc, log_sigma_scale,
-        gamma1_loc, gamma1_scale,
+        mu_loc, mu_scale, log_width_loc, log_width_scale,
+        skew_loc, skew_scale,
     )
 
 
@@ -389,12 +401,12 @@ def _build_one_peak(
 
     # --- Stage 3: aggregate shape priors ---------------------------------
     (
-        mu_loc, mu_scale, log_sigma_loc, log_sigma_scale,
-        gamma1_loc, gamma1_scale,
+        mu_loc, mu_scale, log_width_loc, log_width_scale,
+        skew_loc, skew_scale,
     ) = _aggregate_shape_priors(
         supported_features, ann.rt_min, ann.rt_max, dataset.dt_global, config,
     )
-    log_sigma_low, log_sigma_high = _log_sigma_bounds(
+    log_width_low, log_width_high = _log_width_bounds(
         ann.rt_min, ann.rt_max, dataset.dt_global, config,
     )
 
@@ -415,9 +427,9 @@ def _build_one_peak(
     return SkewNormalPriors(
         mu_loc=mu_loc, mu_scale=mu_scale,
         mu_low=ann.rt_min, mu_high=ann.rt_max,
-        log_sigma_loc=log_sigma_loc, log_sigma_scale=log_sigma_scale,
-        log_sigma_low=log_sigma_low, log_sigma_high=log_sigma_high,
-        gamma1_loc=gamma1_loc, gamma1_scale=gamma1_scale,
+        log_width_loc=log_width_loc, log_width_scale=log_width_scale,
+        log_width_low=log_width_low, log_width_high=log_width_high,
+        skew_loc=skew_loc, skew_scale=skew_scale,
         area_loc_per_trace=area_loc_per_trace,
         area_scale_per_trace=area_scale_per_trace,
         has_support_per_trace=has_support,
@@ -445,7 +457,7 @@ def summarise_priors(
     config: PriorConfig,
 ) -> str:
     """Pretty-printed multi-line table for inspection."""
-    gamma1_low, gamma1_high = _gamma1_bounds(config)
+    skew_low, skew_high = _skew_bounds(config)
     header = (
         f"{'peak':>4} {'site':<14} {'distribution':<16} "
         f"{'loc':>10} {'scale':>10} {'low':>10} {'high':>10}"
@@ -458,14 +470,14 @@ def summarise_priors(
             f"{p.mu_low:>10.4g} {p.mu_high:>10.4g}"
         )
         lines.append(
-            f"{i:>4} {'log_sigma':<14} {'TruncatedNormal':<16} "
-            f"{p.log_sigma_loc:>10.4g} {p.log_sigma_scale:>10.4g} "
-            f"{p.log_sigma_low:>10.4g} {p.log_sigma_high:>10.4g}"
+            f"{i:>4} {'log_width':<14} {'TruncatedNormal':<16} "
+            f"{p.log_width_loc:>10.4g} {p.log_width_scale:>10.4g} "
+            f"{p.log_width_low:>10.4g} {p.log_width_high:>10.4g}"
         )
         lines.append(
-            f"{i:>4} {'gamma1':<14} {'TruncatedNormal':<16} "
-            f"{p.gamma1_loc:>10.4g} {p.gamma1_scale:>10.4g} "
-            f"{gamma1_low:>10.4g} {gamma1_high:>10.4g}"
+            f"{i:>4} {'skew':<14} {'TruncatedNormal':<16} "
+            f"{p.skew_loc:>10.4g} {p.skew_scale:>10.4g} "
+            f"{skew_low:>10.4g} {skew_high:>10.4g}"
         )
         n_supp = int(np.sum(p.has_support_per_trace))
         n_total = p.has_support_per_trace.size

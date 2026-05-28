@@ -256,7 +256,7 @@ def test_hwhm_ratio_mirror_symmetry():
 
 def test_sn_asymmetry_at_ratio_one_is_zero_skew():
     """A symmetric peak (ratio = 1) inverts to gamma1 = 0."""
-    g = float(sn.sn_asymmetry_to_gamma1(jnp.asarray(1.0)))
+    g = float(sn.sn_asymmetry_to_skew(jnp.asarray(1.0)))
     assert abs(g) < 1e-3
 
 
@@ -265,13 +265,13 @@ def test_sn_asymmetry_round_trip_against_dp_to_cp():
     alphas = np.linspace(-10.0, 10.0, 21)
     ratios = sn.hwhm_ratio_dp(np.zeros_like(alphas), np.ones_like(alphas), alphas)
     _, _, gamma1_true = sn.dp_to_cp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alphas))
-    gamma1_table = sn.sn_asymmetry_to_gamma1(jnp.asarray(ratios))
+    gamma1_table = sn.sn_asymmetry_to_skew(jnp.asarray(ratios))
     np.testing.assert_allclose(np.asarray(gamma1_table), np.asarray(gamma1_true), rtol=1e-3, atol=1e-3)
 
 
 def test_sn_asymmetry_handles_array_input():
     """Table inversion works on array input."""
-    g = sn.sn_asymmetry_to_gamma1(jnp.asarray([0.7, 1.0, 1.4]))
+    g = sn.sn_asymmetry_to_skew(jnp.asarray([0.7, 1.0, 1.4]))
     assert g.shape == (3,)
     assert float(g[0]) < 0.0  # ratio < 1 -> left-skewed (gamma1 < 0)
     assert abs(float(g[1])) < 1e-3

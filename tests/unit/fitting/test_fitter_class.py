@@ -23,13 +23,23 @@ if TYPE_CHECKING:
 
 
 def _result_fixture() -> FitResult:
+    # Realistic SNR with per-trace mu/sigma jitter: synthetic peaks too clean
+    # collapse the posterior so tightly that ArviZ's per-chain KDE in
+    # plot_traces overflows (the bandwidth division explodes when each
+    # chain's range is far below the implicit Scott's-rule bandwidth).
+    # noise_std=5 on peak amplitudes (100, 60, 30) gives SNR ~20-6, in
+    # range of real chromatography.
     rng = np.random.default_rng(0)
     t = np.arange(2.5, 3.6, 0.001)
     times = [t.copy() for _ in range(3)]
+    mu_per_trace = [3.000, 3.005, 2.998]
+    sigma_per_trace = [0.025, 0.027, 0.024]
     signals: list[np.ndarray[Any, np.dtype[np.float64]]] = [
-        amp * np.asarray(skewnorm.pdf(t, 0.0, loc=3.0, scale=0.025)) + 5.0
-        + rng.normal(0.0, 0.5, size=t.shape)
-        for amp in (100.0, 60.0, 30.0)
+        amp * np.asarray(skewnorm.pdf(t, 0.0, loc=mu, scale=sg)) + 5.0
+        + rng.normal(0.0, 5.0, size=t.shape)
+        for amp, mu, sg in zip(
+            (100.0, 60.0, 30.0), mu_per_trace, sigma_per_trace, strict=True,
+        )
     ]
     peaks = [PeakAnnotation(molecule_id="A", rt_min=2.85, rt_max=3.15, mode="single")]
     bases = [
@@ -38,7 +48,7 @@ def _result_fixture() -> FitResult:
     ]
     ds = prepare_dataset(times, signals, peaks, bases)
     priors = build_priors(ds, config=PriorConfig())
-    config = ModelConfig(num_warmup=30, num_samples=30, num_chains=2, seed=0)
+    config = ModelConfig(num_warmup=200, num_samples=200, num_chains=2, seed=1)
     idata = run_mcmc(ds, priors, config)
     return FitResult(idata=idata, dataset=ds, priors=priors, model_config=config)
 
@@ -48,7 +58,7 @@ def test_fitresult_construction() -> None:
     assert isinstance(result.idata, az.InferenceData)
     assert result.dataset.n_trace == 3
     assert len(result.priors) == 1
-    assert result.model_config.seed == 0
+    assert result.model_config.seed == 1
 
 
 def test_fitresult_save_and_load(tmp_path: Path) -> None:
@@ -59,7 +69,7 @@ def test_fitresult_save_and_load(tmp_path: Path) -> None:
     # Roundtrip through ArviZ
     reloaded = az.from_netcdf(out_path)
     assert hasattr(reloaded, "posterior")
-    assert "mu_anchor" in reloaded.posterior.data_vars  # type: ignore[attr-defined]
+    assert "mu" in reloaded.posterior.data_vars  # type: ignore[attr-defined]
 
 
 def test_summary_returns_dataframe() -> None:
@@ -69,8 +79,8 @@ def test_summary_returns_dataframe() -> None:
     assert isinstance(df, pd.DataFrame)
     assert "mean" in df.columns
     assert "r_hat" in df.columns
-    # Sanity: mu_anchor should be in the table
-    assert any("mu_anchor" in str(idx) for idx in df.index)
+    # Sanity: mu should be in the table
+    assert any("mu" in str(idx) for idx in df.index)
 
 
 def test_diagnostics_returns_dict() -> None:

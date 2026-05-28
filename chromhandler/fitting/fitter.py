@@ -64,8 +64,24 @@ class FitResult:
         """
         self.idata.to_netcdf(str(path))
 
+    def _default_user_facing_var_names(self) -> list[str]:
+        """All posterior variables except internal ``*_raw`` sample sites.
+
+        The model exposes physical quantities as ``numpyro.deterministic``
+        sites and samples them via ``Normal(0, 1)`` reparameterisation
+        sites suffixed ``_raw``. Plotting and summary defaults skip the
+        raw sites so users see only the natural-space parameters.
+        """
+        data_vars = self.idata.posterior.data_vars  # type: ignore[attr-defined]
+        return [str(n) for n in data_vars if not str(n).endswith("_raw")]  # type: ignore[reportUnknownArgumentType]
+
     def summary(self, var_names: list[str] | None = None) -> pd.DataFrame:
-        """ArviZ summary (mean / sd / hdi / r_hat / ess) as a DataFrame."""
+        """ArviZ summary (mean / sd / hdi / r_hat / ess) as a DataFrame.
+
+        Defaults to all user-facing deterministic sites (excludes ``*_raw``).
+        """
+        if var_names is None:
+            var_names = self._default_user_facing_var_names()
         return arviz.summary(self.idata, var_names=var_names)  # type: ignore[return-value]
 
     def diagnostics(self) -> dict[str, Any]:
@@ -97,40 +113,62 @@ class FitResult:
         self,
         var_names: list[str] | None = None,
         *,
-        compact: bool = False,
+        compact: bool = True,
+        combined: bool = False,
         figsize: tuple[float, float] | None = None,
     ) -> matplotlib.figure.Figure:
-        """ArviZ trace plot for the listed variables (or all if None).
+        """ArviZ trace plot for the listed variables (or all user-facing if None).
 
-        Uses ``combined=True`` so all chains are merged before KDE estimation,
-        which avoids OverflowError when individual chains are very short.
+        Each chain is drawn as a separate line by default so divergent or
+        stuck chains are visible. With ``compact=True`` (the default),
+        vector variables collapse to a single row with their scalar
+        components overlaid — keeps the figure legible for fits with many
+        traces or peaks.
 
         Args:
-            var_names: Variables to plot. ``None`` plots all sampled sites.
-            compact: If ``True``, overlay vector components on one row per
-                variable. If ``False`` (default), one row per scalar — easier
-                to read for vector parameters like per-trace areas.
+            var_names: Variables to plot. ``None`` plots all user-facing
+                deterministic sites (excludes internal ``*_raw`` reparam
+                draws).
+            compact: If ``True`` (default), overlay vector components on
+                one row per variable. If ``False``, one row per scalar —
+                useful when you specifically want to inspect every
+                ``area[trace, peak]`` separately.
+            combined: If ``False`` (default), each chain is drawn as a
+                separate line and gets its own KDE. If ``True``, all chains
+                are concatenated before plotting — useful as a fallback
+                when individual chains are too short for per-chain KDE
+                (ArviZ raises ``OverflowError`` on near-degenerate chains).
             figsize: Forwarded to ``arviz.plot_trace``. ``None`` lets ArviZ
                 auto-size (which can become tiny for many rows; pass an
                 explicit ``(w, h)`` if so).
         """
-        axes = arviz.plot_trace(  # type: ignore[call-overload]
-            self.idata,
-            var_names=var_names,
-            combined=True,
-            compact=compact,
-            figsize=figsize,
-        )
-        # arviz returns a 2D ndarray of Axes; grab the parent Figure
-        if hasattr(axes, "flat"):
-            return axes.flat[0].figure  # type: ignore[return-value]
-        return axes[0].figure if hasattr(axes, "__iter__") else axes.figure  # type: ignore[return-value]
+        import numpy as np
+
+        if var_names is None:
+            var_names = self._default_user_facing_var_names()
+        # Lift ArviZ's default 20-subplot cap so we never silently drop
+        # variables. The user asked for these; show them all.
+        with arviz.rc_context({"plot.max_subplots": 200}):  # type: ignore[attr-defined]
+            axes = arviz.plot_trace(  # type: ignore[call-overload]
+                self.idata,
+                var_names=var_names,
+                compact=compact,
+                combined=combined,
+                figsize=figsize,
+            )
+        # arviz returns a 2D ndarray of Axes; grab the parent Figure.
+        first_ax = np.asarray(axes).flat[0]
+        fig: matplotlib.figure.Figure = first_ax.figure  # type: ignore[assignment]
+        # Prevent axis titles from clipping the plot above (common when
+        # many rows are packed into the default auto-sized figure).
+        fig.tight_layout()
+        return fig
 
     def plot_prior_overlay(self) -> matplotlib.figure.Figure:
         """Per-(peak, trace) panel: baseline-subtracted data + prior median
         skew-normal scaled to each trace's prior area centre.
 
-        Supported traces (gate passed) show ``area_loc * SN(mu, sigma, gamma1)``
+        Supported traces (gate passed) show ``area_loc * SN(mu, width, skew)``
         as a black dashed curve; unsupported traces (gate failed) show no
         prior curve since their area prior is centred on zero.
         """
@@ -150,12 +188,12 @@ class FitResult:
         )
 
         for peak_idx, p in enumerate(priors_list):
-            sigma_loc = float(np.exp(p.log_sigma_loc))
+            width_loc = float(np.exp(p.log_width_loc))
             t_dense = np.linspace(p.mu_low, p.mu_high, 500)
             _mu = np.asarray(p.mu_loc)
-            _sig = np.asarray(sigma_loc)
-            _g1 = np.asarray(p.gamma1_loc)
-            sn_unit = np.asarray(density_cp(t_dense, _mu, _sig, _g1))  # type: ignore[arg-type]
+            _width = np.asarray(width_loc)
+            _skew = np.asarray(p.skew_loc)
+            sn_unit = np.asarray(density_cp(t_dense, _mu, _width, _skew))  # type: ignore[arg-type]
             for tr in range(n_trace):
                 ax = axes[peak_idx, tr]
                 t = dataset.time[tr]
@@ -164,8 +202,8 @@ class FitResult:
                 mask = ((t >= p.mu_low) & (t <= p.mu_high) & np.isfinite(bs))
                 ax.plot(t[mask], bs[mask], color="C0", lw=1.0, label="data")
                 if p.has_support_per_trace[tr]:
-                    A = float(p.area_loc_per_trace[tr])
-                    ax.plot(t_dense, A * sn_unit, "k--", lw=1.2, label="prior loc")
+                    area_prior = float(p.area_loc_per_trace[tr])
+                    ax.plot(t_dense, area_prior * sn_unit, "k--", lw=1.2, label="prior loc")
                 else:
                     ax.text(
                         0.02, 0.95, "no support", transform=ax.transAxes,

@@ -284,19 +284,66 @@ def _asymmetry_table() -> (  # type: ignore[return]
     return ratios[order], gamma1s_np[order]
 
 
-def sn_asymmetry_to_gamma1(ratio: jnp.ndarray) -> jnp.ndarray:
-    """Invert measured HWHM_R/HWHM_L ratio to gamma1 via a precomputed table.
+def sn_asymmetry_to_skew(ratio: jnp.ndarray) -> jnp.ndarray:
+    """Invert measured HWHM_R/HWHM_L ratio to skew (γ₁) via a precomputed table.
 
     Used at prior-build time only — once per fit. The table is built on
     first call and cached for the process lifetime.
 
     Args:
         ratio: Measured HWHM_R / HWHM_L. Scalar or array. For symmetric
-            peaks ratio approx 1 -> gamma1 approx 0; ratio>1 -> gamma1>0;
-            ratio<1 -> gamma1<0.
+            peaks ratio approx 1 -> skew approx 0; ratio>1 -> skew>0;
+            ratio<1 -> skew<0.
 
     Returns:
-        Interpolated gamma1 values with the shape of ``ratio``.
+        Interpolated skew (γ₁) values with the shape of ``ratio``.
     """
-    ratios_grid, gamma1_grid = _asymmetry_table()
-    return jnp.interp(jnp.asarray(ratio), jnp.asarray(ratios_grid), jnp.asarray(gamma1_grid))
+    ratios_grid, skew_grid = _asymmetry_table()
+    return jnp.interp(jnp.asarray(ratio), jnp.asarray(ratios_grid), jnp.asarray(skew_grid))
+
+
+def cp_from_peak_features(
+    apex: float, fwhm: float, hwhm_ratio: float,
+) -> tuple[float, float, float]:
+    """Recover CP parameters (mu, sigma, skew) from measured peak features.
+
+    The skew-normal density has three free parameters; an SN peak is fully
+    determined by any three measurements that touch all of them. This
+    function inverts the three measurements naturally available from a
+    smoothed chromatogram around its apex:
+
+    - ``apex``       — location of the density maximum (= ``mode_dp``)
+    - ``fwhm``       — full width at half maximum (= ``fwhm_dp``)
+    - ``hwhm_ratio`` — HWHM_R / HWHM_L (independent of xi and omega, sets alpha)
+
+    Inversion sequence:
+
+    1. ``hwhm_ratio -> skew`` via :func:`sn_asymmetry_to_skew` (lookup table).
+    2. ``skew -> alpha``: Azzalini's closed-form CP -> DP relations (alpha
+       depends only on gamma1, not on xi or omega).
+    3. ``(fwhm, alpha) -> omega``: FWHM is linear in omega at fixed alpha, so
+       ``omega = fwhm / fwhm_dp(0, 1, alpha)``.
+    4. ``(apex, omega, alpha) -> xi``: apex equals
+       ``xi + omega * mode_dp(0, 1, alpha)``.
+    5. ``(xi, omega, alpha) -> (mu, sigma, gamma1)`` via :func:`dp_to_cp`.
+
+    Returns:
+        Tuple ``(mu, sigma, skew)`` of CP parameters.
+    """
+    skew = float(sn_asymmetry_to_skew(jnp.asarray(hwhm_ratio)))
+    # skew → alpha (closed form; independent of mu/sigma)
+    c = math.cbrt(2.0 * skew / (4.0 - math.pi))
+    b_delta = c / math.sqrt(1.0 + c**2)
+    delta = b_delta / _B_CONST
+    delta = max(min(delta, 1.0 - 1e-12), -1.0 + 1e-12)
+    alpha = delta / math.sqrt(1.0 - delta**2)
+    # alpha + fwhm → omega (fwhm scales linearly with omega at fixed alpha)
+    fwhm_unit = _fwhm_scalar(0.0, 1.0, alpha)
+    omega = fwhm / fwhm_unit
+    # apex + (omega, alpha) → xi
+    mode_unit = float(mode_dp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(alpha)))
+    xi = apex - omega * mode_unit
+    mu, sigma, skew_check = dp_to_cp(
+        jnp.asarray(xi), jnp.asarray(omega), jnp.asarray(alpha),
+    )
+    return float(mu), float(sigma), float(skew_check)
