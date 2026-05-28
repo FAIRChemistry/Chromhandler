@@ -25,34 +25,6 @@ def test_peak_annotation_single_mode() -> None:
 
 
 @pytest.mark.unit
-def test_peak_annotation_artefact_doublet_mode() -> None:
-    """PeakAnnotation can be created with artefact_doublet mode."""
-    ann = PeakAnnotation(
-        molecule_id="mol_b",
-        rt_min=2.3,
-        rt_max=2.85,
-        mode="artefact_doublet",
-        artefact_side="right",
-    )
-    assert ann.molecule_id == "mol_b"
-    assert ann.mode == "artefact_doublet"
-    assert ann.artefact_side == "right"
-
-
-@pytest.mark.unit
-def test_peak_annotation_free_doublet_mode() -> None:
-    """PeakAnnotation can be created with free_doublet mode."""
-    ann = PeakAnnotation(
-        molecule_id="mol_c",
-        rt_min=3.9,
-        rt_max=4.5,
-        mode="free_doublet",
-    )
-    assert ann.molecule_id == "mol_c"
-    assert ann.mode == "free_doublet"
-
-
-@pytest.mark.unit
 def test_peak_annotation_rt_bounds() -> None:
     """PeakAnnotation stores rt_min and rt_max."""
     ann = PeakAnnotation(molecule_id="mol", rt_min=4.8, rt_max=5.2, mode="single")
@@ -65,32 +37,6 @@ def test_peak_annotation_rt_max_greater_than_min() -> None:
     """PeakAnnotation requires rt_max > rt_min."""
     with pytest.raises(ValidationError):
         PeakAnnotation(molecule_id="mol", rt_min=5.2, rt_max=4.8, mode="single")
-
-
-@pytest.mark.unit
-def test_peak_annotation_artefact_side_left() -> None:
-    """PeakAnnotation can have artefact_side='left'."""
-    ann = PeakAnnotation(
-        molecule_id="mol",
-        rt_min=2.3,
-        rt_max=2.85,
-        mode="artefact_doublet",
-        artefact_side="left",
-    )
-    assert ann.artefact_side == "left"
-
-
-@pytest.mark.unit
-def test_peak_annotation_artefact_side_right() -> None:
-    """PeakAnnotation can have artefact_side='right'."""
-    ann = PeakAnnotation(
-        molecule_id="mol",
-        rt_min=2.3,
-        rt_max=2.85,
-        mode="artefact_doublet",
-        artefact_side="right",
-    )
-    assert ann.artefact_side == "right"
 
 
 @pytest.mark.unit

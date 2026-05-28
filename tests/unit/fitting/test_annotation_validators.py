@@ -14,22 +14,6 @@ class TestNComponents:
         ann = PeakAnnotation(molecule_id="x", rt_min=1.0, rt_max=2.0, mode="single")
         assert ann.n_components == 1
 
-    def test_artefact_doublet_returns_two(self) -> None:
-        ann = PeakAnnotation(
-            molecule_id="x",
-            rt_min=1.0,
-            rt_max=2.0,
-            mode="artefact_doublet",
-            artefact_side="right",
-        )
-        assert ann.n_components == 2
-
-    def test_free_doublet_returns_two(self) -> None:
-        ann = PeakAnnotation(
-            molecule_id="x", rt_min=1.0, rt_max=2.0, mode="free_doublet"
-        )
-        assert ann.n_components == 2
-
     def test_appears_in_serialization(self) -> None:
         ann = PeakAnnotation(molecule_id="x", rt_min=1.0, rt_max=2.0)
         dumped = ann.model_dump()

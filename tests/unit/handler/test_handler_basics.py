@@ -172,7 +172,6 @@ def test_peak_annotation_defaults_to_single_mode() -> None:
 
     ann = PeakAnnotation(molecule_id="mol", rt_min=2.8, rt_max=3.2)
     assert ann.mode == "single"
-    assert ann.artefact_side is None
     assert ann.wavelength is None
 
 
