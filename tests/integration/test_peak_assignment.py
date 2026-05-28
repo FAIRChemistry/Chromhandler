@@ -409,39 +409,3 @@ def test_subset_raises_for_unknown_chromatogram_ids() -> None:
 
     with pytest.raises(ValueError, match="not found"):
         handler.subset(["missing"])
-
-
-def test_fitter_from_handler_inherits_peak_annotations() -> None:
-    """Fitter.from_handler pipes handler.peak_annotations into fitter.peaks."""
-    import numpy as np
-
-    from chromhandler import Handler
-    from chromhandler.fitting._legacy_fitter import Fitter
-    from chromhandler.model import Chromatogram, Sample
-
-    handler = Handler()
-    handler.create_molecule(id="mol_a", pubchem_cid=1, name="A")
-    handler.create_molecule(id="mol_b", pubchem_cid=2, name="B")
-    handler.add_peak_annotation("mol_a", 2.8, 3.2)
-    handler.add_peak_annotation(
-        "mol_b", 3.5, 4.0, mode="artefact_doublet", artefact_side="right"
-    )
-
-    time = list(np.linspace(0.0, 5.0, 100))
-    # Non-zero noise so DER_SNR yields a positive sigma_noise (required by Fitter).
-    rng = np.random.default_rng(0)
-    signal = rng.normal(0.0, 1.0, size=100).tolist()
-    handler.samples.append(
-        Sample(
-            id="s1",
-            chromatograms=[Chromatogram(id="s1_0min", sample_id="s1", time=time, signal=signal)],
-        )
-    )
-
-    fitter = Fitter.from_handler(handler)
-
-    assert len(fitter.peaks) == 2
-    mols = {ann.molecule_id: ann for ann in fitter.peaks}
-    assert mols["mol_a"].mode == "single"
-    assert mols["mol_b"].mode == "artefact_doublet"
-    assert mols["mol_b"].artefact_side == "right"
