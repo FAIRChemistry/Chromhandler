@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from rich.console import Console, Group
 
     from .calibration import LinearCalibration
-    from .fitting._legacy_fitter import Fitter
     from .fitting.prepared_dataset import PreparedDataset
     from .readers.abstractreader import AbstractReader
 
@@ -877,115 +876,6 @@ class Handler(BaseModel):
             loss_final=float(result.loss_final),
         )
 
-    # ------------------------------------------------------------------
-    # Posterior area collection
-    # ------------------------------------------------------------------
-
-    def collect_areas(
-        self,
-        fitter: Fitter,
-    ) -> dict[str, list[tuple[float, float]]]:
-        """Map posterior molecule areas from a fitted fitter to reaction times.
-
-        Iterates the :class:`~chromhandler.fitting.subsets.AreaRecord` objects
-        produced by ``fitter.area_records()`` and joins each record to its
-        chromatogram's ``reaction_time`` via the chromatogram ID.  Records
-        whose chromatogram ID is not found in this handler are silently skipped.
-
-        Args:
-            fitter: A fitted :class:`~chromhandler.fitting.fitter.Fitter`
-                instance (with or without subsets).
-
-        Returns:
-            Mapping of ``molecule_id`` → ``list[(reaction_time, area_median)]``
-            sorted by ``reaction_time`` within each molecule.
-
-        Example::
-
-            timecourse = handler.collect_areas(fitter)
-            for molecule_id, points in timecourse.items():
-                times, areas = zip(*points)
-        """
-        chrom_to_rt: dict[str, float | None] = {
-            c.id: c.reaction_time for s in self.samples for c in s.chromatograms
-        }
-        result: dict[str, list[tuple[float, float]]] = {}
-        for rec in fitter.area_records():
-            rt = chrom_to_rt.get(rec.chromatogram_id)
-            if rt is None:
-                continue
-            result.setdefault(rec.molecule_id, []).append((rt, rec.area_median))
-        # Sort each molecule's timecourse by reaction_time
-        for mol_id in result:
-            result[mol_id].sort(key=lambda x: x[0])
-        return result
-
-    def write_fitted_peaks(
-        self,
-        fitter: Fitter,
-        *,
-        quantiles: tuple[float, float, float] = (0.05, 0.5, 0.95),
-        n_samples: int | None = None,
-    ) -> list[Peak]:
-        """Write Bayesian posterior peak estimates into matching Chromatograms.
-
-        Calls :meth:`~chromhandler.fitting.fitter.Fitter.to_peaks`
-        and upserts each returned :class:`~chromhandler.model.Peak` into the
-        :class:`~chromhandler.model.Chromatogram` whose ``id`` matches
-        ``Peak.chromatogram_id``.  An existing peak whose ``molecule_id``
-        matches is replaced in-place; otherwise the new peak is appended.
-
-        After this call the handler's chromatograms carry full posterior
-        statistics (mean, std, q05, q95, and optionally raw samples) in their
-        ``Peak.area`` and ``Peak.location`` :class:`~chromhandler.model.Estimate`
-        fields.
-
-        Args:
-            fitter: A fitted :class:`~chromhandler.fitting.fitter.Fitter`
-                instance (:meth:`~chromhandler.fitting.fitter.Fitter.fit`
-                must have been called).  Subset-mode fitters are supported; in
-                that case peaks are aggregated across fitted child subsets.
-            quantiles: ``(q_low, q_median, q_high)`` percentile levels forwarded
-                to ``to_peaks()``.
-            n_samples: Number of randomly-drawn posterior samples to embed in
-                each :class:`~chromhandler.model.Estimate`.  ``None`` (default)
-                stores no samples.
-
-        Returns:
-            The list of :class:`~chromhandler.model.Peak` objects that were
-            written (one per chromatogram x molecule pair).
-
-        Example::
-
-            fitter.fit(num_samples=1000, num_warmup=500)
-            handler.write_fitted_peaks(fitter)
-
-            chrom = handler.samples[0].chromatograms[0]
-            peak  = chrom.peaks[0]
-            print(peak.area.mean, peak.area.std, peak.area.q05, peak.area.q95)
-        """
-        peaks = fitter.to_peaks(quantiles=quantiles, n_samples=n_samples)
-
-        # Build a flat chromatogram-id → Chromatogram index
-        chrom_index: dict[str, Chromatogram] = {c.id: c for s in self.samples for c in s.chromatograms}
-
-        for peak in peaks:
-            chrom = chrom_index.get(peak.chromatogram_id)
-            if chrom is None:
-                print(
-                    f"write_fitted_peaks: chromatogram {peak.chromatogram_id} not found — skipping.",
-                )
-                continue
-            # Replace existing peak for this molecule, or append
-            for i, existing in enumerate(chrom.peaks):
-                if existing.molecule_id == peak.molecule_id:
-                    chrom.peaks[i] = peak
-                    break
-            else:
-                chrom.peaks.append(peak)
-
-        return peaks
-
     def calibrate_molecules(
         self,
         molecule_ids: list[str] | None = None,
@@ -1023,7 +913,6 @@ class Handler(BaseModel):
 
         Example::
 
-            handler.write_fitted_peaks(fitter)
             handler.calibrate_molecules(molecule_ids=["Ino", "Hyp"])
 
             est = handler.molecules["Ino"].calibration.area_to_conc(12_500.0)
