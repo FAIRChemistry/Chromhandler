@@ -255,15 +255,20 @@ def model(
     time_arr = jnp.asarray(dataset.time)
     baseline = baseline_intercept[:, None] + baseline_slope[:, None] * time_arr
 
-    peak_contrib = jnp.zeros_like(time_arr)
-    for peak in range(n_peak):
-        dens = density_cp(
-            time_arr,
-            mu_eff[:, peak : peak + 1],                   # type: ignore[arg-type]
-            sigma_eff[:, peak : peak + 1],                # type: ignore[arg-type]
-            gamma1[peak],                                  # type: ignore[arg-type]
-        )
-        peak_contrib = peak_contrib + A[:, peak : peak + 1] * dens
+    # Vectorise the per-peak density into one fused JIT kernel (instead of
+    # n_peak separate density_cp calls inside a Python loop). Broadcasting:
+    #   time:   [n_trace, 1,      n_time]
+    #   mu:     [n_trace, n_peak, 1     ]
+    #   sigma:  [n_trace, n_peak, 1     ]
+    #   gamma1: [1,       n_peak, 1     ]
+    # → dens_all shape [n_trace, n_peak, n_time], then weighted-sum over peaks.
+    dens_all = density_cp(
+        time_arr[:, None, :],                 # type: ignore[arg-type]
+        mu_eff[:, :, None],                   # type: ignore[arg-type]
+        sigma_eff[:, :, None],                # type: ignore[arg-type]
+        gamma1[None, :, None],                # type: ignore[arg-type]
+    )
+    peak_contrib = jnp.sum(A[:, :, None] * dens_all, axis=1)  # [n_trace, n_time]
     predicted = baseline + peak_contrib
 
     # === Likelihood (NaN-masked additive Gaussian) ===

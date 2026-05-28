@@ -122,13 +122,12 @@ def compute_prior_predictive(
 
 
 def derived_areas(idata: arviz.InferenceData) -> np.ndarray[Any, np.dtype[np.float64]]:
-    """Per-(chain, draw, trace, peak) posterior areas = exp(log_A_left).
+    """Per-(chain, draw, trace, peak) posterior areas.
 
     Returns:
         Array shape ``[n_chain, n_draw, n_trace, n_peak]``.
     """
-    log_A: np.ndarray[Any, np.dtype[np.float64]] = np.asarray(idata.posterior["log_A_left"])  # type: ignore[attr-defined]
-    return np.exp(log_A)  # type: ignore[return-value]
+    return np.asarray(idata.posterior["A"])  # type: ignore[attr-defined,return-value]
 
 
 def diagnostics(idata: arviz.InferenceData) -> dict[str, Any]:

@@ -59,7 +59,7 @@ def test_fitresult_save_and_load(tmp_path: Path) -> None:
     # Roundtrip through ArviZ
     reloaded = az.from_netcdf(out_path)
     assert hasattr(reloaded, "posterior")
-    assert "mu_anchor_left" in reloaded.posterior.data_vars  # type: ignore[attr-defined]
+    assert "mu_anchor" in reloaded.posterior.data_vars  # type: ignore[attr-defined]
 
 
 def test_summary_returns_dataframe() -> None:
@@ -69,8 +69,8 @@ def test_summary_returns_dataframe() -> None:
     assert isinstance(df, pd.DataFrame)
     assert "mean" in df.columns
     assert "r_hat" in df.columns
-    # Sanity: mu_anchor_left should be in the table
-    assert any("mu_anchor_left" in str(idx) for idx in df.index)
+    # Sanity: mu_anchor should be in the table
+    assert any("mu_anchor" in str(idx) for idx in df.index)
 
 
 def test_diagnostics_returns_dict() -> None:

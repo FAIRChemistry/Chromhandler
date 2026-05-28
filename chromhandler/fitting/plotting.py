@@ -238,6 +238,142 @@ def plot_overview(
     return fig
 
 
+def plot_baseline_prior(
+    dataset: PreparedDataset,
+    *,
+    overlay: str = "single",
+    ax_size: tuple[float, float] = (10.0, 2.8),
+    save: str | Path | None = None,
+) -> Figure:
+    """Plot the baseline prior (median + OLS-SE band) per group.
+
+    One row per group, single panel per row. The x-axis spans the union
+    of peak-window and baseline-region bounds. Points inside peak windows
+    are drawn at full opacity; points inside baseline regions are
+    overlaid as red 'x' markers; points in the gaps between annotated
+    regions are dimmed (alpha=0.5). The baseline median is drawn as a
+    dashed line and the +/- OLS SE band is shaded.
+
+    Args:
+        dataset: The prepared dataset.
+        overlay: ``"single"`` -> one row per trace, ``"sample"`` -> one
+            row per sample (groups traces whose ``trace_id`` shares a
+            ``sample_id/`` prefix), ``"all"`` -> single row with every
+            trace overlaid.
+        ax_size: ``(width, height)`` in inches per row.
+        save: If given, write the figure to this path before returning.
+
+    Returns:
+        The constructed :class:`matplotlib.figure.Figure`.
+    """
+    import numpy as np
+
+    from chromhandler.fitting.model import _compute_baseline_se  # type: ignore[attr-defined]
+
+    peak_anns = dataset.peak_annotations
+    baseline_anns = dataset.baseline_annotations
+    if not peak_anns and not baseline_anns:
+        raise ValueError(
+            "plot_baseline_prior: dataset has no peak or baseline "
+            "annotations to plot against."
+        )
+
+    rt_mins = [a.rt_min for a in peak_anns] + [a.rt_min for a in baseline_anns]
+    rt_maxs = [a.rt_max for a in peak_anns] + [a.rt_max for a in baseline_anns]
+    x_lo = float(min(rt_mins))
+    x_hi = float(max(rt_maxs))
+
+    intercept_se, slope_se = _compute_baseline_se(dataset)
+
+    if overlay == "single":
+        groups: list[list[int]] = [[i] for i in range(dataset.n_trace)]
+        group_labels = [dataset.trace_ids[i] for i in range(dataset.n_trace)]
+    elif overlay == "sample":
+        by_sample: dict[str, list[int]] = {}
+        for i, tid in enumerate(dataset.trace_ids):
+            key = tid.split("/", 1)[0] if "/" in tid else tid
+            by_sample.setdefault(key, []).append(i)
+        group_labels = list(by_sample.keys())
+        groups = [by_sample[k] for k in group_labels]
+    elif overlay == "all":
+        groups = [list(range(dataset.n_trace))]
+        group_labels = ["all traces"]
+    else:
+        raise ValueError(
+            f"plot_baseline_prior: overlay must be 'single', 'sample', "
+            f"or 'all'; got {overlay!r}."
+        )
+
+    n_rows = len(groups)
+    width, height = ax_size
+    fig, axes = plt.subplots(
+        n_rows, 1,
+        figsize=(width, height * n_rows),
+        squeeze=False, sharex=True,
+    )
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
+
+    for row, (idxs, label) in enumerate(zip(groups, group_labels, strict=True)):
+        ax = axes[row, 0]
+        for k, tr in enumerate(idxs):
+            color = colors[k % len(colors)]
+            t = dataset.time[tr]
+            s = dataset.signal[tr]
+            in_x = (t >= x_lo) & (t <= x_hi) & np.isfinite(s)
+
+            peak_mask = np.zeros_like(t, dtype=bool)
+            for ann in peak_anns:
+                peak_mask |= (t >= ann.rt_min) & (t <= ann.rt_max)
+            base_mask = np.zeros_like(t, dtype=bool)
+            for ann in baseline_anns:
+                base_mask |= (t >= ann.rt_min) & (t <= ann.rt_max)
+
+            gap_mask = in_x & ~peak_mask & ~base_mask
+            peak_in = in_x & peak_mask
+            base_in = in_x & base_mask
+
+            ax.plot(
+                t[peak_in], s[peak_in],
+                color=color, lw=0.9, alpha=1.0,
+                label=dataset.trace_ids[tr] if overlay != "single" else None,
+            )
+            ax.plot(t[gap_mask], s[gap_mask], color=color, lw=0.8, alpha=0.5)
+            ax.plot(
+                t[base_in], s[base_in],
+                linestyle="none", marker="x", color="red",
+                markersize=5, alpha=0.9,
+            )
+
+            t_dense = np.linspace(x_lo, x_hi, 400)
+            intercept = float(dataset.baseline_intercept[tr])
+            slope = float(dataset.baseline_slope[tr])
+            baseline = intercept + slope * t_dense
+            band = np.sqrt(intercept_se[tr] ** 2 + (slope_se[tr] * t_dense) ** 2)
+            ax.fill_between(
+                t_dense, baseline - band, baseline + band,
+                color=color, alpha=0.2, linewidth=0,
+            )
+            ax.plot(t_dense, baseline, color=color, lw=1.4, linestyle="--")
+
+        for ann in peak_anns:
+            ax.axvspan(ann.rt_min, ann.rt_max, color="tab:orange", alpha=0.08)
+        for ann in baseline_anns:
+            ax.axvspan(ann.rt_min, ann.rt_max, color="tab:green", alpha=0.08)
+
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylabel(label)
+        if overlay != "single" and len(idxs) > 1:
+            ax.legend(fontsize=7, loc="best")
+
+    axes[-1, 0].set_xlabel("retention time (min)")
+    axes[0, 0].set_title("baseline prior: median (dashed) ± OLS SE band")
+    fig.tight_layout()
+    if save is not None:
+        fig.savefig(save)
+    return fig
+
+
 def plot_baseline_diagnostic(
     dataset: PreparedDataset,
     path: str | Path | None = None,

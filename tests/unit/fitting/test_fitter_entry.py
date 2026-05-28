@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
-from numpy.typing import NDArray
 from scipy.stats import skewnorm
 
 from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
 from chromhandler.fitting import FitResult, ModelConfig, fit
 from chromhandler.fitting.prepared_dataset import prepare_dataset
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 def _toy_dataset():
@@ -37,4 +41,4 @@ def test_fit_with_default_configs() -> None:
     ds = _toy_dataset()
     # Use small config for speed
     result = fit(ds, model_config=ModelConfig(num_warmup=20, num_samples=20, num_chains=2))
-    assert "mu_anchor_left" in result.idata.posterior.data_vars  # type: ignore[attr-defined]
+    assert "mu_anchor" in result.idata.posterior.data_vars  # type: ignore[attr-defined]
