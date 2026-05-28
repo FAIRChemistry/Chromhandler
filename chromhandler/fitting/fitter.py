@@ -72,24 +72,67 @@ class FitResult:
         """Quick convergence summary dict (see posterior.diagnostics)."""
         return _diagnostics_fn(self.idata)
 
-    def plot_traces(self, var_names: list[str] | None = None) -> matplotlib.figure.Figure:
+    def plot_baseline_prior(
+        self,
+        *,
+        overlay: str = "single",
+        ax_size: tuple[float, float] = (10.0, 2.8),
+        save: Path | str | None = None,
+    ) -> matplotlib.figure.Figure:
+        """Plot the baseline prior (median + uncertainty band) per group.
+
+        Thin wrapper over
+        :func:`chromhandler.fitting.plotting.plot_baseline_prior`; see that
+        function for parameter details.
+        """
+        from chromhandler.fitting.plotting import (
+            plot_baseline_prior as _plot_baseline_prior,
+        )
+
+        return _plot_baseline_prior(
+            self.dataset, overlay=overlay, ax_size=ax_size, save=save,
+        )
+
+    def plot_traces(
+        self,
+        var_names: list[str] | None = None,
+        *,
+        compact: bool = False,
+        figsize: tuple[float, float] | None = None,
+    ) -> matplotlib.figure.Figure:
         """ArviZ trace plot for the listed variables (or all if None).
 
         Uses ``combined=True`` so all chains are merged before KDE estimation,
         which avoids OverflowError when individual chains are very short.
+
+        Args:
+            var_names: Variables to plot. ``None`` plots all sampled sites.
+            compact: If ``True``, overlay vector components on one row per
+                variable. If ``False`` (default), one row per scalar — easier
+                to read for vector parameters like per-trace areas.
+            figsize: Forwarded to ``arviz.plot_trace``. ``None`` lets ArviZ
+                auto-size (which can become tiny for many rows; pass an
+                explicit ``(w, h)`` if so).
         """
-        axes = arviz.plot_trace(self.idata, var_names=var_names, combined=True)  # type: ignore[call-overload]
+        axes = arviz.plot_trace(  # type: ignore[call-overload]
+            self.idata,
+            var_names=var_names,
+            combined=True,
+            compact=compact,
+            figsize=figsize,
+        )
         # arviz returns a 2D ndarray of Axes; grab the parent Figure
         if hasattr(axes, "flat"):
             return axes.flat[0].figure  # type: ignore[return-value]
         return axes[0].figure if hasattr(axes, "__iter__") else axes.figure  # type: ignore[return-value]
 
     def plot_prior_overlay(self) -> matplotlib.figure.Figure:
-        """For each non-control trace, plot data + prior loc curve at the
-        per-trace amplitude. Single-mode peaks only.
+        """Per-(peak, trace) panel: baseline-subtracted data + prior median
+        skew-normal scaled to each trace's prior area centre.
 
-        TODO(doublet): when doublet ships, add a right-component dashed
-        curve in panels for doublet peaks.
+        Supported traces (gate passed) show ``area_loc * SN(mu, sigma, gamma1)``
+        as a black dashed curve; unsupported traces (gate failed) show no
+        prior curve since their area prior is centred on zero.
         """
         import matplotlib.pyplot as plt
 
@@ -98,33 +141,39 @@ class FitResult:
         dataset = self.dataset
         priors_list = self.priors
         n_peak = len(priors_list)
-        non_control_idx = np.where(~dataset.is_control)[0]
+        n_trace = dataset.n_trace
 
         fig, axes = plt.subplots(
-            n_peak, len(non_control_idx),
-            figsize=(3.5 * len(non_control_idx), 2.8 * n_peak),
+            n_peak, n_trace,
+            figsize=(3.5 * n_trace, 2.8 * n_peak),
             squeeze=False,
         )
 
         for peak_idx, p in enumerate(priors_list):
-            sigma_loc = float(np.exp(p.log_sigma_left_loc))
-            t_dense = np.linspace(p.mu_left_low, p.mu_left_high, 500)
-            _mu = np.asarray(p.mu_left_loc)
+            sigma_loc = float(np.exp(p.log_sigma_loc))
+            t_dense = np.linspace(p.mu_low, p.mu_high, 500)
+            _mu = np.asarray(p.mu_loc)
             _sig = np.asarray(sigma_loc)
-            _g1 = np.asarray(p.gamma1_left_loc)
+            _g1 = np.asarray(p.gamma1_loc)
             sn_unit = np.asarray(density_cp(t_dense, _mu, _sig, _g1))  # type: ignore[arg-type]
-            for col, tr in enumerate(non_control_idx):
-                ax = axes[peak_idx, col]
+            for tr in range(n_trace):
+                ax = axes[peak_idx, tr]
                 t = dataset.time[tr]
                 s = dataset.signal[tr]
                 bs = s - (dataset.baseline_intercept[tr] + dataset.baseline_slope[tr] * t)
-                mask = ((t >= p.mu_left_low) & (t <= p.mu_left_high) & np.isfinite(bs))
+                mask = ((t >= p.mu_low) & (t <= p.mu_high) & np.isfinite(bs))
                 ax.plot(t[mask], bs[mask], color="C0", lw=1.0, label="data")
-                A = float(np.exp(p.log_A_left_loc_per_trace[tr]))
-                ax.plot(t_dense, A * sn_unit, "k--", lw=1.2, label="prior loc")
+                if p.has_support_per_trace[tr]:
+                    A = float(p.area_loc_per_trace[tr])
+                    ax.plot(t_dense, A * sn_unit, "k--", lw=1.2, label="prior loc")
+                else:
+                    ax.text(
+                        0.02, 0.95, "no support", transform=ax.transAxes,
+                        fontsize=7, va="top", color="0.4",
+                    )
                 ax.set_title(f"trace {dataset.trace_ids[tr]} (peak {peak_idx})", fontsize=8)
                 ax.axhline(0, color="k", lw=0.3, alpha=0.3)
-                if col == 0 and peak_idx == 0:
+                if tr == 0 and peak_idx == 0:
                     ax.legend(fontsize=7)
         fig.tight_layout()
         return fig
