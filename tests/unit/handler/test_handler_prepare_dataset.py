@@ -21,25 +21,23 @@ def _chrom(chrom_id: str, sample_id: str, t_axis: np.ndarray) -> Chromatogram:  
     )
 
 
-def _handler_with_two_samples(*, control_first: bool) -> Handler:
+def _handler_with_two_samples() -> Handler:
     h = Handler()
     t = np.arange(2.5, 3.6, 0.01)
     sample_a = Sample(
         id="A",
         chromatograms=[_chrom("c_a1", "A", t)],
-        is_control=control_first,
     )
     sample_b = Sample(
         id="B",
         chromatograms=[_chrom("c_b1", "B", t)],
-        is_control=False,
     )
     h.samples = [sample_a, sample_b]
     return h
 
 
 def test_handler_prepare_dataset_basic() -> None:
-    h = _handler_with_two_samples(control_first=False)
+    h = _handler_with_two_samples()
     peak_anns = [PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=2.9)]
     base_anns = [
         BaselineAnnotation(rt_min=2.55, rt_max=2.58),
@@ -47,19 +45,6 @@ def test_handler_prepare_dataset_basic() -> None:
     ]
     ds = h.prepare_dataset(peak_anns, base_anns)
     assert ds.n_trace == 2
-    assert not ds.is_control.any()
-
-
-def test_handler_prepare_dataset_collects_controls() -> None:
-    h = _handler_with_two_samples(control_first=True)
-    peak_anns = [PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=2.9)]
-    base_anns = [
-        BaselineAnnotation(rt_min=2.55, rt_max=2.58),
-        BaselineAnnotation(rt_min=3.50, rt_max=3.55),
-    ]
-    ds = h.prepare_dataset(peak_anns, base_anns)
-    assert ds.n_trace == 2
-    np.testing.assert_array_equal(ds.is_control, np.array([True, False]))
 
 
 def test_handler_prepare_dataset_raises_on_empty_samples() -> None:
@@ -76,7 +61,7 @@ def test_handler_prepare_dataset_raises_on_empty_samples() -> None:
 def test_handler_prepare_dataset_trace_ids_format() -> None:
     """trace_ids must follow the ``{sample.id}/{chrom.id}`` convention so
     that error messages from the priors layer can name specific traces."""
-    h = _handler_with_two_samples(control_first=False)
+    h = _handler_with_two_samples()
     peak_anns = [PeakAnnotation(molecule_id="A", rt_min=2.7, rt_max=2.9)]
     base_anns = [
         BaselineAnnotation(rt_min=2.55, rt_max=2.58),

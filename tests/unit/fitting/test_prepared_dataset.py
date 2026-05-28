@@ -30,7 +30,6 @@ class TestPreparedDatasetConstruction:
             baseline_intercept=np.zeros(2),
             baseline_slope=np.zeros(2),
             noise_per_trace=np.full(2, 0.01),
-            is_control=np.zeros(2, dtype=np.bool_),
             trace_ids=("trace_0", "trace_1"),
         )
         assert ds.n_trace == 2
@@ -52,7 +51,6 @@ class TestPreparedDatasetConstruction:
             baseline_intercept=np.zeros(1),
             baseline_slope=np.zeros(1),
             noise_per_trace=np.full(1, 0.01),
-            is_control=np.zeros(1, dtype=np.bool_),
             trace_ids=("trace_0",),
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
@@ -148,41 +146,6 @@ def _make_inputs_with_n_traces(n_trace: int = 3):
         BaselineAnnotation(rt_min=3.50, rt_max=3.55),
     ]
     return times, signals, peak_anns, base_anns
-
-
-def test_prepared_dataset_is_control_default_all_false() -> None:
-    from chromhandler.fitting.prepared_dataset import prepare_dataset
-
-    times, signals, peak_anns, base_anns = _make_inputs_with_n_traces(3)
-    ds = prepare_dataset(times, signals, peak_anns, base_anns)
-    assert ds.is_control.shape == (3,)
-    assert ds.is_control.dtype == np.bool_
-    assert not ds.is_control.any()
-
-
-def test_prepared_dataset_is_control_propagates() -> None:
-    from chromhandler.fitting.prepared_dataset import prepare_dataset
-
-    times, signals, peak_anns, base_anns = _make_inputs_with_n_traces(4)
-    ds = prepare_dataset(
-        times, signals, peak_anns, base_anns,
-        is_control=[False, True, False, True],
-    )
-    np.testing.assert_array_equal(
-        ds.is_control, np.array([False, True, False, True])
-    )
-    np.testing.assert_array_equal(np.where(ds.is_control)[0], np.array([1, 3]))
-
-
-def test_prepared_dataset_is_control_length_mismatch_raises() -> None:
-    from chromhandler.fitting.prepared_dataset import prepare_dataset
-
-    times, signals, peak_anns, base_anns = _make_inputs_with_n_traces(3)
-    with pytest.raises(ValueError, match="is_control"):
-        prepare_dataset(
-            times, signals, peak_anns, base_anns,
-            is_control=[True, False],  # 2 entries, but 3 traces
-        )
 
 
 def test_prepared_dataset_trace_ids_default() -> None:
