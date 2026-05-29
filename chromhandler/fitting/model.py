@@ -37,6 +37,15 @@ import numpyro.distributions as dist
 
 from chromhandler.fitting.skew_normal import GAMMA1_MAX, density_cp
 
+# Effective skew bound used by the tanh bijector. Strictly inside GAMMA1_MAX
+# (the half-normal skewness limit) so the CP->DP map never hits its
+# singularity: as |skew| -> GAMMA1_MAX, delta -> 1 and alpha = delta /
+# sqrt(1 - delta**2) -> inf, which yields NaN/Inf density. In float32 a plain
+# `GAMMA1_MAX * tanh(...)` saturates to exactly GAMMA1_MAX for large draws and
+# trips that singularity; the 1e-3 margin keeps delta safely < 1 (alpha ~ 64,
+# finite) while costing ~0.1% of the extreme-skew range.
+SKEW_EFF_MAX: float = float(GAMMA1_MAX) - 1e-3
+
 if TYPE_CHECKING:
     from chromhandler.fitting.prepared_dataset import PreparedDataset
     from chromhandler.fitting.priors import SkewNormalPriors
@@ -158,7 +167,7 @@ def _latent_block(
 
     skew_loc = jnp.asarray([p.skew_loc for p in priors_list])
     skew_scale = jnp.asarray([p.skew_scale for p in priors_list])
-    skew_max = float(GAMMA1_MAX)
+    skew_max = SKEW_EFF_MAX
     skew_raw = numpyro.sample("skew_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
     skew = numpyro.deterministic(
         "skew", skew_max * jnp.tanh((skew_loc + skew_scale * skew_raw) / skew_max)
@@ -226,7 +235,7 @@ def model(
     Deterministic sites:
         - ``mu[peak]``              = mu_loc + mu_scale * mu_raw
         - ``width[peak]``           = exp(log(width_loc) + width_log_scale * width_raw)
-        - ``skew[peak]``            = GAMMA1_MAX * tanh((skew_loc + skew_scale * skew_raw) / GAMMA1_MAX)
+        - ``skew[peak]``            = SKEW_EFF_MAX * tanh((skew_loc + skew_scale * skew_raw) / SKEW_EFF_MAX)
         - ``area[trace, peak]``     = softplus(area_loc + area_scale * area_raw)
         - ``time_shift[trace]``     = shift_scale * time_shift_raw, centred so mean == 0
         - ``time_stretch[trace]``   = exp(stretch_scale * time_stretch_raw), centred so mean(log) == 0
@@ -289,7 +298,13 @@ def predictive_model(
     baseline = a_c[:, None] + b_c[:, None] * tc
 
     predicted = baseline + peak_contrib
-    predicted = jnp.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
+    # Zero only the masked-out (padded) cells, where `density_cp` of a NaN
+    # time stamp is legitimately NaN. Genuine non-finite values at VALID
+    # cells are NOT swallowed (the old blanket nan_to_num hid skew-boundary
+    # blowups); with the tightened skew bound those can no longer occur, and
+    # if one ever did it now surfaces as a NaN predictive sample rather than
+    # a silently zeroed peak.
+    predicted = jnp.where(valid_mask, predicted, 0.0)
     with numpyro.handlers.mask(mask=valid_mask):
         numpyro.sample("obs", dist.Normal(predicted, noise[:, None]))
 

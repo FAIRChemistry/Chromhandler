@@ -110,6 +110,24 @@ parameterisation has no closed boundary at all and inverse mapping to
 `gamma1` is for reporting only.
 Also remove the silent `nan_to_num` and let divergences fire.
 
+**✅ RESOLVED (2026-05-29, fix-fit).** Took fix (a) — the well-conditioned
+CP parameterisation is kept (DP/`alpha` sampling was rejected: it is
+unidentified near symmetry, which is exactly this data's regime). Added
+`SKEW_EFF_MAX = GAMMA1_MAX - 1e-3` and squash through it
+(`skew = SKEW_EFF_MAX * tanh(.../SKEW_EFF_MAX)`), so `delta` stays < 1 and
+`cp_to_dp` never reaches the `alpha = delta/sqrt(1-delta**2)` singularity —
+verified finite in float32 (the sampling regime), including the gradient.
+The blanket `nan_to_num(predicted)` in `predictive_model` is replaced by
+`jnp.where(valid_mask, predicted, 0.0)`: padded (NaN-time) cells are zeroed
+as before, but genuine non-finite values at *valid* cells are no longer
+swallowed. Note the marginalisation rewrite (item 1) already changed the
+*inference* path — a boundary blowup there now poisons the `numpyro.factor`
+(surfaces as divergences) rather than being silently zeroed; the guard
+removes the blowup at the source. Regression tests:
+`tests/unit/fitting/test_skew_bound.py`. Dormant for the ASM fixture
+(skew ≈ −0.1…0.2, far from the bound) — confirmed via `test.py` A/B
+unchanged; the guard protects strongly-tailed peaks on other data.
+
 ---
 
 ### 3. Area prior is empirical-Bayes with tight CV
