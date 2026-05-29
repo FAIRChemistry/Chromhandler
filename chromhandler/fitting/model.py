@@ -18,8 +18,9 @@ a physical constraint is real, a smooth bijector:
 - ``skew`` : has a real physical bound ``|skew| < GAMMA1_MAX`` from
   skew-normal math (max skewness of any SN equals that of the half-normal);
   enforced via ``tanh`` so the boundary is smooth.
-- ``area`` : positivity enforced via ``softplus`` of the non-centred draw,
-  not by truncation.
+- ``area`` : positivity enforced via ``exp`` of the LogNormal non-centred
+  draw; the fixed log-scale avoids the empirical-Bayes precision double-
+  counting of the old ``softplus`` parameterisation.
 - ``noise`` : sampled in log-space, exposed in natural space.
 """
 
@@ -173,10 +174,21 @@ def _latent_block(
         "skew", skew_max * jnp.tanh((skew_loc + skew_scale * skew_raw) / skew_max)
     )
 
-    area_loc = jnp.asarray(np.stack([p.area_loc_per_trace for p in priors_list], axis=1))
-    area_scale = jnp.asarray(np.stack([p.area_scale_per_trace for p in priors_list], axis=1))
-    area_raw = numpyro.sample("area_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0))
-    area = numpyro.deterministic("area", jax.nn.softplus(area_loc + area_scale * area_raw))
+    # area: LogNormal in natural space. loc is the per-trace linear-space
+    # median (strictly positive); area_log_scale is the fixed sigma on
+    # log(area). exp() guarantees positivity and bounds area away from 0
+    # (no per-trace area<->warp funnel); the fixed scale avoids the old
+    # empirical-Bayes precision double-counting.
+    area_log_loc = jnp.log(
+        jnp.asarray(np.stack([p.area_loc_per_trace for p in priors_list], axis=1))
+    )  # [n_trace, n_peak]
+    area_log_scale = jnp.asarray([p.area_log_scale for p in priors_list])  # [n_peak]
+    area_raw = numpyro.sample(
+        "area_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0)
+    )
+    area = numpyro.deterministic(
+        "area", jnp.exp(area_log_loc + area_log_scale[None, :] * area_raw)
+    )
 
     log_noise_loc = jnp.log(jnp.asarray(dataset.noise_per_trace))
     noise_raw = numpyro.sample("noise_raw", dist.Normal(jnp.zeros(n_trace), 1.0))
@@ -236,7 +248,7 @@ def model(
         - ``mu[peak]``              = mu_loc + mu_scale * mu_raw
         - ``width[peak]``           = exp(log(width_loc) + width_log_scale * width_raw)
         - ``skew[peak]``            = SKEW_EFF_MAX * tanh((skew_loc + skew_scale * skew_raw) / SKEW_EFF_MAX)
-        - ``area[trace, peak]``     = softplus(area_loc + area_scale * area_raw)
+        - ``area[trace, peak]``     = exp(log(area_loc) + area_log_scale * area_raw)
         - ``time_shift[trace]``     = shift_scale * time_shift_raw, centred so mean == 0
         - ``time_stretch[trace]``   = exp(stretch_scale * time_stretch_raw), centred so mean(log) == 0
         - ``mu_warped[trace, peak]``    = (mu[peak] - time_shift[trace]) / time_stretch[trace]
