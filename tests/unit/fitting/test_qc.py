@@ -30,3 +30,10 @@ def test_figure_helper_returns_matplotlib_figure():
 
     pc = az.plot_forest(synthetic_idata(), var_names=["mu"])
     assert isinstance(_figure(pc), matplotlib.figure.Figure)
+
+
+def test_plot_warp_returns_figure():
+    from chromhandler.fitting.qc import plot_warp
+
+    fig = plot_warp(synthetic_idata())
+    assert isinstance(fig, matplotlib.figure.Figure)

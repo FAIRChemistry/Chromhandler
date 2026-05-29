@@ -260,6 +260,12 @@ class FitResult:
             band_color="tab:purple",
         )
 
+    def plot_warp(self) -> matplotlib.figure.Figure:
+        """Forest of per-trace time_shift / time_stretch / noise (QC)."""
+        from chromhandler.fitting.qc import plot_warp as _plot_warp
+
+        return _plot_warp(self.idata)
+
     def _plot_band(
         self,
         samples_group: str,
