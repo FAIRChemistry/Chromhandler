@@ -26,7 +26,7 @@ a physical constraint is real, a smooth bijector:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import arviz
 import jax
@@ -116,6 +116,82 @@ class ModelConfig:
 
     # --- Prior predictive ---
     prior_predictive_n_samples: int = 200
+
+
+def _latent_block(
+    dataset: PreparedDataset,
+    priors_list: list[SkewNormalPriors],
+    config: ModelConfig,
+) -> dict[str, Any]:
+    """Sample all latent peak/noise/warp sites and return peak_contrib + noise.
+
+    Shared by ``model`` (which marginalises the baseline) and
+    ``predictive_model`` (which draws the baseline from its conditional).
+    Registers the same ``numpyro.deterministic`` sites as before so
+    downstream summary/plot code is unchanged.
+    """
+    n_trace = dataset.n_trace
+    n_peak = len(priors_list)
+    dt_global = float(dataset.dt_global)
+
+    mu_loc = jnp.asarray([p.mu_loc for p in priors_list])
+    mu_scale = jnp.asarray([p.mu_scale for p in priors_list])
+    mu_raw = numpyro.sample("mu_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
+    mu = numpyro.deterministic("mu", mu_loc + mu_scale * mu_raw)
+
+    log_width_loc = jnp.log(jnp.asarray([p.width_loc for p in priors_list]))
+    width_log_scale = jnp.asarray([p.width_log_scale for p in priors_list])
+    width_raw = numpyro.sample("width_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
+    width = numpyro.deterministic(
+        "width", jnp.exp(log_width_loc + width_log_scale * width_raw)
+    )
+
+    skew_loc = jnp.asarray([p.skew_loc for p in priors_list])
+    skew_scale = jnp.asarray([p.skew_scale for p in priors_list])
+    skew_max = float(GAMMA1_MAX)
+    skew_raw = numpyro.sample("skew_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
+    skew = numpyro.deterministic(
+        "skew", skew_max * jnp.tanh((skew_loc + skew_scale * skew_raw) / skew_max)
+    )
+
+    area_loc = jnp.asarray(np.stack([p.area_loc_per_trace for p in priors_list], axis=1))
+    area_scale = jnp.asarray(np.stack([p.area_scale_per_trace for p in priors_list], axis=1))
+    area_raw = numpyro.sample("area_raw", dist.Normal(jnp.zeros((n_trace, n_peak)), 1.0))
+    area = numpyro.deterministic("area", jax.nn.softplus(area_loc + area_scale * area_raw))
+
+    log_noise_loc = jnp.log(jnp.asarray(dataset.noise_per_trace))
+    noise_raw = numpyro.sample("noise_raw", dist.Normal(jnp.zeros(n_trace), 1.0))
+    noise = numpyro.deterministic(
+        "noise", jnp.exp(log_noise_loc + config.log_noise_scale * noise_raw)
+    )
+
+    shift_scale = config.warp_shift_scale_dt_multiplier * dt_global
+    time_shift_raw = numpyro.sample("time_shift_raw", dist.Normal(jnp.zeros(n_trace), 1.0))
+    _shift = shift_scale * time_shift_raw
+    time_shift = numpyro.deterministic("time_shift", _shift - jnp.mean(_shift))
+
+    time_stretch_raw = numpyro.sample("time_stretch_raw", dist.Normal(jnp.zeros(n_trace), 1.0))
+    _log_stretch = config.warp_stretch_scale * time_stretch_raw
+    time_stretch = numpyro.deterministic(
+        "time_stretch", jnp.exp(_log_stretch - jnp.mean(_log_stretch))
+    )
+
+    mu_warped = numpyro.deterministic(
+        "mu_warped", (mu[None, :] - time_shift[:, None]) / time_stretch[:, None]
+    )
+    width_warped = numpyro.deterministic(
+        "width_warped", width[None, :] / time_stretch[:, None]
+    )
+
+    time_arr = jnp.asarray(dataset.time)
+    dens_all = density_cp(
+        time_arr[:, None, :],                 # type: ignore[arg-type]
+        mu_warped[:, :, None],                # type: ignore[arg-type]
+        width_warped[:, :, None],             # type: ignore[arg-type]
+        skew[None, :, None],                  # type: ignore[arg-type]
+    )
+    peak_contrib = jnp.sum(area[:, :, None] * dens_all, axis=1)  # [n_trace, n_time]
+    return {"peak_contrib": peak_contrib, "noise": noise}
 
 
 def model(
