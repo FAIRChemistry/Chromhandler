@@ -9,10 +9,15 @@ import numpyro
 
 numpyro.set_host_device_count(8)
 
-from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
-from chromhandler.fitting import ModelConfig, fit
-from chromhandler.fitting.priors import PriorConfig, build_priors, summarise_priors
-from chromhandler.handler import Handler
+# Imports follow set_host_device_count, which must run before JAX is imported.
+from chromhandler.annotations import BaselineAnnotation, PeakAnnotation  # noqa: E402
+from chromhandler.fitting import ModelConfig, fit  # noqa: E402
+from chromhandler.fitting.priors import (  # noqa: E402
+    PriorConfig,
+    build_priors,
+    summarise_priors,
+)
+from chromhandler.handler import Handler  # noqa: E402
 
 
 def main() -> None:
@@ -55,47 +60,10 @@ def main() -> None:
 
     result.plot_prior_overlay().savefig("prior_overlay.png", bbox_inches="tight", dpi=120)
     result.plot_fit().savefig("fit.png", bbox_inches="tight", dpi=120)
-    result.plot_traces(var_names=["area", "mu", "width", "skew"]).savefig("traces.png", bbox_inches="tight", dpi=100)
+    result.plot_traces(var_names=["area", "mu", "width", "skew"]).savefig(
+        "traces.png", bbox_inches="tight", dpi=100
+    )
     print("\nwrote prior_overlay.png, fit.png, traces.png")
-
-    import json
-    from pathlib import Path as _P
-
-    golden_path = _P("tests/fixtures/asm_kinetic_series/golden_baseline_model.json")
-    golden = json.loads(golden_path.read_text())
-    new_summ = result.summary(var_names=["area", "mu", "width", "skew"])
-    new = json.loads(new_summ[["mean", "sd", "ess_bulk"]].to_json(orient="index"))
-    g = golden["summary"]
-
-    print("\n=== A/B vs golden (current) model ===")
-    print(f"{'param':<16}{'old_mean':>12}{'new_mean':>12}{'Δ/σ':>8}{'old_ess':>9}{'new_ess':>9}")
-    failures: list[str] = []
-    for key in g:
-        if key not in new:
-            failures.append(f"missing param {key} in new model")
-            continue
-        om, nm = float(g[key]["mean"]), float(new[key]["mean"])
-        osd = max(float(g[key]["sd"]), float(new[key]["sd"]), 1e-12)
-        z = abs(nm - om) / osd
-        print(f"{key:<16}{om:>12.4g}{nm:>12.4g}{z:>8.2f}"
-              f"{g[key]['ess_bulk']:>9.0f}{new[key]['ess_bulk']:>9.0f}")
-        if z > 0.5:
-            failures.append(f"{key}: |Δ|/σ = {z:.2f} > 0.5  (old={om:.4g} new={nm:.4g})")
-
-    new_diag = result.diagnostics()
-    old_diag = golden["diagnostics"]
-    print(f"\ndivergences: old={old_diag['n_divergent']} new={new_diag['n_divergent']}")
-    print(f"ess_min:     old={old_diag['ess_min_bulk']:.0f} new={new_diag['ess_min_bulk']:.0f}")
-    print(f"wall:        old={golden['wall_seconds']:.1f}s")
-    if new_diag["n_divergent"] > old_diag["n_divergent"]:
-        failures.append(f"divergences regressed: {old_diag['n_divergent']} -> {new_diag['n_divergent']}")
-
-    if failures:
-        print("\n[A/B FAILURES]")
-        for f in failures:
-            print(f"   - {f}")
-    else:
-        print("\n[A/B PASS] marginalised model agrees with golden within tolerance.")
 
 
 if __name__ == "__main__":
