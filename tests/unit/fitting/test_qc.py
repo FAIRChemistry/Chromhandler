@@ -44,3 +44,10 @@ def test_plot_areas_returns_figure():
 
     fig = plot_area_forest(synthetic_idata())
     assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_plot_convergence_returns_figure():
+    from chromhandler.fitting.qc import plot_convergence
+
+    fig = plot_convergence(synthetic_idata())
+    assert isinstance(fig, matplotlib.figure.Figure)

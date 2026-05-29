@@ -272,6 +272,14 @@ class FitResult:
 
         return plot_area_forest(self.idata)
 
+    def plot_convergence(
+        self, var_names: tuple[str, ...] = ("mu", "width", "skew"),
+    ) -> matplotlib.figure.Figure:
+        """Rank plots for shape params (convergence QC)."""
+        from chromhandler.fitting.qc import plot_convergence as _plot_conv
+
+        return _plot_conv(self.idata, var_names=var_names)
+
     def _plot_band(
         self,
         samples_group: str,

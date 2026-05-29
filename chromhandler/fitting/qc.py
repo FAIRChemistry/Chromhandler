@@ -49,3 +49,17 @@ def plot_area_forest(idata: arviz.InferenceData) -> matplotlib.figure.Figure:
     too-wide or shifted interval stands out.
     """
     return _figure(arviz.plot_forest(idata, var_names=["area"]))
+
+
+def plot_convergence(
+    idata: arviz.InferenceData,
+    var_names: tuple[str, ...] = ("mu", "width", "skew"),
+) -> matplotlib.figure.Figure:
+    """Rank plots for the shared per-peak shape parameters.
+
+    Rank plots (not trace caterpillars) are arviz's recommended convergence
+    diagnostic — they reveal between-chain bias that overlapping traces hide.
+    Defaults to the small, interpretable shape set so the figure never blows up.
+    """
+    names = _present(idata, var_names)
+    return _figure(arviz.plot_rank(idata, var_names=names))
