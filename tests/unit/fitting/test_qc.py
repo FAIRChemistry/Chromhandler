@@ -37,3 +37,10 @@ def test_plot_warp_returns_figure():
 
     fig = plot_warp(synthetic_idata())
     assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_plot_areas_returns_figure():
+    from chromhandler.fitting.qc import plot_area_forest
+
+    fig = plot_area_forest(synthetic_idata())
+    assert isinstance(fig, matplotlib.figure.Figure)

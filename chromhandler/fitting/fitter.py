@@ -266,6 +266,12 @@ class FitResult:
 
         return _plot_warp(self.idata)
 
+    def plot_areas(self) -> matplotlib.figure.Figure:
+        """Forest of area[trace, peak] posteriors (QC / estimands)."""
+        from chromhandler.fitting.qc import plot_area_forest
+
+        return plot_area_forest(self.idata)
+
     def _plot_band(
         self,
         samples_group: str,

@@ -39,3 +39,13 @@ def plot_warp(idata: arviz.InferenceData) -> matplotlib.figure.Figure:
     """
     names = _present(idata, ("time_shift", "time_stretch", "noise"))
     return _figure(arviz.plot_forest(idata, var_names=names))
+
+
+def plot_area_forest(idata: arviz.InferenceData) -> matplotlib.figure.Figure:
+    """Forest of area[trace, peak] — the estimands (-> concentration).
+
+    One row per (trace, peak) with point + interval, so the whole kinetic
+    series and its uncertainties are visible at a glance and any area with a
+    too-wide or shifted interval stands out.
+    """
+    return _figure(arviz.plot_forest(idata, var_names=["area"]))
