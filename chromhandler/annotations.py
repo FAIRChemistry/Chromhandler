@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 # Vocabulary aligned with the fitting module internals.
 PeakMode = Literal["single", "artefact_doublet", "free_doublet"]
 ArtefactSide = Literal["left", "right"]
+PeakModel = Literal["skew_normal", "emg"]
 
 
 class PeakAnnotation(BaseModel):
@@ -64,6 +65,7 @@ class PeakAnnotation(BaseModel):
     rt_min: float
     rt_max: float
     mode: PeakMode = "single"
+    peak_model: PeakModel = "skew_normal"
     artefact_side: ArtefactSide | None = None
     vary_separation: bool = False
     include_artefact_in_area: bool = False

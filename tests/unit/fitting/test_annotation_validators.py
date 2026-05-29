@@ -82,3 +82,14 @@ class TestBaselinePeakDisjoint:
         from chromhandler.annotations import check_baseline_peak_disjoint
 
         check_baseline_peak_disjoint([], [])  # no error
+
+
+def test_peak_annotation_peak_model_field():
+    from chromhandler.annotations import PeakAnnotation
+
+    a = PeakAnnotation(molecule_id="x", rt_min=1.0, rt_max=2.0, mode="single")
+    assert a.peak_model == "skew_normal"
+    b = PeakAnnotation(
+        molecule_id="x", rt_min=1.0, rt_max=2.0, mode="single", peak_model="emg"
+    )
+    assert b.peak_model == "emg"
