@@ -56,13 +56,13 @@ class FitResult:
     model_config: ModelConfig
 
     def save(self, path: Path | str) -> None:
-        """Write the full InferenceData to netCDF.
+        """Write the full InferenceData (DataTree) to netCDF.
 
         Whatever groups are currently in `idata` get saved — call
         `plot_fit()` / `plot_prior_predictive()` first if you want the
         predictive samples persisted.
         """
-        self.idata.to_netcdf(str(path))
+        self.idata.to_netcdf(str(path), engine="h5netcdf")
 
     def _default_user_facing_var_names(self) -> list[str]:
         """All posterior variables except internal ``*_raw`` sample sites.
@@ -119,45 +119,34 @@ class FitResult:
     ) -> matplotlib.figure.Figure:
         """ArviZ trace plot for the listed variables (or all user-facing if None).
 
-        Each chain is drawn as a separate line by default so divergent or
-        stuck chains are visible. With ``compact=True`` (the default),
-        vector variables collapse to a single row with their scalar
-        components overlaid — keeps the figure legible for fits with many
-        traces or peaks.
+        Each chain is drawn as a separate line so divergent or stuck chains
+        are visible.
 
         Args:
             var_names: Variables to plot. ``None`` plots all user-facing
                 deterministic sites (excludes internal ``*_raw`` reparam
                 draws).
-            compact: If ``True`` (default), overlay vector components on
-                one row per variable. If ``False``, one row per scalar —
-                useful when you specifically want to inspect every
-                ``area[trace, peak]`` separately.
-            combined: If ``False`` (default), each chain is drawn as a
-                separate line and gets its own KDE. If ``True``, all chains
-                are concatenated before plotting — useful as a fallback
-                when individual chains are too short for per-chain KDE
-                (ArviZ raises ``OverflowError`` on near-degenerate chains).
-            figsize: Forwarded to ``arviz.plot_trace``. ``None`` lets ArviZ
-                auto-size (which can become tiny for many rows; pass an
-                explicit ``(w, h)`` if so).
+            compact: Accepted for backwards compatibility; ignored under
+                ArviZ 1.x (the new ``plot_trace`` lays out variables
+                automatically).
+            combined: Accepted for backwards compatibility; ignored under
+                ArviZ 1.x.
+            figsize: Accepted for backwards compatibility; ignored under
+                ArviZ 1.x (figure sizing is handled by the backend).
         """
-        import numpy as np
-
         if var_names is None:
             var_names = self._default_user_facing_var_names()
-        # Lift ArviZ's default 20-subplot cap so we never silently drop
-        # variables. The user asked for these; show them all.
-        with arviz.rc_context({"plot.max_subplots": 200}):  # type: ignore[attr-defined]
-            axes = arviz.plot_trace(  # type: ignore[call-overload]
-                self.idata,
-                var_names=var_names,
-                compact=compact,
-                combined=combined,
-                figsize=figsize,
-            )
-        # arviz returns a 2D ndarray of Axes; grab the parent Figure.
-        first_ax = np.asarray(axes).flat[0]
+        # ArviZ 1.x plot_trace returns a PlotCollection (not a 2-D axes
+        # array). The old compact/combined/figsize kwargs no longer exist.
+        pc = arviz.plot_trace(  # type: ignore[call-overload]
+            self.idata,
+            var_names=var_names,
+        )
+        # Retrieve the matplotlib Figure from the first axes object stored
+        # in the PlotCollection's viz DataTree.
+        plot_ds = pc.viz["plot"].ds  # type: ignore[index]
+        first_var = next(iter(plot_ds.data_vars))  # type: ignore[attr-defined]
+        first_ax = plot_ds[first_var].values.flat[0]  # type: ignore[index]
         fig: matplotlib.figure.Figure = first_ax.figure  # type: ignore[assignment]
         # Prevent axis titles from clipping the plot above (common when
         # many rows are packed into the default auto-sized figure).

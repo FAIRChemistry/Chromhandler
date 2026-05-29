@@ -18,6 +18,8 @@ dependencies = [
   "rainbow-api>=1.0.10",
   "plotly>=6.6.0",
   "anywidget>=0.9.21",
+  "h5netcdf>=1.8.1",
+  "h5py>=3.16.0",
 ]
 description = "Tool for processing chromatography data"
 license = {text = "MIT"}
