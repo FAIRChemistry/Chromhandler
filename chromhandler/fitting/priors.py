@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.signal import savgol_filter
 
+from chromhandler.fitting.emg import emg_from_peak_features
 from chromhandler.fitting.skew_normal import GAMMA1_MAX, cp_from_peak_features
 
 if TYPE_CHECKING:
@@ -69,6 +70,7 @@ class PriorConfig:
     # --- n_supported = 1 fallbacks ---
     log_width_scale_n1: float = 0.15
     skew_scale_n1: float = 0.20
+    emg_tau_log_scale_n1: float = 0.3
 
     # --- Area prior (LogNormal) ---
     area_sigma_log: float = 1.0
@@ -139,6 +141,23 @@ class SkewNormalPriors:
 
 
 @dataclass(frozen=True)
+class EMGPriors:
+    """Single-peak EMG priors for one window (native params)."""
+
+    emg_mu_loc: float
+    emg_mu_scale: float
+    emg_sigma_loc: float
+    """Natural-space LogNormal median for sigma."""
+    emg_sigma_log_scale: float
+    emg_tau_loc: float
+    """Natural-space LogNormal median for tau (tail decay constant)."""
+    emg_tau_log_scale: float
+    area_loc_per_trace: NDArray[np.float64]
+    area_log_scale: float
+    has_support_per_trace: NDArray[np.bool_]
+
+
+@dataclass(frozen=True)
 class WindowFeatures:
     """Per-trace, per-window FWHM-based features. ``None`` when unmeasurable."""
 
@@ -146,6 +165,10 @@ class WindowFeatures:
     width: float
     skew: float
     apex_height: float
+    # Raw measured quantities — needed by the EMG prior builder.
+    apex: float
+    fwhm: float
+    hwhm_ratio: float
 
 
 def _interp_threshold_crossing(
@@ -247,6 +270,7 @@ def compute_window_features(
     mu, width, skew = cp_from_peak_features(apex, mean_fwhm, mean_ratio)
     return WindowFeatures(
         mu=mu, width=width, skew=skew, apex_height=apex_height,
+        apex=apex, fwhm=mean_fwhm, hwhm_ratio=mean_ratio,
     )
 
 
@@ -441,20 +465,157 @@ def _build_one_peak(
     )
 
 
+def _build_one_emg_peak(
+    dataset: PreparedDataset,
+    baseline_sub: NDArray[np.float64],
+    ann: PeakAnnotation,
+    config: PriorConfig,
+) -> EMGPriors:
+    n_trace = dataset.n_trace
+    window_width = float(ann.rt_max - ann.rt_min)
+
+    # --- Stage 1: per-trace raw-signal gate + FWHM measurement -----------
+    has_support = np.zeros(n_trace, dtype=np.bool_)
+    apex_heights = np.zeros(n_trace, dtype=np.float64)
+    features_per_trace: list[WindowFeatures | None] = [None] * n_trace
+    areas_measured = np.zeros(n_trace, dtype=np.float64)
+
+    for tr in range(n_trace):
+        t = dataset.time[tr]
+        s_raw = dataset.signal[tr]
+        in_win = (t >= ann.rt_min) & (t <= ann.rt_max) & np.isfinite(s_raw)
+        if not _trace_passes_gate(s_raw[in_win], config.signal_threshold):
+            continue
+
+        feats = compute_window_features(
+            t, baseline_sub[tr], ann.rt_min, ann.rt_max,
+            smoothing_window=config.smoothing_window,
+        )
+        if feats is None:
+            continue
+        features_per_trace[tr] = feats
+        apex_heights[tr] = max(feats.apex_height, 0.0)
+        areas_measured[tr] = _trapezoid_in_window(
+            t, baseline_sub[tr], ann.rt_min, ann.rt_max,
+        )
+        has_support[tr] = True
+
+    # --- Stage 2: relative-height gate within the supported subset -------
+    if has_support.any():
+        max_height = float(np.max(apex_heights[has_support]))
+        if max_height > 0:
+            keep = apex_heights >= config.min_height_frac * max_height
+            has_support = has_support & keep
+
+    supported_features: list[WindowFeatures] = [
+        features_per_trace[tr]  # type: ignore[misc]
+        for tr in range(n_trace)
+        if has_support[tr] and features_per_trace[tr] is not None
+    ]
+
+    # --- Stage 3: aggregate EMG shape priors -----------------------------
+    n = len(supported_features)
+    if n == 0:
+        # Geometry fallback
+        emg_mu_loc = 0.5 * (ann.rt_min + ann.rt_max)
+        emg_mu_scale = window_width / 4.0
+        emg_sigma_loc = window_width / 12.0
+        emg_sigma_log_scale = config.log_width_scale_n1
+        emg_tau_loc = window_width / 10.0
+        emg_tau_log_scale = config.emg_tau_log_scale_n1
+    else:
+        mus_emg: list[float] = []
+        sigmas: list[float] = []
+        taus: list[float] = []
+        for f in supported_features:
+            try:
+                mu_e, sigma_e, tau_e = emg_from_peak_features(f.apex, f.fwhm, f.hwhm_ratio)
+            except Exception:
+                continue
+            mus_emg.append(mu_e)
+            sigmas.append(sigma_e)
+            taus.append(tau_e)
+
+        if not mus_emg:
+            # All inversions failed — geometry fallback
+            emg_mu_loc = 0.5 * (ann.rt_min + ann.rt_max)
+            emg_mu_scale = window_width / 4.0
+            emg_sigma_loc = window_width / 12.0
+            emg_sigma_log_scale = config.log_width_scale_n1
+            emg_tau_loc = window_width / 10.0
+            emg_tau_log_scale = config.emg_tau_log_scale_n1
+        else:
+            arr_mu = np.asarray(mus_emg, dtype=np.float64)
+            arr_sigma = np.asarray(sigmas, dtype=np.float64)
+            arr_tau = np.asarray(taus, dtype=np.float64)
+            log_sigma = np.log(np.clip(arr_sigma, 1e-9, None))
+            log_tau = np.log(np.clip(arr_tau, 1e-9, None))
+
+            mu_floor = config.mu_scale_dt_floor_multiplier * dataset.dt_global
+            emg_mu_loc = float(np.mean(arr_mu))
+            emg_mu_scale = float(max(np.std(arr_mu, ddof=0), mu_floor))
+
+            emg_sigma_loc = float(np.exp(np.mean(log_sigma)))
+            emg_tau_loc = float(np.exp(np.mean(log_tau)))
+
+            n_inv = len(mus_emg)
+            if n_inv == 1:
+                emg_sigma_log_scale = config.log_width_scale_n1
+                emg_tau_log_scale = config.emg_tau_log_scale_n1
+            else:
+                emg_sigma_log_scale = float(max(
+                    np.std(log_sigma, ddof=0),
+                    config.log_width_scale_n1 / float(np.sqrt(n_inv)),
+                ))
+                emg_tau_log_scale = float(max(
+                    np.std(log_tau, ddof=0),
+                    config.emg_tau_log_scale_n1 / float(np.sqrt(n_inv)),
+                ))
+
+    # --- Stage 4: per-trace LogNormal area prior (identical to SN path) --
+    noise_floor = (
+        config.area_zero_noise_multiplier
+        * dataset.noise_per_trace
+        * window_width
+    )
+    area_loc_per_trace = np.where(has_support, areas_measured, 0.0)
+    area_loc_per_trace = np.maximum(area_loc_per_trace, noise_floor)
+    area_loc_per_trace = np.maximum(area_loc_per_trace, 1e-12)
+
+    return EMGPriors(
+        emg_mu_loc=emg_mu_loc,
+        emg_mu_scale=emg_mu_scale,
+        emg_sigma_loc=emg_sigma_loc,
+        emg_sigma_log_scale=emg_sigma_log_scale,
+        emg_tau_loc=emg_tau_loc,
+        emg_tau_log_scale=emg_tau_log_scale,
+        area_loc_per_trace=area_loc_per_trace,
+        area_log_scale=float(config.area_sigma_log),
+        has_support_per_trace=has_support,
+    )
+
+
 def build_priors(
     dataset: PreparedDataset,
     config: PriorConfig | None = None,
-) -> list[SkewNormalPriors]:
-    """Build per-annotation single-peak skew-normal priors."""
+) -> list[SkewNormalPriors | EMGPriors]:
+    """Build per-annotation single-peak priors, dispatching on ``peak_model``.
+
+    Returns a :class:`SkewNormalPriors` for ``peak_model="skew_normal"``
+    annotations and an :class:`EMGPriors` for ``peak_model="emg"`` ones.
+    """
     cfg = config if config is not None else PriorConfig()
     baseline_sub = dataset.signal - (
         dataset.baseline_intercept[:, None]
         + dataset.baseline_slope[:, None] * dataset.time
     )
-    return [
-        _build_one_peak(dataset, baseline_sub, ann, cfg)
-        for ann in dataset.peak_annotations
-    ]
+    out: list[SkewNormalPriors | EMGPriors] = []
+    for ann in dataset.peak_annotations:
+        if ann.peak_model == "emg":
+            out.append(_build_one_emg_peak(dataset, baseline_sub, ann, cfg))
+        else:
+            out.append(_build_one_peak(dataset, baseline_sub, ann, cfg))
+    return out
 
 
 def summarise_priors(
