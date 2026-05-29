@@ -51,3 +51,23 @@ def test_plot_convergence_returns_figure():
 
     fig = plot_convergence(synthetic_idata())
     assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_qc_summary_groups_and_gate():
+    from chromhandler.fitting.qc import qc_summary
+
+    s = qc_summary(synthetic_idata())
+    for k in ("fit_healthy", "n_divergent", "bfmi_min"):
+        assert k in s
+    assert set(s["groups"]) >= {"shape", "area", "warp", "noise"}
+    g = s["groups"]["shape"]
+    assert "rhat_max" in g and "ess_min" in g
+    assert s["fit_healthy"] is True
+    assert s["n_divergent"] == 0
+
+
+def test_plot_qc_overview_returns_figure():
+    from chromhandler.fitting.qc import plot_qc_overview
+
+    fig = plot_qc_overview(synthetic_idata())
+    assert isinstance(fig, matplotlib.figure.Figure)

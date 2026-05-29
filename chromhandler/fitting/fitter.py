@@ -260,6 +260,18 @@ class FitResult:
             band_color="tab:purple",
         )
 
+    def qc_report(self) -> dict[str, Any]:
+        """Scalar QC gate + per-role worst R-hat / min ESS (see qc.qc_summary)."""
+        from chromhandler.fitting.qc import qc_summary
+
+        return qc_summary(self.idata)
+
+    def plot_qc_overview(self) -> matplotlib.figure.Figure:
+        """R-hat-vs-ESS scatter over all params, coloured by role group."""
+        from chromhandler.fitting.qc import plot_qc_overview as _plot_overview
+
+        return _plot_overview(self.idata)
+
     def plot_warp(self) -> matplotlib.figure.Figure:
         """Forest of per-trace time_shift / time_stretch / noise (QC)."""
         from chromhandler.fitting.qc import plot_warp as _plot_warp
