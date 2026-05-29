@@ -12,7 +12,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from chromhandler.fitting.priors import compute_window_features
+from chromhandler.annotations import BaselineAnnotation, PeakAnnotation
+from chromhandler.fitting.prepared_dataset import prepare_dataset
+from chromhandler.fitting.priors import PriorConfig, build_priors, compute_window_features
 from chromhandler.fitting.skew_normal import (
     GAMMA1_MAX,
     cp_from_peak_features,
@@ -123,3 +125,37 @@ def test_compute_window_features_returns_none_when_too_few_points() -> None:
     s = np.zeros_like(t)
     feat = compute_window_features(t, s, 0.0, 1.0, smoothing_window=5)
     assert feat is None
+
+
+def _toy_area_dataset():
+    """2 traces: trace 0 has a clear Gaussian peak (supported); trace 1 is
+    flat baseline (unsupported). Small noise so the noise floor is realistic."""
+    rng = np.random.default_rng(0)
+    t = np.arange(0.0, 10.0, 0.05)
+    peak = 100.0 * np.exp(-0.5 * ((t - 5.0) / 0.2) ** 2)
+    s0 = peak + 1.0 + rng.normal(0.0, 0.5, t.shape)
+    s1 = 1.0 + rng.normal(0.0, 0.5, t.shape)
+    peak_anns = [PeakAnnotation(molecule_id="x", rt_min=4.0, rt_max=6.0, mode="single")]
+    base_anns = [
+        BaselineAnnotation(rt_min=0.0, rt_max=1.0),
+        BaselineAnnotation(rt_min=9.0, rt_max=10.0),
+    ]
+    return prepare_dataset([t, t], [s0, s1], peak_anns, base_anns)
+
+
+def test_area_prior_is_lognormal_positive_with_fixed_scale():
+    ds = _toy_area_dataset()
+    priors = build_priors(ds, PriorConfig(signal_threshold=10.0))
+    p = priors[0]
+    assert np.all(p.area_loc_per_trace > 0.0)
+    assert p.area_log_scale == 1.0
+    assert bool(p.has_support_per_trace[0])
+    assert not bool(p.has_support_per_trace[1])
+    assert p.area_loc_per_trace[0] > p.area_loc_per_trace[1]
+    assert 30.0 < p.area_loc_per_trace[0] < 70.0
+
+
+def test_area_sigma_log_is_configurable():
+    ds = _toy_area_dataset()
+    priors = build_priors(ds, PriorConfig(signal_threshold=10.0, area_sigma_log=0.5))
+    assert priors[0].area_log_scale == 0.5

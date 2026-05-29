@@ -10,11 +10,13 @@ Builds one :class:`SkewNormalPriors` per :class:`PeakAnnotation` from a
    baseline subtraction) AND the relative-height gate passes.
 3. Aggregation across supported traces yields shared shape priors
    ``(mu_loc, mu_scale, width_loc, width_log_scale, skew_*)``.
-4. Per-trace **linear-space** area priors:
-   - Supported: ``TruncatedNormal(area_measured, cv * area_measured, low=0)``.
-   - Unsupported: ``TruncatedNormal(0, noise * window_width * multiplier, low=0)``
-     i.e. half-normal-at-zero — the area can collapse to zero when the
-     data doesn't support a peak.
+4. Per-trace **LogNormal** area priors:
+   - Supported: ``LogNormal(log(area_measured), area_sigma_log)`` — median
+     anchored at the measured trapezoid area; scale is a FIXED config
+     constant (data-independent, removing empirical-Bayes double-counting).
+   - Unsupported: ``LogNormal(log(noise_floor_area), area_sigma_log)`` —
+     median anchored at the noise floor so the area is weakly shrunk
+     toward zero but can never reach it (positivity by construction).
 
 Doublet / control / artefact logic has been removed: this module supports
 ``mode="single"`` peaks only.
@@ -68,14 +70,20 @@ class PriorConfig:
     log_width_scale_n1: float = 0.15
     skew_scale_n1: float = 0.20
 
-    # --- Area prior ---
-    area_cv: float = 0.3
-    """Coefficient of variation for supported-trace TruncatedNormal area
-    prior: ``area ~ TruncatedNormal(loc=measured, scale=cv*measured, low=0)``."""
+    # --- Area prior (LogNormal) ---
+    area_sigma_log: float = 1.0
+    """Fixed sigma of the underlying Normal on ``log(area)`` for the
+    per-trace LogNormal area prior. Data-INDEPENDENT (this is what removes
+    the old empirical-Bayes precision double-counting): the data sets the
+    prior's median via ``area_measured``, this constant sets its spread.
+    ~1.0 means area is weakly held within a factor of ~e per sigma, so the
+    likelihood dominates the value while log-space keeps area > 0."""
 
     area_zero_noise_multiplier: float = 3.0
-    """Scale multiplier for unsupported traces:
-    ``area ~ TruncatedNormal(loc=0, scale=multiplier * noise * window_width, low=0)``."""
+    """Sets the LogNormal median for UNSUPPORTED traces (and the positive
+    floor for all traces): ``noise * window_width * multiplier`` — the area
+    a noise-level signal would integrate to over the window ("if anything
+    is here it's at most noise-level")."""
 
     # --- Universal floors ---
     mu_scale_dt_floor_multiplier: float = 1.0
@@ -97,9 +105,10 @@ class SkewNormalPriors:
     - ``skew ~ Normal(skew_loc, skew_scale)`` passed through a ``tanh``
       bijector bounded by ``GAMMA1_MAX`` (the skew-normal family's max
       attainable skewness coefficient). Bound is soft, not truncated.
-    - ``area[trace] ~ Normal(area_loc_per_trace, area_scale_per_trace)``
-      passed through ``softplus`` for positivity — half-normal-at-zero
-      for unsupported traces.
+    - ``area[trace] ~ LogNormal(log(area_loc_per_trace), area_log_scale)``
+      — positive by construction (exp), so it never reaches 0; ``loc``
+      anchors at the measured trapezoid area (supported) or a noise-floor
+      area (unsupported).
 
     ``mu`` is interpreted by ``density_cp`` as the **mean** (CP form); the
     cp -> dp bijection inside ``density_cp`` performs the canonical
@@ -119,7 +128,13 @@ class SkewNormalPriors:
     skew_scale: float
 
     area_loc_per_trace: NDArray[np.float64]
-    area_scale_per_trace: NDArray[np.float64]
+    """Per-trace linear-space LogNormal median (strictly positive, >= the
+    noise-floor area). Positivity is what keeps the per-trace area<->warp
+    geometry out of a funnel."""
+    area_log_scale: float
+    """Fixed sigma on ``log(area)`` (from ``PriorConfig.area_sigma_log``),
+    shared across traces. NOT data-derived — removes the precision
+    double-counting of the old ``0.3 * area_measured`` scale."""
     has_support_per_trace: NDArray[np.bool_]
 
 
@@ -401,26 +416,27 @@ def _build_one_peak(
         supported_features, ann.rt_min, ann.rt_max, dataset.dt_global, config,
     )
 
-    # --- Stage 4: per-trace area priors ----------------------------------
-    area_zero_scale = (
+    # --- Stage 4: per-trace LogNormal area prior -------------------------
+    # Linear-space median per trace: the measured trapezoid area for
+    # supported traces, a noise-floor area for unsupported ones. Floored at
+    # the noise floor (and a tiny absolute floor) so every loc is strictly
+    # positive -> log() is finite and the LogNormal can never reach area=0,
+    # which keeps the per-trace area<->warp geometry funnel-free.
+    noise_floor = (
         config.area_zero_noise_multiplier
         * dataset.noise_per_trace
         * window_width
     )
     area_loc_per_trace = np.where(has_support, areas_measured, 0.0)
-    area_scale_per_trace = np.where(
-        has_support,
-        np.maximum(config.area_cv * areas_measured, area_zero_scale),
-        area_zero_scale,
-    )
-    area_scale_per_trace = np.maximum(area_scale_per_trace, 1e-9)
+    area_loc_per_trace = np.maximum(area_loc_per_trace, noise_floor)
+    area_loc_per_trace = np.maximum(area_loc_per_trace, 1e-12)
 
     return SkewNormalPriors(
         mu_loc=mu_loc, mu_scale=mu_scale,
         width_loc=width_loc, width_log_scale=width_log_scale,
         skew_loc=skew_loc, skew_scale=skew_scale,
         area_loc_per_trace=area_loc_per_trace,
-        area_scale_per_trace=area_scale_per_trace,
+        area_log_scale=float(config.area_sigma_log),
         has_support_per_trace=has_support,
     )
 
