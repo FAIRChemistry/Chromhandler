@@ -67,3 +67,21 @@ def test_fwhm_emg_matches_grid():
     peak = d.max()
     above = xs[d >= peak / 2]
     assert abs(float(fwhm_emg(mu, sigma, tau)) - (above.max() - above.min())) < 5e-3
+
+
+@pytest.mark.parametrize("sigma,tau", [(0.04, 0.02), (0.04, 0.08), (0.04, 0.2)])
+def test_emg_from_peak_features_roundtrip(sigma, tau):
+    from chromhandler.fitting.emg import (
+        emg_from_peak_features,
+        fwhm_emg,
+        hwhm_ratio_emg,
+        mode_emg,
+    )
+    mu_true = 5.0
+    apex = mode_emg(mu_true, sigma, tau)
+    fwhm = fwhm_emg(mu_true, sigma, tau)
+    ratio = hwhm_ratio_emg(sigma, tau)
+    mu, s, t = emg_from_peak_features(apex, fwhm, ratio)
+    assert abs(mu - mu_true) < 5e-3
+    assert abs(s - sigma) / sigma < 0.1
+    assert abs(t - tau) / tau < 0.1

@@ -11,9 +11,11 @@ No NumPyro imports, no state.
 """
 from __future__ import annotations
 
+import functools
 import math
 
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import erfc
 from scipy.optimize import brentq, minimize_scalar
 
@@ -78,3 +80,45 @@ def fwhm_emg(mu: float, sigma: float, tau: float) -> float:
     x_left = float(brentq(shifted, lo, m))
     x_right = float(brentq(shifted, m, hi))
     return x_right - x_left
+
+
+def hwhm_ratio_emg(sigma: float, tau: float) -> float:
+    """Right/left HWHM ratio of EMG. Depends only on K = tau/sigma."""
+    m = mode_emg(0.0, sigma, tau)
+    peak = float(density_emg(jnp.asarray(m), jnp.asarray(0.0),
+                             jnp.asarray(sigma), jnp.asarray(tau)))
+    half = peak / 2.0
+
+    def shifted(x: float) -> float:
+        return float(density_emg(jnp.asarray(x), jnp.asarray(0.0),
+                                 jnp.asarray(sigma), jnp.asarray(tau))) - half
+
+    lo, hi = m - sigma, m + tau + sigma
+    while shifted(lo) > 0.0:
+        lo -= sigma
+    while shifted(hi) > 0.0:
+        hi += tau + sigma
+    xl = float(brentq(shifted, lo, m))
+    xr = float(brentq(shifted, m, hi))
+    return (xr - m) / (m - xl)
+
+
+@functools.lru_cache(maxsize=1)
+def _emg_ratio_table() -> tuple[np.ndarray, np.ndarray]:
+    """(HWHM-ratio -> K) inversion table, monotone in ratio. Cached once."""
+    ks = np.geomspace(1e-3, 80.0, 600)
+    ratios = np.array([hwhm_ratio_emg(1.0, float(k)) for k in ks])  # sigma=1 -> tau=k
+    order = np.argsort(ratios)
+    return ratios[order], ks[order]
+
+
+def emg_from_peak_features(apex: float, fwhm: float, hwhm_ratio: float) -> tuple[float, float, float]:
+    """Invert measured (apex, FWHM, HWHM-ratio) to EMG (mu, sigma, tau)."""
+    ratios, ks = _emg_ratio_table()
+    K = float(np.interp(hwhm_ratio, ratios, ks))
+    fwhm_unit = fwhm_emg(0.0, 1.0, K)        # FWHM of EMG(0,1,K); FWHM proportional to sigma at fixed K
+    sigma = fwhm / fwhm_unit
+    tau = K * sigma
+    mode_unit = mode_emg(0.0, 1.0, K)        # apex = mu + sigma * mode_unit(K)
+    mu = apex - sigma * mode_unit
+    return float(mu), float(sigma), float(tau)
