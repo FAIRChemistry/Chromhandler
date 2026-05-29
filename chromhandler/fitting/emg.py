@@ -15,6 +15,7 @@ import math
 
 import jax.numpy as jnp
 from jax.scipy.special import erfc
+from scipy.optimize import brentq, minimize_scalar
 
 _SQRT2 = math.sqrt(2.0)
 _INV_SQRTPI = 1.0 / math.sqrt(math.pi)
@@ -46,3 +47,34 @@ def density_emg(
     u_tail = jnp.maximum(u, lam)  # clamp inactive branch so exp can't overflow
     tail = (1.0 / (2.0 * tau)) * jnp.exp(0.5 * lam ** 2 - lam * u_tail) * erfc(jnp.minimum(w, 0.0))
     return jnp.where(w >= 0.0, core, tail)
+
+
+def mode_emg(mu: float, sigma: float, tau: float) -> float:
+    """Mode (apex) of EMG(mu, sigma, tau), numerically. Reporting only."""
+    def neg(x: float) -> float:
+        return -float(density_emg(jnp.asarray(x), jnp.asarray(mu),
+                                  jnp.asarray(sigma), jnp.asarray(tau)))
+    res = minimize_scalar(neg, bounds=(mu - 5 * sigma, mu + 20 * tau + 5 * sigma),
+                          method="bounded")
+    return float(res.x)
+
+
+def fwhm_emg(mu: float, sigma: float, tau: float) -> float:
+    """Full width at half maximum of EMG(mu, sigma, tau), numerically."""
+    m = mode_emg(mu, sigma, tau)
+    peak = float(density_emg(jnp.asarray(m), jnp.asarray(mu),
+                             jnp.asarray(sigma), jnp.asarray(tau)))
+    half = peak / 2.0
+
+    def shifted(x: float) -> float:
+        return float(density_emg(jnp.asarray(x), jnp.asarray(mu),
+                                 jnp.asarray(sigma), jnp.asarray(tau))) - half
+
+    lo, hi = m - sigma, m + tau + sigma
+    while shifted(lo) > 0.0:
+        lo -= sigma
+    while shifted(hi) > 0.0:
+        hi += tau + sigma
+    x_left = float(brentq(shifted, lo, m))
+    x_right = float(brentq(shifted, m, hi))
+    return x_right - x_left

@@ -46,3 +46,24 @@ def test_float32_far_tail_and_gradient_finite():
     g = jax.grad(lambda tau: jnp.sum(
         density_emg(jnp.linspace(4.5, 8.0, 200), 5.0, 0.1, tau)))(jnp.asarray(0.3))
     assert np.isfinite(float(g))
+
+
+def test_mode_emg_matches_grid_argmax():
+    from chromhandler.fitting.emg import mode_emg
+    mu, sigma, tau = 5.0, 0.05, 0.1
+    xs = np.linspace(mu - 0.5, mu + 1.0, 400001)
+    d = np.asarray(density_emg(jnp.asarray(xs), jnp.asarray(mu),
+                               jnp.asarray(sigma), jnp.asarray(tau)))
+    grid_mode = xs[int(np.argmax(d))]
+    assert abs(float(mode_emg(mu, sigma, tau)) - grid_mode) < 1e-3
+
+
+def test_fwhm_emg_matches_grid():
+    from chromhandler.fitting.emg import fwhm_emg
+    mu, sigma, tau = 5.0, 0.05, 0.1
+    xs = np.linspace(mu - 1.0, mu + 3.0, 2000001)
+    d = np.asarray(density_emg(jnp.asarray(xs), jnp.asarray(mu),
+                               jnp.asarray(sigma), jnp.asarray(tau)))
+    peak = d.max()
+    above = xs[d >= peak / 2]
+    assert abs(float(fwhm_emg(mu, sigma, tau)) - (above.max() - above.min())) < 5e-3
