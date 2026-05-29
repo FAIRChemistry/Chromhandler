@@ -224,7 +224,7 @@ class FitResult:
         TODO(doublet): for doublet peaks, overlay separate dashed lines for
         left and right components.
         """
-        if not hasattr(self.idata, "posterior_predictive"):
+        if "posterior_predictive" not in self.idata.children:
             _compute_pp(self.idata, self.dataset, self.priors, self.model_config)
 
         return self._plot_band(
@@ -238,7 +238,7 @@ class FitResult:
 
         Lazily computes prior + prior_predictive on first call; caches both.
         """
-        if not hasattr(self.idata, "prior_predictive"):
+        if "prior_predictive" not in self.idata.children:
             _compute_prior_pp(self.idata, self.dataset, self.priors, self.model_config)
 
         return self._plot_band(

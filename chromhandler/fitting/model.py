@@ -253,6 +253,47 @@ def model(
     numpyro.factor("obs_marginal", jnp.sum(loglik))
 
 
+def predictive_model(
+    dataset: PreparedDataset,
+    priors_list: list[SkewNormalPriors],
+    config: ModelConfig,
+) -> None:
+    """Generative twin of ``model`` for prior/posterior predictive sampling.
+
+    Samples the same latent sites (so posterior samples substitute cleanly),
+    draws the baseline from its conditional given the observed data, then
+    samples ``obs``. For prior predictive the conditional is taken against
+    the real data (a data-anchored prior predictive) so the band sits at a
+    sensible level despite the improper flat baseline prior — viz only.
+    """
+    block = _latent_block(dataset, priors_list, config)
+    peak_contrib = block["peak_contrib"]
+    noise = block["noise"]
+
+    time = jnp.asarray(dataset.time)
+    valid_mask = jnp.asarray(dataset.valid_mask)
+    w = valid_mask.astype(time.dtype)
+    n = jnp.maximum(jnp.sum(w, axis=1), 1.0)
+    t_clean = jnp.where(valid_mask, time, 0.0)
+    t_mean = jnp.sum(w * t_clean, axis=1) / n
+    tc = jnp.where(valid_mask, time - t_mean[:, None], 0.0)
+    Stt = jnp.maximum(jnp.sum(tc * tc, axis=1), 1e-30)
+
+    r = jnp.where(valid_mask, jnp.nan_to_num(jnp.asarray(dataset.signal)) - peak_contrib, 0.0)
+    a_hat = jnp.sum(r, axis=1) / n              # centred intercept
+    b_hat = jnp.sum(tc * r, axis=1) / Stt
+    n_trace = dataset.n_trace
+    eps = numpyro.sample("baseline_raw", dist.Normal(jnp.zeros((n_trace, 2)), 1.0))
+    a_c = a_hat + jnp.sqrt(noise**2 / n) * eps[:, 0]
+    b_c = b_hat + jnp.sqrt(noise**2 / Stt) * eps[:, 1]
+    baseline = a_c[:, None] + b_c[:, None] * tc
+
+    predicted = baseline + peak_contrib
+    predicted = jnp.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
+    with numpyro.handlers.mask(mask=valid_mask):
+        numpyro.sample("obs", dist.Normal(predicted, noise[:, None]))
+
+
 def run_mcmc(
     dataset: PreparedDataset,
     priors_list: list[SkewNormalPriors],

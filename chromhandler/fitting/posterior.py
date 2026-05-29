@@ -14,7 +14,7 @@ import jax
 import numpy as np
 import numpyro
 
-from chromhandler.fitting.model import ModelConfig, model
+from chromhandler.fitting.model import ModelConfig, predictive_model
 
 if TYPE_CHECKING:
     from chromhandler.fitting.prepared_dataset import PreparedDataset
@@ -49,14 +49,14 @@ def compute_posterior_predictive(
         for name in posterior.data_vars  # type: ignore[union-attr]
     }
     predictive = numpyro.infer.Predictive(
-        model, posterior_samples=flat_posterior, return_sites=["obs"],
+        predictive_model, posterior_samples=flat_posterior, return_sites=["obs"],
     )
     rng_key = jax.random.PRNGKey(config.seed + 1)
     samples = predictive(rng_key, dataset, priors_list, config)
     obs = np.asarray(samples["obs"]).reshape(
         (n_chain, n_draw, dataset.n_trace, dataset.time.shape[1])
     )
-    # Build posterior_predictive group manually
+    # Build posterior_predictive group manually (ArviZ 1.x: nested dict form)
     coords = {
         "chain": np.arange(n_chain),
         "draw": np.arange(n_draw),
@@ -64,11 +64,11 @@ def compute_posterior_predictive(
         "time_idx": np.arange(dataset.time.shape[1]),
     }
     pp = arviz.from_dict(
-        posterior_predictive={"obs": obs},
+        {"posterior_predictive": {"obs": obs}},
         coords=coords,
         dims={"obs": ["chain", "draw", "trace", "time_idx"]},
     )
-    idata.extend(pp)
+    idata.update(pp)
     return idata
 
 
@@ -88,7 +88,7 @@ def compute_prior_predictive(
     the data, given the priors that ``build_priors`` constructed.
     """
     predictive = numpyro.infer.Predictive(
-        model, num_samples=config.prior_predictive_n_samples,
+        predictive_model, num_samples=config.prior_predictive_n_samples,
     )
     rng_key = jax.random.PRNGKey(config.seed + 2)
     samples = predictive(rng_key, dataset, priors_list, config)
@@ -111,13 +111,13 @@ def compute_prior_predictive(
         for name in samples
         if name != "obs"
     }
+    # ArviZ 1.x: nested dict form; use update (replaces extend which was removed)
     pp = arviz.from_dict(
-        prior=prior_dict,
-        prior_predictive={"obs": obs},
+        {"prior": prior_dict, "prior_predictive": {"obs": obs}},
         coords=coords,
         dims={"obs": ["chain", "draw", "trace", "time_idx"]},
     )
-    idata.extend(pp)
+    idata.update(pp)
     return idata
 
 
