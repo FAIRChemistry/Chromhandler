@@ -132,6 +132,13 @@ def prepare_dataset(
     # they reflect the original sampling, not pruned gaps.
     dt_per_trace = compute_dt_per_trace(time)
     dt_global = compute_global_dt(dt_per_trace)
+    if not np.isfinite(dt_global):
+        raise ValueError(
+            "dt_global is not finite: no trace has >=2 finite time samples, so "
+            "the sampling interval is undefined. This would propagate NaN into "
+            "the model's time-warp scale. Each trace needs at least two finite "
+            "time points."
+        )
     intercept, slope = estimate_baselines(time, signal, baseline_annotations)
     noise = estimate_noise_per_trace(
         time, signal, baseline_annotations, intercept, slope

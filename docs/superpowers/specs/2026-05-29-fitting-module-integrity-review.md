@@ -295,6 +295,16 @@ The model then evaluates `shift_scale = warp_shift_scale_dt_multiplier
 error is raised. Add `assert np.isfinite(dt_global)` (or raise
 `ValueError`) in `prepare_dataset`.
 
+**✅ RESOLVED (2026-05-29, fix-fit).** `prepare_dataset` now raises a
+clear `ValueError` immediately after computing `dt_global` if it is
+non-finite, before the value can reach the model's warp scale. In practice
+the all-single-sample case was *also* caught later by the baseline check
+("too few baseline points"), but that message masked the root cause; the
+new guard fires first at the source with an accurate message and documents
+the `dt_global`-must-be-finite invariant (defense-in-depth — `dt_global`
+feeds `shift_scale` in the model). Regression test:
+`test_prepare_dataset_raises_on_undefined_sampling_interval`.
+
 ### 9. `compute_window_features` does not validate `smoothing_window`
 
 [`priors.py:199`](../../../chromhandler/fitting/priors.py). `poly_min =

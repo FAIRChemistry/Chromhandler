@@ -176,3 +176,17 @@ def test_prepared_dataset_trace_ids_length_mismatch_raises() -> None:
             times, signals, peak_anns, base_anns,
             trace_ids=["only_one"],  # 1 entry, but 3 traces
         )
+
+
+def test_prepare_dataset_raises_on_undefined_sampling_interval() -> None:
+    """All traces with a single sample -> no diff -> dt_global is NaN.
+    Must raise a clear error about the sampling interval rather than
+    propagate NaN into the model's warp scale (review item 8)."""
+    from chromhandler.fitting.prepared_dataset import prepare_dataset
+
+    times = [np.array([1.0]), np.array([1.0])]
+    signals = [np.array([5.0]), np.array([6.0])]
+    peak_anns = [PeakAnnotation(molecule_id="x", rt_min=0.9, rt_max=1.1, mode="single")]
+    base_anns = [BaselineAnnotation(rt_min=0.0, rt_max=0.5)]
+    with pytest.raises(ValueError, match=r"dt_global|sampling interval|finite time"):
+        prepare_dataset(times, signals, peak_anns, base_anns)
