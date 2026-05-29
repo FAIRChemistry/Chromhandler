@@ -268,7 +268,37 @@ def plot_baseline_prior(
     """
     import numpy as np
 
-    from chromhandler.fitting.model import _compute_baseline_se  # type: ignore[attr-defined]
+    def _baseline_se_for_plot(
+        ds: PreparedDataset,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per-trace OLS SE of the baseline intercept and slope (for the prior band)."""
+        n_tr = ds.n_trace
+        i_se = np.zeros(n_tr, dtype=np.float64)
+        s_se = np.zeros(n_tr, dtype=np.float64)
+        for _tr in range(n_tr):
+            t = ds.time[_tr]
+            s = ds.signal[_tr]
+            bl_mask = np.zeros_like(t, dtype=bool)
+            for ba in ds.baseline_annotations:
+                bl_mask |= (t >= ba.rt_min) & (t <= ba.rt_max) & np.isfinite(s)
+            if bl_mask.sum() < 3:
+                i_se[_tr] = float(ds.noise_per_trace[_tr])
+                s_se[_tr] = float(ds.noise_per_trace[_tr])
+                continue
+            t_b = t[bl_mask]
+            s_b = s[bl_mask]
+            X = np.column_stack([np.ones_like(t_b), t_b])
+            beta, *_ = np.linalg.lstsq(X, s_b, rcond=None)
+            residuals = s_b - X @ beta
+            sigma2 = float(np.sum(residuals**2) / max(t_b.size - 2, 1))
+            try:
+                cov = sigma2 * np.linalg.inv(X.T @ X)
+                i_se[_tr] = float(np.sqrt(max(cov[0, 0], 0.0)))
+                s_se[_tr] = float(np.sqrt(max(cov[1, 1], 0.0)))
+            except np.linalg.LinAlgError:
+                i_se[_tr] = float(ds.noise_per_trace[_tr])
+                s_se[_tr] = float(ds.noise_per_trace[_tr])
+        return i_se, s_se
 
     peak_anns = dataset.peak_annotations
     baseline_anns = dataset.baseline_annotations
@@ -283,7 +313,7 @@ def plot_baseline_prior(
     x_lo = float(min(rt_mins))
     x_hi = float(max(rt_maxs))
 
-    intercept_se, slope_se = _compute_baseline_se(dataset)
+    intercept_se, slope_se = _baseline_se_for_plot(dataset)
 
     if overlay == "single":
         groups: list[list[int]] = [[i] for i in range(dataset.n_trace)]
