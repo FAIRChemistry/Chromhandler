@@ -110,18 +110,34 @@ Parallel to `skew_normal.py`, pure (no NumPyro state):
 
 ## 6. Priors — `EMGPriors`
 
-Mirror the SN prior pipeline:
-- `emg_mu`: loc = mean apex across supported traces; scale = cross-trace
-  std (floored to `dt`).
+Mirror the SN prior pipeline, but with two τ-specific subtleties (see
+below):
+- `emg_mu`: loc = **the inverted `μ_G`, NOT the raw apex.** EMG `mean =
+  μ_G + τ` and the mode lies right of `μ_G`, so the observed apex over-
+  estimates `μ_G` by the mode-offset. `emg_from_peak_features` returns the
+  offset-corrected `μ_G`; the prior loc is its cross-trace mean, scale =
+  cross-trace std (floored to `dt`). Anchoring at the raw apex would bias
+  the location prior.
 - `emg_sigma`, `emg_tau`: log-space loc = geometric mean of per-trace
   inverted values; fixed weakly-informative log-scales (with `n=1`
   fallbacks), same pattern as `width_log_scale`.
-- `area_loc_per_trace`, `area_log_scale`: identical to the SN area prior
-  (trapezoid loc, fixed `area_sigma_log`, noise-floor for unsupported).
+- `area_loc_per_trace`, `area_log_scale`: identical to the SN area prior.
 - `has_support_per_trace`: same gating as SN.
 
 Unsupported / un-invertible traces fall back to geometric defaults
 (window-based σ, a modest default τ).
+
+**τ identifiability & prior rationale.** τ is well-identified by data for
+genuinely tailing peaks (the tail decays as `exp(−x/τ)`, so the log-tail
+slope measures τ; the leading edge measures σ; the apex pins location).
+The prior is essentially a *regulariser for the degenerate τ→0 limit*
+(no tail ⇒ τ unidentified ⇒ EMG≈Gaussian). The log-space prior keeps τ
+off 0 (no funnel); the **moderate** (not wide) log-scale keeps τ from
+running away to an unphysical pure-exponential (τ ≫ window) while still
+letting tail data dominate when present. The `μ_G`↔τ "fixed-mode" ridge
+is left to HMC (non-centred log keeps it tractable); if it proves stiff,
+a fallback is to reparameterise on the observable mode instead of `μ_G`
+(deferred unless the synthetic test shows a problem).
 
 ## 7. Exposed / reported quantities
 
@@ -153,15 +169,34 @@ EMG is warranted and correctly implemented.
 
 ## 10. Testing
 
-- **`emg.py` math (no MCMC):** density integrates to `area`; `erfcx` form
-  finite and matches a reference EMG (e.g. against a direct
-  Gaussian⊛exp numerical convolution or scipy) across `τ/σ` ratios incl.
-  large tails; EMG → Gaussian as `τ → 0`; `mode_emg`/`fwhm_emg` vs
-  brute-force grid; `emg_from_peak_features` round-trip.
-- **Model:** fits a synthetic known-`(μ,σ,τ)` EMG peak and recovers it with
-  **0 divergences** (non-centred geometry check); a mixed SN+EMG fit runs;
-  an all-SN fit is unchanged vs today.
-- **Fixture:** EMG tail-region residual < SN tail-region residual on ATP.
+Interpreting "EMG is correct / the same" as both *correct* and
+*non-regressing*, in four layers:
+
+1. **Density correctness:** `density_emg` vs `scipy.stats.exponnorm`
+   (EMG = `exponnorm`, `K = τ/σ`) across `τ/σ` ratios **and the far tail**,
+   in **float32** — the reference check for the hand-rolled regime switch.
+   Plus: gradient finite across all regimes (safe-`where`).
+2. **Gaussian limit:** `density_emg(τ→0) → Gaussian(μ_G, σ)`.
+3. **All-SN unchanged (regression):** an all-`skew_normal` fit reproduces
+   today's results and the full existing fitting suite stays green
+   (the partition's empty-EMG-group branch must be a no-op).
+4. **Cross-model area agreement (strongest "same" test):** fit the *same*
+   peak with SN and with EMG; the **area posteriors agree** (area is
+   shape-model-independent), even though the shapes differ. On ATP, EMG
+   gives a smaller tail residual + lower inferred noise than SN *while* its
+   area still matches direct trapezoidal integration.
+
+**τ identifiability tests (per the prior rationale in §6):**
+- **Synthetic recovery at τ/σ ∈ {0.5, 2, 5}** (weak/moderate/strong tail):
+  recover known `(μ_G, σ, τ)` with **0 divergences**; strong-tail → tight
+  posterior on the true τ; weak-tail → wide/prior-shaped τ posterior
+  (reported, not hidden). Confirms data- vs prior-dominance per regime.
+- **Prior-sensitivity refit:** double the τ-prior log-scale, refit ATP;
+  τ posterior median should move negligibly if data-dominated.
+
+- **Mode/FWHM reporting helpers** (`mode_emg`/`fwhm_emg`) vs brute-force
+  grid; `emg_from_peak_features` round-trip (apex/FWHM/HWHM-ratio → params
+  → back).
 
 ## 11. Risks / mitigations
 
