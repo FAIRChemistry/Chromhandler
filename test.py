@@ -75,6 +75,19 @@ def main() -> None:
     )
     print("\nwrote prior_overlay.png, fit.png, traces.png")
 
+    print("\n=== QC report ===")
+    qc = result.qc_report()
+    print(f"  fit_healthy={qc['fit_healthy']} n_divergent={qc['n_divergent']} "
+          f"bfmi_min={qc['bfmi_min']:.2f} rhat_max={qc['rhat_max']:.3f} ess_min={qc['ess_min']:.0f}")
+    for grp, d in sorted(qc["groups"].items()):
+        print(f"    {grp:<9} rhat_max={d['rhat_max']:.3f}  ess_min={d['ess_min']:.0f}")
+
+    result.plot_qc_overview().savefig("qc_overview.png", bbox_inches="tight", dpi=120)
+    result.plot_convergence().savefig("qc_convergence.png", bbox_inches="tight", dpi=120)
+    result.plot_areas().savefig("qc_areas.png", bbox_inches="tight", dpi=120)
+    result.plot_warp().savefig("qc_warp.png", bbox_inches="tight", dpi=120)
+    print("wrote qc_overview.png, qc_convergence.png, qc_areas.png, qc_warp.png")
+
 
 if __name__ == "__main__":
     main()
