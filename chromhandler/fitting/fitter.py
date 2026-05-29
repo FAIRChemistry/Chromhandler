@@ -83,15 +83,21 @@ class FitResult:
         subset.to_netcdf(str(path), engine="h5netcdf")
 
     def _default_user_facing_var_names(self) -> list[str]:
-        """All posterior variables except internal ``*_raw`` sample sites.
+        """All posterior variables except internal ``*_raw`` and ``*_warped`` sites.
 
         The model exposes physical quantities as ``numpyro.deterministic``
         sites and samples them via ``Normal(0, 1)`` reparameterisation
-        sites suffixed ``_raw``. Plotting and summary defaults skip the
-        raw sites so users see only the natural-space parameters.
+        sites suffixed ``_raw``. Derived per-trace/per-peak sites are
+        suffixed ``_warped`` — they share shape ``[n_trace, n_peak]`` and
+        blow up forest/summary plots. Plotting and summary defaults skip
+        both suffixes so users see only the natural-space parameters.
         """
         data_vars = self.idata.posterior.data_vars  # type: ignore[attr-defined]
-        return [str(n) for n in data_vars if not str(n).endswith("_raw")]  # type: ignore[reportUnknownArgumentType]
+        return [
+            str(n)
+            for n in data_vars
+            if not (str(n).endswith("_raw") or str(n).endswith("_warped"))
+        ]  # type: ignore[reportUnknownArgumentType]
 
     def summary(self, var_names: list[str] | None = None) -> pd.DataFrame:
         """ArviZ summary (mean / sd / hdi / r_hat / ess) as a DataFrame.

@@ -129,3 +129,21 @@ def test_plot_prior_predictive_returns_figure_and_caches(fit_result: FitResult) 
     # Layout must be n_trace x n_peak after the per-(trace, peak) grid
     # refactor. The fixture has 3 traces x 1 peak.
     assert len(fig.axes) == 3 * 1
+
+
+def test_default_var_names_excludes_raw_and_warped():
+    import arviz as az
+    import numpy as np
+
+    from chromhandler.fitting.fitter import FitResult
+
+    idata = az.from_dict({"posterior": {
+        "mu": np.zeros((2, 5, 3)),
+        "mu_raw": np.zeros((2, 5, 3)),
+        "mu_warped": np.zeros((2, 5, 7, 3)),
+        "width_warped": np.zeros((2, 5, 7, 3)),
+    }})
+    r = FitResult(idata=idata, dataset=None, priors=[], model_config=None)  # type: ignore[arg-type]
+    names = r._default_user_facing_var_names()
+    assert "mu" in names
+    assert not any(n.endswith("_raw") or n.endswith("_warped") for n in names)
