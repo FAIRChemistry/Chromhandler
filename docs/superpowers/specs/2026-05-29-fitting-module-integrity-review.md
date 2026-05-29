@@ -223,6 +223,29 @@ last as `-sum(others)` with the corresponding Jacobian, or use
 `numpyro.handlers.reparam` with `SoftSumZeroReparam`. Same for
 `time_stretch` / `log_stretch`.
 
+**⚠️ CONFIRMED REAL BUT LOW-IMPACT — NOT FIXED (2026-05-29, fix-fit).**
+Measured directly on the ASM fixture (4×500). The gauge mechanism is
+real: the likelihood-invisible direction `mean(time_shift_raw)` mixes at
+**21%** of n_samples (`time_stretch_raw` 28%), and `ess_min` (396) sits on
+a warp raw. BUT the impact is confined to the internal `*_raw` diagnostic
+sites — the quantities that enter the likelihood and that we report (the
+`time_shift`/`time_stretch` *deterministics*, and downstream
+`area`/`mu`/`width`/`skew`) already mix fine (847–2023). There is **no
+bias**, only an inflated `*_raw` `ess_min` diagnostic.
+
+Prototyped the principled fix (`dist.ZeroSumNormal`, numpyro 0.20). Two
+findings: (1) it MUST be non-centred — sampling `ZeroSumNormal(scale)`
+directly at the tiny physical warp scale is a centred parameterisation
+that destroyed sampling (`ess_min=4`, `r̂=3.4`); the correct form is unit-
+scale `ZeroSumNormal(1.0)` × physical scale in a deterministic. (2) Even
+done correctly, the gain is marginal: `ess_min` 396 → 422 (the bottleneck
+merely relocated to `mu_warped`, i.e. the `mu↔warp` coupling, which this
+fix doesn't touch), and the `time_shift` deterministic ESS did **not**
+improve (847–2023 → 431–1414, single-run). Conclusion: changing a working,
+well-tested parameterisation for a marginal/ambiguous benefit isn't
+justified — soft-centring kept. The recurring `fit_healthy: False` is
+better addressed by the r̂-threshold (`< 1.01` → `<= 1.01`), not this.
+
 ---
 
 ## Numerical hazards
