@@ -336,6 +336,19 @@ footgun. Either (a) eagerly compute predictives in `fit()`, or (b)
 make `save()` explicit: `save(path, include=['posterior_predictive',
 ...])`.
 
+**✅ RESOLVED (2026-05-29, fix-fit).** Took fix (b). `save(path)` now writes
+a **canonical, fixed group set** — `posterior`, `observed_data`,
+`sample_stats` — selected via `idata.filter(...)`, regardless of which plot
+methods have run. The lazily-cached `posterior_predictive`/`prior`/
+`prior_predictive` groups are no longer leaked into the file by default
+(they're recomputable from the posterior + seed). `save(path,
+include_predictive=True)` computes-if-needed and includes
+`posterior_predictive`; `prior`/`prior_predictive` are diagnostic-only and
+never persisted. So the file's contents depend only on the `FitResult` +
+the explicit flag, never on call history. `FitResult` stays `frozen=False`
+(the lazy plot-caching is a fine optimisation; only `save()`'s exposure of
+it was the problem). Regression tests: `tests/unit/fitting/test_fitresult_save.py`.
+
 ### 12. `shift.py` is dead code in the fitter chain
 
 `align_chromatograms` is defined but nothing in

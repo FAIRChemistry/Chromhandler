@@ -55,14 +55,32 @@ class FitResult:
     priors: list[SkewNormalPriors]
     model_config: ModelConfig
 
-    def save(self, path: Path | str) -> None:
-        """Write the full InferenceData (DataTree) to netCDF.
+    def save(self, path: Path | str, *, include_predictive: bool = False) -> None:
+        """Write the fit to netCDF **deterministically**.
 
-        Whatever groups are currently in `idata` get saved — call
-        `plot_fit()` / `plot_prior_predictive()` first if you want the
-        predictive samples persisted.
+        Always persists the canonical inference groups produced by the fit
+        (``posterior``, ``observed_data``, ``sample_stats``), regardless of
+        which plot methods have been called. The plot methods lazily cache
+        ``posterior_predictive`` / ``prior`` / ``prior_predictive`` into
+        ``idata``; those are recomputable from the posterior + seed and are
+        NOT written by default, so the saved file's contents depend only on
+        the ``FitResult`` and ``include_predictive`` — never on call history.
+
+        Args:
+            path: netCDF output path.
+            include_predictive: if ``True``, also compute (if not already
+                cached) and include the ``posterior_predictive`` group.
+                ``prior``/``prior_predictive`` are diagnostic-only and are
+                never persisted.
         """
-        self.idata.to_netcdf(str(path), engine="h5netcdf")
+        canonical = ["posterior", "observed_data", "sample_stats"]
+        if include_predictive:
+            if "posterior_predictive" not in self.idata.children:
+                _compute_pp(self.idata, self.dataset, self.priors, self.model_config)
+            canonical.append("posterior_predictive")
+        keep = {g for g in canonical if g in self.idata.children}
+        subset = self.idata.filter(lambda node: node.name in keep)
+        subset.to_netcdf(str(path), engine="h5netcdf")
 
     def _default_user_facing_var_names(self) -> list[str]:
         """All posterior variables except internal ``*_raw`` sample sites.
