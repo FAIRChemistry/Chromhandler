@@ -497,10 +497,14 @@ def summarise_priors(
         )
         n_supp = int(np.sum(p.has_support_per_trace))
         n_total = p.has_support_per_trace.size
-        mean_area = float(np.mean(p.area_loc_per_trace))
+        # LogNormal: geometric-mean median across traces +/- 1 log-sigma.
+        med_area = float(np.exp(np.mean(np.log(p.area_loc_per_trace))))
+        a_p16 = med_area * float(np.exp(-p.area_log_scale))
+        a_p84 = med_area * float(np.exp(+p.area_log_scale))
         lines.append(
-            f"{i:>4} {'area (mean)':<14} {'Normal+softplus':<18} "
-            f"{mean_area:>10.4g} {'-':>10} {'-':>10} {'-':>10}"
+            f"{i:>4} {'area (median)':<14} {'LogNormal':<18} "
+            f"{med_area:>10.4g} {p.area_log_scale:>10.4g} "
+            f"{a_p16:>10.4g} {a_p84:>10.4g}"
             f"  [supported {n_supp}/{n_total}]"
         )
     skew_note = f"  (skew tanh bound: [{skew_low:.4g}, {skew_high:.4g}])"

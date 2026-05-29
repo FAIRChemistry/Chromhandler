@@ -154,6 +154,18 @@ linearity, calibration repeatability). Or drop the empirical prior
 entirely and use a uniform `HalfNormal(scale = noise * window_width *
 k)` — the data has plenty of signal to identify area without help.
 
+**✅ RESOLVED (2026-05-29, lognormal-area-prior).** Replaced with
+`LogNormal(log(area_measured), area_sigma_log)`. `area_sigma_log` is a
+fixed `PriorConfig` field (default 1.0) that is data-INDEPENDENT — the
+precision double-counting is gone. `loc` stays at the measured trapezoid
+area for supported traces, or a noise-floor area
+(`noise * window_width * area_zero_noise_multiplier`) for unsupported
+ones. Positivity is structural (`exp`), which keeps the per-trace
+area<->warp geometry funnel-free (verified: all area>0, 0 divergences).
+The data sets the median, the constant sets the spread. Consequence for
+unsupported traces: absent peaks get a small positive noise-floor median
+rather than exactly 0 ("below detection"), accepted for quantification.
+
 ---
 
 ### 4. `softplus(0) ≠ 0` — unsupported areas are anchored at ln 2, not zero
@@ -177,6 +189,11 @@ prior is no longer the half-normal-at-zero it claims to be.
 not a great fix), or — cleaner — switch unsupported traces to a true
 `HalfNormal(scale = area_scale)` via `dist.HalfNormal` directly with no
 softplus.
+
+**✅ RESOLVED (2026-05-29).** `softplus` removed entirely; area is now
+`exp(...)` (LogNormal), so the `softplus(0) = ln 2` offset no longer
+exists. Unsupported traces sit at a positive noise-floor median by
+construction — the ln 2 ghost is gone.
 
 ---
 
