@@ -357,6 +357,23 @@ pre-`prepare_dataset` step (in which case document that fitting
 auto-aligns) or delete the module — its presence implies a guarantee
 the fitter does not provide.
 
+**✅ RESOLVED — premise corrected (2026-05-29, fix-fit).** `shift.py` is
+NOT dead: `Handler.align_chromatograms` (handler.py) imports and uses
+`shift.align_chromatograms` as a deliberate, opt-in **pre-fit** step —
+it resamples all chromatograms to a common grid, aligns on a
+`[lower_rt, upper_rt]` window, and mutates each `chrom.time` (and
+`Peak.location`) in place, returning an inspectable `AlignmentResult`
+(`shifts_samples`, `delta_rt`, `dt`, `trace_ids`, losses). The review's
+"dead in the fitter chain" was accurate but its conclusion was wrong:
+alignment is *correctly* a separate Handler step (the explicit two-step
+`handler.align_chromatograms(...)` → `handler.prepare_dataset(...)`),
+not something the fitter should auto-run. `test.py` now demonstrates it.
+The fitter intentionally does not auto-align — the model's `time_shift`
+fits the fine residual after the coarse pre-alignment.
+(Minor: a benign `RuntimeWarning: Mean of empty slice` can surface from
+`shift.py:141` when a resampled column is all-NaN — cosmetic; worth a
+`np.errstate` guard but not a correctness issue.)
+
 ### 13. `_default_user_facing_var_names` includes the warped variables
 
 [`fitter.py:67`](../../../chromhandler/fitting/fitter.py).

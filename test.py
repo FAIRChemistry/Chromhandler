@@ -40,6 +40,16 @@ def main() -> None:
         BaselineAnnotation(rt_min=2.50, rt_max=2.52),
         BaselineAnnotation(rt_min=3.55, rt_max=3.58),
     ]
+
+    # Coarse retention-time pre-alignment (opt-in, explicit two-step): removes
+    # gross per-trace offsets in place before the fit so the model's tight
+    # time_shift prior only absorbs the fine residual. Aligns on the peak-
+    # bearing span; mutates each chromatogram's time axis.
+    align = handler.align_chromatograms(lower_rt=2.55, upper_rt=3.45)
+    print("\n=== retention-time alignment ===")
+    print(f"  delta_rt (min): {[round(float(x), 4) for x in align.delta_rt]}")
+    print(f"  loss: {align.loss_initial:.4g} -> {align.loss_final:.4g}")
+
     dataset = handler.prepare_dataset(peak_anns, base_anns)
 
     pc = PriorConfig(min_height_frac=0.05)
