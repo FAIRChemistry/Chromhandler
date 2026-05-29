@@ -36,6 +36,7 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 
+from chromhandler.fitting.emg import density_emg
 from chromhandler.fitting.skew_normal import GAMMA1_MAX, density_cp
 
 # Effective skew bound used by the tanh bijector. Strictly inside GAMMA1_MAX
@@ -49,7 +50,7 @@ SKEW_EFF_MAX: float = float(GAMMA1_MAX) - 1e-3
 
 if TYPE_CHECKING:
     from chromhandler.fitting.prepared_dataset import PreparedDataset
-    from chromhandler.fitting.priors import SkewNormalPriors
+    from chromhandler.fitting.priors import EMGPriors, SkewNormalPriors
 
 
 def marginal_baseline_loglik(
@@ -140,7 +141,7 @@ class ModelConfig:
 
 def _latent_block(
     dataset: PreparedDataset,
-    priors_list: list[SkewNormalPriors],
+    priors_list: list[SkewNormalPriors | EMGPriors],
     config: ModelConfig,
 ) -> dict[str, Any]:
     """Sample all latent peak/noise/warp sites and return peak_contrib + noise.
@@ -149,36 +150,70 @@ def _latent_block(
     ``predictive_model`` (which draws the baseline from its conditional).
     Registers the same ``numpyro.deterministic`` sites as before so
     downstream summary/plot code is unchanged.
+
+    Supports mixed SN/EMG peak lists. The all-SN path is RNG-identical to the
+    original: SN shape sites (``mu_raw``, ``width_raw``, ``skew_raw``) plus
+    ``area_raw``, ``noise_raw``, warp sites are in their original positions;
+    EMG-specific sites (``emg_mu_raw``, ``emg_sigma_raw``, ``emg_tau_raw``)
+    are appended after the warp sites. For an all-SN dataset the EMG group is
+    empty, so zero new sites are inserted and every PRNG key is unchanged.
+
+    Conditional deterministic sites (present only when EMG peaks exist):
+        - ``emg_mu[emg_peak]``     = EMG Gaussian centre (warped per trace)
+        - ``emg_sigma[emg_peak]``  = EMG Gaussian width (warped per trace)
+        - ``emg_tau[emg_peak]``    = EMG tail-decay constant (warped per trace)
     """
+    from chromhandler.fitting.priors import EMGPriors
+
     n_trace = dataset.n_trace
     n_peak = len(priors_list)
     dt_global = float(dataset.dt_global)
 
-    mu_loc = jnp.asarray([p.mu_loc for p in priors_list])
-    mu_scale = jnp.asarray([p.mu_scale for p in priors_list])
-    mu_raw = numpyro.sample("mu_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
-    mu = numpyro.deterministic("mu", mu_loc + mu_scale * mu_raw)
+    sn_idx = [i for i, p in enumerate(priors_list) if not isinstance(p, EMGPriors)]
+    emg_idx = [i for i, p in enumerate(priors_list) if isinstance(p, EMGPriors)]
+    time_arr = jnp.asarray(dataset.time)
+    peak_contrib = jnp.zeros((n_trace, time_arr.shape[1]))
 
-    log_width_loc = jnp.log(jnp.asarray([p.width_loc for p in priors_list]))
-    width_log_scale = jnp.asarray([p.width_log_scale for p in priors_list])
-    width_raw = numpyro.sample("width_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
-    width = numpyro.deterministic(
-        "width", jnp.exp(log_width_loc + width_log_scale * width_raw)
-    )
+    # === SN group: SAME sites/expressions as the original, scoped to sn_idx ===
+    if sn_idx:
+        sn = [priors_list[i] for i in sn_idx]
+        n_sn = len(sn)
 
-    skew_loc = jnp.asarray([p.skew_loc for p in priors_list])
-    skew_scale = jnp.asarray([p.skew_scale for p in priors_list])
-    skew_max = SKEW_EFF_MAX
-    skew_raw = numpyro.sample("skew_raw", dist.Normal(jnp.zeros(n_peak), 1.0))
-    skew = numpyro.deterministic(
-        "skew", skew_max * jnp.tanh((skew_loc + skew_scale * skew_raw) / skew_max)
-    )
+        mu_loc = jnp.asarray([p.mu_loc for p in sn])  # type: ignore[union-attr]
+        mu_scale = jnp.asarray([p.mu_scale for p in sn])  # type: ignore[union-attr]
+        mu_raw = numpyro.sample("mu_raw", dist.Normal(jnp.zeros(n_sn), 1.0))
+        mu = numpyro.deterministic("mu", mu_loc + mu_scale * mu_raw)
+
+        log_width_loc = jnp.log(jnp.asarray([p.width_loc for p in sn]))  # type: ignore[union-attr]
+        width_log_scale = jnp.asarray([p.width_log_scale for p in sn])  # type: ignore[union-attr]
+        width_raw = numpyro.sample("width_raw", dist.Normal(jnp.zeros(n_sn), 1.0))
+        width = numpyro.deterministic(
+            "width", jnp.exp(log_width_loc + width_log_scale * width_raw)
+        )
+
+        skew_loc = jnp.asarray([p.skew_loc for p in sn])  # type: ignore[union-attr]
+        skew_scale = jnp.asarray([p.skew_scale for p in sn])  # type: ignore[union-attr]
+        skew_max = SKEW_EFF_MAX
+        skew_raw = numpyro.sample("skew_raw", dist.Normal(jnp.zeros(n_sn), 1.0))
+        skew = numpyro.deterministic(
+            "skew", skew_max * jnp.tanh((skew_loc + skew_scale * skew_raw) / skew_max)
+        )
+    else:
+        # No SN peaks — sample zero-length sites so the site names still exist
+        # (avoids missing-site errors in downstream code) but consume no RNG.
+        mu_raw = numpyro.sample("mu_raw", dist.Normal(jnp.zeros(0), 1.0))
+        mu = numpyro.deterministic("mu", mu_raw)
+        width_raw = numpyro.sample("width_raw", dist.Normal(jnp.zeros(0), 1.0))
+        width = numpyro.deterministic("width", width_raw)
+        skew_raw = numpyro.sample("skew_raw", dist.Normal(jnp.zeros(0), 1.0))
+        skew = numpyro.deterministic("skew", skew_raw)
 
     # area: LogNormal in natural space. loc is the per-trace linear-space
     # median (strictly positive); area_log_scale is the fixed sigma on
     # log(area). exp() guarantees positivity and bounds area away from 0
     # (no per-trace area<->warp funnel); the fixed scale avoids the old
     # empirical-Bayes precision double-counting.
+    # Sampled over ALL peaks (SN + EMG) — unchanged position in the RNG sequence.
     area_log_loc = jnp.log(
         jnp.asarray(np.stack([p.area_loc_per_trace for p in priors_list], axis=1))
     )  # [n_trace, n_peak]
@@ -207,27 +242,74 @@ def _latent_block(
         "time_stretch", jnp.exp(_log_stretch - jnp.mean(_log_stretch))
     )
 
-    mu_warped = numpyro.deterministic(
-        "mu_warped", (mu[None, :] - time_shift[:, None]) / time_stretch[:, None]
-    )
-    width_warped = numpyro.deterministic(
-        "width_warped", width[None, :] / time_stretch[:, None]
-    )
+    # SN warp deterministics and contribution
+    if sn_idx:
+        mu_warped = numpyro.deterministic(
+            "mu_warped", (mu[None, :] - time_shift[:, None]) / time_stretch[:, None]
+        )
+        width_warped = numpyro.deterministic(
+            "width_warped", width[None, :] / time_stretch[:, None]
+        )
+        dens_sn = density_cp(
+            time_arr[:, None, :],                 # type: ignore[arg-type]
+            mu_warped[:, :, None],                # type: ignore[arg-type]
+            width_warped[:, :, None],             # type: ignore[arg-type]
+            skew[None, :, None],                  # type: ignore[arg-type]
+        )
+        peak_contrib = peak_contrib + jnp.sum(
+            area[:, jnp.asarray(sn_idx)][:, :, None] * dens_sn, axis=1
+        )
+    else:
+        # Register the deterministic sites as empty arrays so ArviZ doesn't
+        # complain about missing sites on all-EMG datasets.
+        numpyro.deterministic("mu_warped", jnp.zeros((n_trace, 0)))
+        numpyro.deterministic("width_warped", jnp.zeros((n_trace, 0)))
 
-    time_arr = jnp.asarray(dataset.time)
-    dens_all = density_cp(
-        time_arr[:, None, :],                 # type: ignore[arg-type]
-        mu_warped[:, :, None],                # type: ignore[arg-type]
-        width_warped[:, :, None],             # type: ignore[arg-type]
-        skew[None, :, None],                  # type: ignore[arg-type]
-    )
-    peak_contrib = jnp.sum(area[:, :, None] * dens_all, axis=1)  # [n_trace, n_time]
+    # === EMG group: NEW sites, appended AFTER all existing warp sites ===
+    if emg_idx:
+        em = [priors_list[i] for i in emg_idx]
+        n_e = len(em)
+        emg_mu = numpyro.deterministic(
+            "emg_mu",
+            jnp.asarray([p.emg_mu_loc for p in em])  # type: ignore[union-attr]
+            + jnp.asarray([p.emg_mu_scale for p in em])  # type: ignore[union-attr]
+            * numpyro.sample("emg_mu_raw", dist.Normal(jnp.zeros(n_e), 1.0)),
+        )
+        emg_sigma = numpyro.deterministic(
+            "emg_sigma",
+            jnp.exp(
+                jnp.log(jnp.asarray([p.emg_sigma_loc for p in em]))  # type: ignore[union-attr]
+                + jnp.asarray([p.emg_sigma_log_scale for p in em])  # type: ignore[union-attr]
+                * numpyro.sample("emg_sigma_raw", dist.Normal(jnp.zeros(n_e), 1.0))
+            ),
+        )
+        emg_tau = numpyro.deterministic(
+            "emg_tau",
+            jnp.exp(
+                jnp.log(jnp.asarray([p.emg_tau_loc for p in em]))  # type: ignore[union-attr]
+                + jnp.asarray([p.emg_tau_log_scale for p in em])  # type: ignore[union-attr]
+                * numpyro.sample("emg_tau_raw", dist.Normal(jnp.zeros(n_e), 1.0))
+            ),
+        )
+        emg_mu_w = (emg_mu[None, :] - time_shift[:, None]) / time_stretch[:, None]
+        emg_sigma_w = emg_sigma[None, :] / time_stretch[:, None]
+        emg_tau_w = emg_tau[None, :] / time_stretch[:, None]
+        dens_e = density_emg(
+            time_arr[:, None, :],         # type: ignore[arg-type]
+            emg_mu_w[:, :, None],         # type: ignore[arg-type]
+            emg_sigma_w[:, :, None],      # type: ignore[arg-type]
+            emg_tau_w[:, :, None],        # type: ignore[arg-type]
+        )
+        peak_contrib = peak_contrib + jnp.sum(
+            area[:, jnp.asarray(emg_idx)][:, :, None] * dens_e, axis=1
+        )
+
     return {"peak_contrib": peak_contrib, "noise": noise}
 
 
 def model(
     dataset: PreparedDataset,
-    priors_list: list[SkewNormalPriors],
+    priors_list: list[SkewNormalPriors | EMGPriors],
     config: ModelConfig,
 ) -> None:
     """Non-centred, unit-scale skew-normal model with analytic baseline marginalisation.
@@ -244,18 +326,24 @@ def model(
     sample site. The Rao-Blackwellised conditional-mean baseline is exposed
     as deterministic sites for reporting and posterior predictive use.
 
-    Deterministic sites:
-        - ``mu[peak]``              = mu_loc + mu_scale * mu_raw
-        - ``width[peak]``           = exp(log(width_loc) + width_log_scale * width_raw)
-        - ``skew[peak]``            = SKEW_EFF_MAX * tanh((skew_loc + skew_scale * skew_raw) / SKEW_EFF_MAX)
-        - ``area[trace, peak]``     = exp(log(area_loc) + area_log_scale * area_raw)
-        - ``time_shift[trace]``     = shift_scale * time_shift_raw, centred so mean == 0
-        - ``time_stretch[trace]``   = exp(stretch_scale * time_stretch_raw), centred so mean(log) == 0
-        - ``mu_warped[trace, peak]``    = (mu[peak] - time_shift[trace]) / time_stretch[trace]
-        - ``width_warped[trace, peak]`` = width[peak] / time_stretch[trace]
-        - ``baseline_intercept[trace]`` = analytic conditional-mean intercept (not sampled)
-        - ``baseline_slope[trace]``     = analytic conditional-mean slope (not sampled)
-        - ``noise[trace]``          = exp(log(baseline_noise) + log_noise_scale * noise_raw)
+    Deterministic sites (always present):
+        - ``mu[sn_peak]``              = mu_loc + mu_scale * mu_raw
+        - ``width[sn_peak]``           = exp(log(width_loc) + width_log_scale * width_raw)
+        - ``skew[sn_peak]``            = SKEW_EFF_MAX * tanh(
+          (skew_loc + skew_scale * skew_raw) / SKEW_EFF_MAX)
+        - ``area[trace, peak]``        = exp(log(area_loc) + area_log_scale * area_raw)  (all peaks)
+        - ``time_shift[trace]``        = shift_scale * time_shift_raw, centred so mean == 0
+        - ``time_stretch[trace]``      = exp(stretch_scale * time_stretch_raw), centred so mean(log) == 0
+        - ``mu_warped[trace, sn_peak]``    = (mu[peak] - time_shift[trace]) / time_stretch[trace]
+        - ``width_warped[trace, sn_peak]`` = width[peak] / time_stretch[trace]
+        - ``baseline_intercept[trace]``    = analytic conditional-mean intercept (not sampled)
+        - ``baseline_slope[trace]``        = analytic conditional-mean slope (not sampled)
+        - ``noise[trace]``             = exp(log(baseline_noise) + log_noise_scale * noise_raw)
+
+    Conditional deterministic sites (present only when EMG peaks exist):
+        - ``emg_mu[emg_peak]``    = EMG Gaussian centre
+        - ``emg_sigma[emg_peak]`` = EMG Gaussian width
+        - ``emg_tau[emg_peak]``   = EMG tail-decay constant
     """
     block = _latent_block(dataset, priors_list, config)
     peak_contrib = block["peak_contrib"]
@@ -276,7 +364,7 @@ def model(
 
 def predictive_model(
     dataset: PreparedDataset,
-    priors_list: list[SkewNormalPriors],
+    priors_list: list[SkewNormalPriors | EMGPriors],
     config: ModelConfig,
 ) -> None:
     """Generative twin of ``model`` for prior/posterior predictive sampling.
@@ -323,7 +411,7 @@ def predictive_model(
 
 def run_mcmc(
     dataset: PreparedDataset,
-    priors_list: list[SkewNormalPriors],
+    priors_list: list[SkewNormalPriors | EMGPriors],
     config: ModelConfig,
 ) -> arviz.InferenceData:
     """Run NUTS sampling and return an ArviZ InferenceData."""
