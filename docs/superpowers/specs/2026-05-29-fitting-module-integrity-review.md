@@ -274,6 +274,18 @@ baseline slightly over-estimates the true baseline. Compounds (3): the
 empirical-Bayes area prior is biased high. Use signed integration; if
 a non-negativity guard is wanted, apply `max(area, 0)` once at the end.
 
+**✅ RESOLVED (2026-05-29, fix-fit).** Quantified the bias first: on a
+pure-noise window the clipped integral read 3.96 vs 0.13 signed — exactly
+the predicted `sigma/sqrt(2pi)*window_width` rectified-noise bias — and a
+real peak was +5.2% high. `_trapezoid_in_window` (which feeds the LogNormal
+area-prior median `area_loc_per_trace`) now integrates **signed**;
+positivity of the prior median is already guaranteed downstream by the
+noise-floor + `1e-12` floor (item 3), so a window whose signed integral is
+negative correctly falls back to the noise floor rather than inventing
+spurious area. Also removed the **dead** `WindowFeatures.area` field (the
+second clip site, [`priors.py:249`]) — it was computed but read nowhere.
+Regression test: `tests/unit/fitting/test_area_integration.py`.
+
 ### 8. `dt_global` can be NaN and silently propagates
 
 [`preprocessing.py:89`](../../../chromhandler/fitting/preprocessing.py).

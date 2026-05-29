@@ -145,7 +145,6 @@ class WindowFeatures:
     mu: float
     width: float
     skew: float
-    area: float
     apex_height: float
 
 
@@ -246,9 +245,8 @@ def compute_window_features(
     mean_ratio = float(np.mean(ratios))
     mean_fwhm = float(np.mean(hwhm_sums))
     mu, width, skew = cp_from_peak_features(apex, mean_fwhm, mean_ratio)
-    area = float(np.trapezoid(np.maximum(s, 0.0), t))
     return WindowFeatures(
-        mu=mu, width=width, skew=skew, area=area, apex_height=apex_height,
+        mu=mu, width=width, skew=skew, apex_height=apex_height,
     )
 
 
@@ -278,10 +276,12 @@ def _trapezoid_in_window(
     )
     if mask.sum() < 2:
         return 0.0
-    return float(np.trapezoid(
-        np.maximum(signal_baseline_subtracted[mask], 0.0),
-        time[mask],
-    ))
+    # Signed integration. Clipping with max(.,0) before integrating rectifies
+    # the noise and biases the area up by ~sigma/sqrt(2pi)*window_width
+    # (spurious for weak/absent windows, ~few % for real peaks). Positivity
+    # of the prior median is handled downstream by the noise-floor, so the
+    # integral itself must stay signed.
+    return float(np.trapezoid(signal_baseline_subtracted[mask], time[mask]))
 
 
 def _skew_bounds(config: PriorConfig) -> tuple[float, float]:
