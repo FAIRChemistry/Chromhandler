@@ -59,8 +59,14 @@ def marginal_baseline_loglik(
     the peak-subtracted residual (up to a parameter-free additive constant),
     and the hats are the Rao-Blackwellised conditional-mean baseline in
     ORIGINAL (uncentred) coordinates.
+
+    Float32-safe: uses the direct-residual form (form residuals after
+    removing the fitted line, then sum squares) rather than the
+    large-minus-large projection identity ``rss - Sr²/n - Str²/Stt``.
+    The direct form keeps operands at noise² magnitude and avoids
+    catastrophic cancellation when the baseline is large relative to noise.
     """
-    w = valid_mask.astype(jnp.float64)
+    w = valid_mask.astype(time.dtype)
     n = jnp.sum(w, axis=1)
     n_safe = jnp.maximum(n, 1.0)
     t_clean = jnp.where(valid_mask, time, 0.0)
@@ -70,16 +76,22 @@ def marginal_baseline_loglik(
     Stt_safe = jnp.maximum(Stt, 1e-30)
 
     r = jnp.where(valid_mask, jnp.nan_to_num(signal) - peak_contrib, 0.0)
-    Sr = jnp.sum(r, axis=1)
-    Str = jnp.sum(tc * r, axis=1)
-    rss = jnp.sum(r * r, axis=1)
-    rss_perp = rss - Sr**2 / n_safe - Str**2 / Stt_safe
+    a_hat = jnp.sum(r, axis=1) / n_safe            # centred-coord intercept
+    b_hat = jnp.sum(tc * r, axis=1) / Stt_safe     # slope
+
+    # Direct-residual form: form the residual AFTER removing the fitted line
+    # (magnitude ~noise), then sum squares. Avoids the large-minus-large
+    # cancellation of rss - Sr^2/n - Str^2/Stt, so it stays accurate in float32.
+    resid = jnp.where(valid_mask, r - (a_hat[:, None] + b_hat[:, None] * tc), 0.0)
+    rss_perp = jnp.sum(resid * resid, axis=1)
 
     sigma2 = noise**2
-    loglik = -0.5 * (n - 2.0) * jnp.log(2.0 * jnp.pi * sigma2) - rss_perp / (2.0 * sigma2)
+    dof = jnp.maximum(n - 2.0, 0.0)
+    loglik = -0.5 * dof * jnp.log(2.0 * jnp.pi * sigma2) - rss_perp / (2.0 * sigma2)
+    loglik = jnp.where(n >= 2.0, loglik, 0.0)
 
-    slope_hat = Str / Stt_safe
-    intercept_hat = Sr / n_safe - slope_hat * t_mean
+    slope_hat = b_hat
+    intercept_hat = a_hat - slope_hat * t_mean
     return loglik, intercept_hat, slope_hat
 
 
