@@ -9,7 +9,7 @@ Builds one :class:`SkewNormalPriors` per :class:`PeakAnnotation` from a
    window is at least :attr:`PriorConfig.signal_threshold` (absolute, no
    baseline subtraction) AND the relative-height gate passes.
 3. Aggregation across supported traces yields shared shape priors
-   ``(mu_loc, mu_scale, log_width_*, skew_*)``.
+   ``(mu_loc, mu_scale, width_loc, width_log_scale, skew_*)``.
 4. Per-trace **linear-space** area priors:
    - Supported: ``TruncatedNormal(area_measured, cv * area_measured, low=0)``.
    - Unsupported: ``TruncatedNormal(0, noise * window_width * multiplier, low=0)``
@@ -87,32 +87,33 @@ class SkewNormalPriors:
 
     Each field maps to exactly one NumPyro sample site in :mod:`model`:
 
-    - ``mu ~ TruncatedNormal(mu_loc, mu_scale, mu_low, mu_high)``
-    - ``width ~ LogNormal(log_width_loc, log_width_scale)`` truncated to
-      ``[exp(log_width_low), exp(log_width_high)]``. Stored in log-space
-      because that is the natural parameterisation of the hyperprior;
-      the model exposes ``width`` (natural space) as the public site.
-    - ``skew ~ TruncatedNormal(skew_loc, skew_scale,
-      -GAMMA1_MAX*frac, +GAMMA1_MAX*frac)`` — bounded by the skew-normal
-      family's max attainable skewness coefficient.
-    - ``area[trace] ~ TruncatedNormal(area_loc_per_trace[trace],
-      area_scale_per_trace[trace], low=0)`` — half-normal-at-zero for
-      unsupported traces.
+    - ``mu ~ Normal(mu_loc, mu_scale)`` — unbounded; the likelihood + a
+      positive area prior identify it.
+    - ``width ~ LogNormal``: parameterised by ``width_loc`` (natural-space
+      median, in time units) and ``width_log_scale`` (sigma of the
+      underlying Normal on the log axis). The model converts back via
+      ``log(width_loc)`` at fit time. ``width_log_scale`` stays on the
+      log axis because the LogNormal has no 1-number natural-space scale.
+    - ``skew ~ Normal(skew_loc, skew_scale)`` passed through a ``tanh``
+      bijector bounded by ``GAMMA1_MAX`` (the skew-normal family's max
+      attainable skewness coefficient). Bound is soft, not truncated.
+    - ``area[trace] ~ Normal(area_loc_per_trace, area_scale_per_trace)``
+      passed through ``softplus`` for positivity — half-normal-at-zero
+      for unsupported traces.
 
     ``mu`` is interpreted by ``density_cp`` as the **mean** (CP form); the
-    cp→dp bijection inside ``density_cp`` performs the canonical
-    ξ-transformation, so users do not need to reason about ξ directly.
+    cp -> dp bijection inside ``density_cp`` performs the canonical
+    xi-transformation, so users do not need to reason about xi directly.
     """
 
     mu_loc: float
     mu_scale: float
-    mu_low: float
-    mu_high: float
 
-    log_width_loc: float
-    log_width_scale: float
-    log_width_low: float
-    log_width_high: float
+    width_loc: float
+    """Natural-space median of the LogNormal prior on ``width`` (time units)."""
+    width_log_scale: float
+    """Sigma of the underlying Normal on the log axis. Stays log-axis
+    because a LogNormal has no clean 1-number natural-space scale."""
 
     skew_loc: float
     skew_scale: float
@@ -268,17 +269,6 @@ def _trapezoid_in_window(
     ))
 
 
-def _log_width_bounds(
-    window_low: float,
-    window_high: float,
-    dt: float,
-    config: PriorConfig,
-) -> tuple[float, float]:
-    width_low = config.width_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA
-    width_high = (window_high - window_low) / config.width_high_window_fraction
-    return float(np.log(width_low)), float(np.log(width_high))
-
-
 def _skew_bounds(config: PriorConfig) -> tuple[float, float]:
     bound = config.skew_bound_fraction * GAMMA1_MAX
     return float(-bound), float(bound)
@@ -295,7 +285,11 @@ def _aggregate_shape_priors(
 
     Returns
     -------
-    (mu_loc, mu_scale, log_width_loc, log_width_scale, skew_loc, skew_scale)
+    (mu_loc, mu_scale, width_loc, width_log_scale, skew_loc, skew_scale)
+
+    ``width_loc`` is the natural-space median of the LogNormal prior on
+    width (geometric mean of measured widths). ``width_log_scale`` is the
+    sigma of the underlying Normal on the log axis.
     """
     n = len(features)
     if n == 0:
@@ -303,16 +297,15 @@ def _aggregate_shape_priors(
         mu_loc = 0.5 * (window_low + window_high)
         mu_scale = (window_high - window_low) / 4.0
         # Geometric width: span / 6 (~ +/- 3 std-dev across the window).
-        width_fallback = max(
+        width_loc = max(
             (window_high - window_low) / 6.0,
             config.width_low_n_points_per_fwhm * dt * _FWHM_TO_SIGMA,
         )
-        log_width_loc = float(np.log(width_fallback))
-        log_width_scale = config.log_width_scale_n1
+        width_log_scale = config.log_width_scale_n1
         skew_loc = 0.0
         skew_scale = config.skew_scale_n1
         return (
-            mu_loc, mu_scale, log_width_loc, log_width_scale,
+            mu_loc, mu_scale, width_loc, width_log_scale,
             skew_loc, skew_scale,
         )
 
@@ -325,11 +318,12 @@ def _aggregate_shape_priors(
     mu_loc = float(np.mean(mus))
     mu_scale = float(max(np.std(mus, ddof=0), mu_floor))
 
-    log_width_loc = float(np.mean(log_widths))
+    # Geometric mean of measured widths = exp(mean(log_widths)) = LogNormal median.
+    width_loc = float(np.exp(np.mean(log_widths)))
     if n == 1:
-        log_width_scale = config.log_width_scale_n1
+        width_log_scale = config.log_width_scale_n1
     else:
-        log_width_scale = float(max(
+        width_log_scale = float(max(
             np.std(log_widths, ddof=0),
             config.log_width_scale_n1 / float(np.sqrt(n)),
         ))
@@ -346,7 +340,7 @@ def _aggregate_shape_priors(
     skew_scale = min(skew_scale, skew_bound_high)
 
     return (
-        mu_loc, mu_scale, log_width_loc, log_width_scale,
+        mu_loc, mu_scale, width_loc, width_log_scale,
         skew_loc, skew_scale,
     )
 
@@ -401,13 +395,10 @@ def _build_one_peak(
 
     # --- Stage 3: aggregate shape priors ---------------------------------
     (
-        mu_loc, mu_scale, log_width_loc, log_width_scale,
+        mu_loc, mu_scale, width_loc, width_log_scale,
         skew_loc, skew_scale,
     ) = _aggregate_shape_priors(
         supported_features, ann.rt_min, ann.rt_max, dataset.dt_global, config,
-    )
-    log_width_low, log_width_high = _log_width_bounds(
-        ann.rt_min, ann.rt_max, dataset.dt_global, config,
     )
 
     # --- Stage 4: per-trace area priors ----------------------------------
@@ -426,9 +417,7 @@ def _build_one_peak(
 
     return SkewNormalPriors(
         mu_loc=mu_loc, mu_scale=mu_scale,
-        mu_low=ann.rt_min, mu_high=ann.rt_max,
-        log_width_loc=log_width_loc, log_width_scale=log_width_scale,
-        log_width_low=log_width_low, log_width_high=log_width_high,
+        width_loc=width_loc, width_log_scale=width_log_scale,
         skew_loc=skew_loc, skew_scale=skew_scale,
         area_loc_per_trace=area_loc_per_trace,
         area_scale_per_trace=area_scale_per_trace,
@@ -458,33 +447,46 @@ def summarise_priors(
 ) -> str:
     """Pretty-printed multi-line table for inspection."""
     skew_low, skew_high = _skew_bounds(config)
+    # All values shown in natural space. The "p16 / p84" columns are
+    # the ±1-sigma quantiles of each prior, derived per distribution:
+    #   Normal:           loc -/+ scale
+    #   LogNormal:        loc * exp(-/+ log_scale)   (loc is the median)
+    #   Normal + tanh:    loc -/+ scale  (the tanh distortion is mild
+    #                     unless |loc|+|scale| approaches GAMMA1_MAX)
     header = (
-        f"{'peak':>4} {'site':<14} {'distribution':<16} "
-        f"{'loc':>10} {'scale':>10} {'low':>10} {'high':>10}"
+        f"{'peak':>4} {'site':<14} {'distribution':<18} "
+        f"{'loc':>10} {'scale':>10} {'p16':>10} {'p84':>10}"
     )
     lines = [header, "-" * len(header)]
     for i, p in enumerate(priors):
+        # mu: Normal
         lines.append(
-            f"{i:>4} {'mu':<14} {'TruncatedNormal':<16} "
+            f"{i:>4} {'mu':<14} {'Normal':<18} "
             f"{p.mu_loc:>10.4g} {p.mu_scale:>10.4g} "
-            f"{p.mu_low:>10.4g} {p.mu_high:>10.4g}"
+            f"{p.mu_loc - p.mu_scale:>10.4g} {p.mu_loc + p.mu_scale:>10.4g}"
         )
+        # width: LogNormal (loc = natural-space median, scale = log-axis sigma)
+        w_p16 = p.width_loc * float(np.exp(-p.width_log_scale))
+        w_p84 = p.width_loc * float(np.exp(+p.width_log_scale))
         lines.append(
-            f"{i:>4} {'log_width':<14} {'TruncatedNormal':<16} "
-            f"{p.log_width_loc:>10.4g} {p.log_width_scale:>10.4g} "
-            f"{p.log_width_low:>10.4g} {p.log_width_high:>10.4g}"
+            f"{i:>4} {'width':<14} {'LogNormal':<18} "
+            f"{p.width_loc:>10.4g} {p.width_log_scale:>10.4g} "
+            f"{w_p16:>10.4g} {w_p84:>10.4g}"
         )
+        # skew: Normal + tanh bound (soft)
         lines.append(
-            f"{i:>4} {'skew':<14} {'TruncatedNormal':<16} "
+            f"{i:>4} {'skew':<14} {'Normal+tanh':<18} "
             f"{p.skew_loc:>10.4g} {p.skew_scale:>10.4g} "
-            f"{skew_low:>10.4g} {skew_high:>10.4g}"
+            f"{p.skew_loc - p.skew_scale:>10.4g} {p.skew_loc + p.skew_scale:>10.4g}"
         )
         n_supp = int(np.sum(p.has_support_per_trace))
         n_total = p.has_support_per_trace.size
         mean_area = float(np.mean(p.area_loc_per_trace))
         lines.append(
-            f"{i:>4} {'area (mean)':<14} {'TruncNormal':<16} "
-            f"{mean_area:>10.4g} {'-':>10} {0.0:>10.4g} {'-':>10}"
+            f"{i:>4} {'area (mean)':<14} {'Normal+softplus':<18} "
+            f"{mean_area:>10.4g} {'-':>10} {'-':>10} {'-':>10}"
             f"  [supported {n_supp}/{n_total}]"
         )
+    skew_note = f"  (skew tanh bound: [{skew_low:.4g}, {skew_high:.4g}])"
+    lines.append(skew_note)
     return "\n".join(lines)

@@ -188,10 +188,10 @@ class FitResult:
         )
 
         for peak_idx, p in enumerate(priors_list):
-            width_loc = float(np.exp(p.log_width_loc))
-            t_dense = np.linspace(p.mu_low, p.mu_high, 500)
+            ann = dataset.peak_annotations[peak_idx]
+            t_dense = np.linspace(ann.rt_min, ann.rt_max, 500)
             _mu = np.asarray(p.mu_loc)
-            _width = np.asarray(width_loc)
+            _width = np.asarray(p.width_loc)
             _skew = np.asarray(p.skew_loc)
             sn_unit = np.asarray(density_cp(t_dense, _mu, _width, _skew))  # type: ignore[arg-type]
             for tr in range(n_trace):
@@ -199,7 +199,7 @@ class FitResult:
                 t = dataset.time[tr]
                 s = dataset.signal[tr]
                 bs = s - (dataset.baseline_intercept[tr] + dataset.baseline_slope[tr] * t)
-                mask = ((t >= p.mu_low) & (t <= p.mu_high) & np.isfinite(bs))
+                mask = ((t >= ann.rt_min) & (t <= ann.rt_max) & np.isfinite(bs))
                 ax.plot(t[mask], bs[mask], color="C0", lw=1.0, label="data")
                 if p.has_support_per_trace[tr]:
                     area_prior = float(p.area_loc_per_trace[tr])

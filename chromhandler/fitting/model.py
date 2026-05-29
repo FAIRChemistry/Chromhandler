@@ -133,7 +133,7 @@ def model(
 
     Deterministic sites:
         - ``mu[peak]``              = mu_loc + mu_scale * mu_raw
-        - ``width[peak]``           = exp(log_width_loc + log_width_scale * width_raw)
+        - ``width[peak]``           = exp(log(width_loc) + width_log_scale * width_raw)
         - ``skew[peak]``            = GAMMA1_MAX * tanh((skew_loc + skew_scale * skew_raw) / GAMMA1_MAX)
         - ``area[trace, peak]``     = softplus(area_loc + area_scale * area_raw)
         - ``time_shift[trace]``     = shift_scale * time_shift_raw, centred so mean == 0
@@ -156,13 +156,16 @@ def model(
     # width: sampled LogNormal (non-centred in log-space), exposed in
     # natural space. The log-space parameterisation is implementation,
     # not interface — downstream code reads ``width`` directly.
-    log_width_loc = jnp.asarray([p.log_width_loc for p in priors_list])
-    log_width_scale = jnp.asarray([p.log_width_scale for p in priors_list])
+    # width: LogNormal in natural space. Storage is the natural-space
+    # median (width_loc) and the log-axis sigma (width_log_scale); we
+    # convert to log here at the one place that consumes them.
+    log_width_loc = jnp.log(jnp.asarray([p.width_loc for p in priors_list]))
+    width_log_scale = jnp.asarray([p.width_log_scale for p in priors_list])
     width_raw = numpyro.sample(
         "width_raw", dist.Normal(jnp.zeros(n_peak), 1.0),
     )
     width = numpyro.deterministic(
-        "width", jnp.exp(log_width_loc + log_width_scale * width_raw),
+        "width", jnp.exp(log_width_loc + width_log_scale * width_raw),
     )
 
     # skew: real physical bound |skew| < GAMMA1_MAX (skew-normal math).
