@@ -142,14 +142,27 @@ def diagnostics(idata: arviz.InferenceData) -> dict[str, Any]:
             "fit_healthy": bool,
         }
     """
-    summary = arviz.summary(idata, kind="diagnostics")
-    r_hat = summary["r_hat"]
-    ess_bulk = summary["ess_bulk"]
+    import pandas as pd
 
-    r_hat_max = float(r_hat.max())
-    r_hat_max_param = str(r_hat.idxmax())
-    ess_min_bulk = float(ess_bulk.min())
-    ess_min_param = str(ess_bulk.idxmin())
+    summary = arviz.summary(idata, kind="diagnostics")
+    # ArviZ 1.x returns an object-dtype column mixing float-like strings for
+    # normal variables with a non-numeric entry for CONSTANT variables (e.g.
+    # the sum-to-zero warp on a single-trace fit makes time_shift/time_stretch
+    # identically 0/1). Coerce to numeric so degenerate entries become NaN and
+    # are skipped, instead of `str >= float` raising in .max()/.idxmax().
+    r_hat = pd.to_numeric(summary["r_hat"], errors="coerce")
+    ess_bulk = pd.to_numeric(summary["ess_bulk"], errors="coerce")
+
+    if bool(r_hat.notna().any()):
+        r_hat_max = float(r_hat.max())
+        r_hat_max_param = str(r_hat.idxmax())
+    else:
+        r_hat_max, r_hat_max_param = float("nan"), "n/a"
+    if bool(ess_bulk.notna().any()):
+        ess_min_bulk = float(ess_bulk.min())
+        ess_min_param = str(ess_bulk.idxmin())
+    else:
+        ess_min_bulk, ess_min_param = float("nan"), "n/a"
 
     n_divergent = 0
     if hasattr(idata, "sample_stats") and "diverging" in idata.sample_stats:  # type: ignore[attr-defined]

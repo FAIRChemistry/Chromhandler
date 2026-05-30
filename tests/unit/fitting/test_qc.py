@@ -71,3 +71,22 @@ def test_plot_qc_overview_returns_figure():
 
     fig = plot_qc_overview(synthetic_idata())
     assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_diagnostics_robust_to_constant_variables():
+    """Single-trace fits make time_shift/time_stretch constant; arviz renders
+    their r_hat as a non-numeric entry in an object column. diagnostics() must
+    coerce + skip those rather than raise on str-vs-float comparison."""
+    from chromhandler.fitting.posterior import diagnostics
+    rng = np.random.default_rng(0)
+    post = {
+        "emg_tau": rng.normal(0.1, 0.01, (2, 200, 1)),
+        "area": rng.normal(1e7, 1e5, (2, 200, 1, 1)),
+        "time_shift": np.zeros((2, 200, 1)),       # constant
+        "time_stretch": np.ones((2, 200, 1)),       # constant
+    }
+    idata = az.from_dict({"posterior": post,
+                          "sample_stats": {"diverging": np.zeros((2, 200), bool)}})
+    d = diagnostics(idata)  # must not raise
+    assert np.isfinite(d["r_hat_max"]) and np.isfinite(d["ess_min_bulk"])
+    assert isinstance(d["fit_healthy"], bool)
