@@ -619,7 +619,7 @@ def build_priors(
 
 
 def summarise_priors(
-    priors: list[SkewNormalPriors],
+    priors: list[SkewNormalPriors | EMGPriors],
     config: PriorConfig,
 ) -> str:
     """Pretty-printed multi-line table for inspection."""
@@ -636,26 +636,44 @@ def summarise_priors(
     )
     lines = [header, "-" * len(header)]
     for i, p in enumerate(priors):
-        # mu: Normal
-        lines.append(
-            f"{i:>4} {'mu':<14} {'Normal':<18} "
-            f"{p.mu_loc:>10.4g} {p.mu_scale:>10.4g} "
-            f"{p.mu_loc - p.mu_scale:>10.4g} {p.mu_loc + p.mu_scale:>10.4g}"
-        )
-        # width: LogNormal (loc = natural-space median, scale = log-axis sigma)
-        w_p16 = p.width_loc * float(np.exp(-p.width_log_scale))
-        w_p84 = p.width_loc * float(np.exp(+p.width_log_scale))
-        lines.append(
-            f"{i:>4} {'width':<14} {'LogNormal':<18} "
-            f"{p.width_loc:>10.4g} {p.width_log_scale:>10.4g} "
-            f"{w_p16:>10.4g} {w_p84:>10.4g}"
-        )
-        # skew: Normal + tanh bound (soft)
-        lines.append(
-            f"{i:>4} {'skew':<14} {'Normal+tanh':<18} "
-            f"{p.skew_loc:>10.4g} {p.skew_scale:>10.4g} "
-            f"{p.skew_loc - p.skew_scale:>10.4g} {p.skew_loc + p.skew_scale:>10.4g}"
-        )
+        if isinstance(p, EMGPriors):
+            # emg_mu: Normal; emg_sigma, emg_tau: LogNormal (median +/- log-sigma)
+            lines.append(
+                f"{i:>4} {'emg_mu':<14} {'Normal':<18} "
+                f"{p.emg_mu_loc:>10.4g} {p.emg_mu_scale:>10.4g} "
+                f"{p.emg_mu_loc - p.emg_mu_scale:>10.4g} {p.emg_mu_loc + p.emg_mu_scale:>10.4g}"
+            )
+            for name, loc, ls in (
+                ("emg_sigma", p.emg_sigma_loc, p.emg_sigma_log_scale),
+                ("emg_tau", p.emg_tau_loc, p.emg_tau_log_scale),
+            ):
+                p16 = loc * float(np.exp(-ls))
+                p84 = loc * float(np.exp(+ls))
+                lines.append(
+                    f"{i:>4} {name:<14} {'LogNormal':<18} "
+                    f"{loc:>10.4g} {ls:>10.4g} {p16:>10.4g} {p84:>10.4g}"
+                )
+        else:
+            # mu: Normal
+            lines.append(
+                f"{i:>4} {'mu':<14} {'Normal':<18} "
+                f"{p.mu_loc:>10.4g} {p.mu_scale:>10.4g} "
+                f"{p.mu_loc - p.mu_scale:>10.4g} {p.mu_loc + p.mu_scale:>10.4g}"
+            )
+            # width: LogNormal (loc = natural-space median, scale = log-axis sigma)
+            w_p16 = p.width_loc * float(np.exp(-p.width_log_scale))
+            w_p84 = p.width_loc * float(np.exp(+p.width_log_scale))
+            lines.append(
+                f"{i:>4} {'width':<14} {'LogNormal':<18} "
+                f"{p.width_loc:>10.4g} {p.width_log_scale:>10.4g} "
+                f"{w_p16:>10.4g} {w_p84:>10.4g}"
+            )
+            # skew: Normal + tanh bound (soft)
+            lines.append(
+                f"{i:>4} {'skew':<14} {'Normal+tanh':<18} "
+                f"{p.skew_loc:>10.4g} {p.skew_scale:>10.4g} "
+                f"{p.skew_loc - p.skew_scale:>10.4g} {p.skew_loc + p.skew_scale:>10.4g}"
+            )
         n_supp = int(np.sum(p.has_support_per_trace))
         n_total = p.has_support_per_trace.size
         # LogNormal: geometric-mean median across traces +/- 1 log-sigma.

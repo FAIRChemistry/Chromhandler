@@ -54,7 +54,7 @@ def plot_area_forest(idata: arviz.InferenceData) -> matplotlib.figure.Figure:
 
 def plot_convergence(
     idata: arviz.InferenceData,
-    var_names: tuple[str, ...] = ("mu", "width", "skew"),
+    var_names: tuple[str, ...] = ("mu", "width", "skew", "emg_mu", "emg_sigma", "emg_tau"),
 ) -> matplotlib.figure.Figure:
     """Rank plots for the shared per-peak shape parameters.
 
@@ -73,6 +73,7 @@ def plot_convergence(
 # Map a posterior variable name to its QC role group.
 _GROUP = {
     "mu": "shape", "width": "shape", "skew": "shape",
+    "emg_mu": "shape", "emg_sigma": "shape", "emg_tau": "shape",
     "area": "area",
     "time_shift": "warp", "time_stretch": "warp",
     "noise": "noise",

@@ -187,6 +187,8 @@ class FitResult:
         """
         import matplotlib.pyplot as plt
 
+        from chromhandler.fitting.emg import density_emg
+        from chromhandler.fitting.priors import EMGPriors
         from chromhandler.fitting.skew_normal import density_cp
 
         dataset = self.dataset
@@ -203,10 +205,16 @@ class FitResult:
         for peak_idx, p in enumerate(priors_list):
             ann = dataset.peak_annotations[peak_idx]
             t_dense = np.linspace(ann.rt_min, ann.rt_max, 500)
-            _mu = np.asarray(p.mu_loc)
-            _width = np.asarray(p.width_loc)
-            _skew = np.asarray(p.skew_loc)
-            sn_unit = np.asarray(density_cp(t_dense, _mu, _width, _skew))  # type: ignore[arg-type]
+            if isinstance(p, EMGPriors):
+                unit = np.asarray(density_emg(  # type: ignore[arg-type]
+                    t_dense, np.asarray(p.emg_mu_loc),
+                    np.asarray(p.emg_sigma_loc), np.asarray(p.emg_tau_loc),
+                ))
+            else:
+                unit = np.asarray(density_cp(  # type: ignore[arg-type]
+                    t_dense, np.asarray(p.mu_loc),
+                    np.asarray(p.width_loc), np.asarray(p.skew_loc),
+                ))
             for tr in range(n_trace):
                 ax = axes[peak_idx, tr]
                 t = dataset.time[tr]
@@ -216,7 +224,7 @@ class FitResult:
                 ax.plot(t[mask], bs[mask], color="C0", lw=1.0, label="data")
                 if p.has_support_per_trace[tr]:
                     area_prior = float(p.area_loc_per_trace[tr])
-                    ax.plot(t_dense, area_prior * sn_unit, "k--", lw=1.2, label="prior loc")
+                    ax.plot(t_dense, area_prior * unit, "k--", lw=1.2, label="prior loc")
                 else:
                     ax.text(
                         0.02, 0.95, "no support", transform=ax.transAxes,
