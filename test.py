@@ -32,7 +32,7 @@ def main() -> None:
     handler.create_molecule(id="third", pubchem_cid=0, name="third")
 
     peak_anns = [
-        PeakAnnotation(molecule_id="other", rt_min=2.55, rt_max=2.80, mode="single"),
+        PeakAnnotation(molecule_id="other", rt_min=2.55, rt_max=2.80, mode="single", peak_model="emg"),
         PeakAnnotation(molecule_id="SIH", rt_min=2.80, rt_max=3.15, mode="single"),
         PeakAnnotation(molecule_id="third", rt_min=3.15, rt_max=3.45, mode="single"),
     ]
@@ -77,8 +77,10 @@ def main() -> None:
 
     print("\n=== QC report ===")
     qc = result.qc_report()
-    print(f"  fit_healthy={qc['fit_healthy']} n_divergent={qc['n_divergent']} "
-          f"bfmi_min={qc['bfmi_min']:.2f} rhat_max={qc['rhat_max']:.3f} ess_min={qc['ess_min']:.0f}")
+    print(
+        f"  fit_healthy={qc['fit_healthy']} n_divergent={qc['n_divergent']} "
+        f"bfmi_min={qc['bfmi_min']:.2f} rhat_max={qc['rhat_max']:.3f} ess_min={qc['ess_min']:.0f}"
+    )
     for grp, d in sorted(qc["groups"].items()):
         print(f"    {grp:<9} rhat_max={d['rhat_max']:.3f}  ess_min={d['ess_min']:.0f}")
 
