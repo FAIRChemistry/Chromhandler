@@ -27,11 +27,20 @@ def handler() -> Handler:
     )
 
 
+@pytest.mark.filterwarnings("ignore:FigureCanvasAgg is non-interactive.*:UserWarning")
 def test_visualize_runs(handler: Handler) -> None:
     handler.visualize()
     plt.close("all")
 
 
+@pytest.mark.filterwarnings("ignore:FigureCanvasAgg is non-interactive.*:UserWarning")
 def test_visualize_overlay_runs(handler: Handler) -> None:
     handler.visualize(overlay=True)
     plt.close("all")
+
+
+def test_visualize_save_path(handler: Handler, tmp_path: Path) -> None:
+    out_file = tmp_path / "out.png"
+    handler.visualize(save_path=str(out_file))
+    plt.close("all")
+    assert out_file.exists()
