@@ -143,6 +143,11 @@ As an alternative to the ASM format, `chromhandler` supports the import of chrom
 
     === "Agilent rdl formatted *.TXT"
 
+        The example below is the "Cross Sequence Summary Report" template. The reader
+        also handles the older "Sequence Summary Report" template, which has no left
+        margin and narrower columns; a value the report wraps onto a second line is
+        rejoined before parsing either way.
+
         ```
         ┌──────────────────────────────────────────────────────────────────────────────┐
         │Cross Sequence Summary Report                                                 │

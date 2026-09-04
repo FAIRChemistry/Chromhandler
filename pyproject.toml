@@ -55,7 +55,7 @@ warn_return_any = true
 
 [tool.pytest.ini_options]
 markers = [
-  "readers: marks tests as slow (deselect with '-m \"not slow\"')",
+  "readers: marks tests as slow (deselect with '-m \"not readers\"')",
   "core: marks tests as core (deselect with '-m \"not core\"')",
 ]
 

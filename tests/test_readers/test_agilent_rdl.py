@@ -5,6 +5,10 @@ Four report files across two template revisions:
 - ``docs/usage/data/agilent_rdl/`` — the two shipped examples, rev 2
   ("Cross Sequence Summary Report", two-space left margin). These parsed
   correctly before this reader was rewritten and must keep parsing identically.
+  The two files are byte-identical after CRLF normalisation (one is CRLF, the
+  other LF; ``M3_102_min.txt`` even carries ``Sample Name │M2_MJ_100_min``), so
+  ``test_shipped_example_data_is_unchanged``, parametrised over both, is one
+  regression case plus a line-ending variant rather than two independent reports.
 - ``tests/test_readers/data/agilent_rdl/ATP_1_mM.txt`` — rev 2, but with a
   retention time the report wrapped across two physical lines.
 - ``tests/test_readers/data/agilent_rdl/GATP_1.00_mM.txt`` — rev 1
@@ -14,6 +18,7 @@ Four report files across two template revisions:
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from chromhandler.model import Measurement
 from chromhandler.readers.agilent_rdl import AgilentRDLReader
@@ -91,7 +96,15 @@ def test_wrapped_report_first_peak() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("report", [REV1, REV2_WRAPPED])
+@pytest.mark.parametrize(
+    "report",
+    [
+        REV1,
+        REV2_WRAPPED,
+        SHIPPED / "M2_MJ_100_min.txt",
+        SHIPPED / "M3_102_min.txt",
+    ],
+)
 def test_wavelength_is_read_from_the_signal_box(report: Path) -> None:
     assert read_one(report).chromatograms[0].wavelength == 254
 
@@ -235,3 +248,75 @@ def test_ragged_row_missing_optional_fields_are_none() -> None:
     assert peak.area == pytest.approx(20.0)
     assert peak.amplitude is None
     assert peak.percent_area is None
+
+
+# ---------------------------------------------------------------------------
+# Fix wave: a table split across a page break must not lose the later pages
+# ---------------------------------------------------------------------------
+
+# One Signal: box, a two-row table, a footer box ("Page 1 of 2", no header, no
+# Signal: box), then a second table box continuing the same table with one more
+# row and no new Signal: box. All three peaks must come back, in order.
+_TWO_PAGE_REPORT = """\
+┌───────┬──────────────────────────────┐
+│Signal:│DAD1A,Sig=254,4  Ref=360,100 │
+└───────┴──────────────────────────────┘
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 2.744│BB  │ 0.4746│ 37.2216│  4.6769│ 0.4221│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 5.000│BB  │ 0.5000│ 10.0000│  1.0000│ 1.0000│
+└──────┴────┴───────┴────────┴────────┴───────┘
+┌────────────────┐
+│  Page 1 of 2   │
+└────────────────┘
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 9.001│BB  │ 0.5123│ 88.0000│  6.0000│ 1.0000│
+└──────┴────┴───────┴────────┴────────┴───────┘
+"""
+
+
+def test_peak_table_continues_across_a_page_break() -> None:
+    lines = _TWO_PAGE_REPORT.splitlines(keepends=True)
+    peaks = AgilentRDLReader.parse_peaks(lines)
+    assert [p.retention_time for p in peaks] == pytest.approx([2.744, 5.000, 9.001])
+
+
+# ---------------------------------------------------------------------------
+# Fix wave: an unrecognised template must warn instead of failing silently
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def caplog(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
+    """Route loguru's messages into pytest's caplog; loguru bypasses stdlib logging."""
+    handler_id = logger.add(caplog.handler, format="{message}")
+    yield caplog
+    logger.remove(handler_id)
+
+
+# Comma decimal marks fail float() on both RT and Area, so no header column
+# resolves to a peak row and the report yields zero peaks.
+_COMMA_DECIMAL_REPORT = """\
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 2,744│BB  │ 0.4746│ 37,2216│  4.6769│ 0.4221│
+└──────┴────┴───────┴────────┴────────┴───────┘
+"""
+
+
+def test_comma_decimal_report_yields_no_peaks_and_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    report = tmp_path / "comma_decimal.txt"
+    report.write_text(_COMMA_DECIMAL_REPORT, encoding="utf-8")
+
+    peaks = read_one(report).chromatograms[0].peaks
+
+    assert peaks == []
+    assert "comma_decimal.txt" in caplog.text
+    assert "no peak table" in caplog.text.lower()

@@ -1,6 +1,8 @@
 import re
 from itertools import zip_longest
 
+from loguru import logger
+
 from chromhandler.model import Chromatogram, Data, Measurement, Peak
 from chromhandler.readers.abstractreader import AbstractReader
 
@@ -16,7 +18,8 @@ def _cells(line: str) -> list[str] | None:
     stripped = line.strip()
     if not stripped.startswith("│"):
         return None
-    return [cell.strip() for cell in stripped.strip("│").split("│")]
+    interior = stripped.removeprefix("│").removesuffix("│")
+    return [cell.strip() for cell in interior.split("│")]
 
 
 def _boxes(lines: list[str]) -> list[list[list[str]]]:
@@ -27,7 +30,10 @@ def _boxes(lines: list[str]) -> list[list[list[str]]]:
     physical lines (``"13."`` then ``"198"``) is rejoined into ``"13.198"``; ragged
     groups are padded rather than truncated. A ``└`` closes the box, which is what
     keeps one peak table's rows from bleeding into the next one's — a report with a
-    table per detector signal would otherwise merge them.
+    table per detector signal would otherwise merge them. Wrapped cells are rejoined
+    with no separator, so a wrapped *text* cell reads as one run-on word (``"Report"``
+    + ``"Templates"`` -> ``"ReportTemplates"``); harmless today because no text column
+    feeds a ``Peak`` field, but worth knowing before reusing this box grammar elsewhere.
     """
     boxes: list[list[list[str]]] = []
     records: list[list[str]] = []
@@ -99,8 +105,15 @@ class AgilentRDLReader(AbstractReader):
         for path_id, path in enumerate(self.file_paths):
             lines = self.read_file(path)
 
+            peaks = self.parse_peaks(lines)
+            if not peaks:
+                logger.warning(
+                    f"No peak table recognized in '{path}'. The report template may "
+                    "be unsupported; this file's chromatogram will have no peaks."
+                )
+
             chromatogram = Chromatogram(
-                peaks=self.parse_peaks(lines),
+                peaks=peaks,
                 wavelength=self.extract_wavelength(lines),
             )
 
@@ -132,20 +145,30 @@ class AgilentRDLReader(AbstractReader):
 
     @staticmethod
     def parse_peaks(lines: list[str]) -> list[Peak]:
-        """Every peak in the report's first peak table.
+        """Every peak in the report's peak table, continued across page breaks.
 
         A record is a peak iff its ``RT`` and ``Area`` cells both parse as floats,
-        which is also what discards the table's trailing ``Sum`` row — it carries no
-        retention time. Only the table's own box is read, so a second table further
-        down the report cannot contribute rows to this one.
+        which is also what discards the table's trailing ``Sum`` row and the report
+        footer — neither carries a retention time.
+
+        A long table is split across pages, each page redrawing the header in its own
+        box, so rows are accumulated across boxes rather than stopping at the first
+        one. A second detector is a different matter: it announces itself with its own
+        ``Signal:`` box, and collection stops there so two detectors' peaks never merge
+        into one chromatogram. A report that repeats its ``Signal:`` box on every page
+        would still stop at page one; none of the templates on hand does that.
         """
+        peaks: list[Peak] = []
         for box in _boxes(lines):
+            if peaks and any(
+                record and record[0].rstrip(":").strip().lower() == "signal"
+                for record in box
+            ):
+                break
             for i, record in enumerate(box):
                 columns = _header_columns(record)
                 if columns is None:
                     continue
-
-                peaks = []
                 for row in box[i + 1 :]:
                     retention_time = _maybe_float(_cell(row, columns, "rt"))
                     area = _maybe_float(_cell(row, columns, "area"))
@@ -161,8 +184,8 @@ class AgilentRDLReader(AbstractReader):
                             percent_area=_maybe_float(_cell(row, columns, "area%")),
                         )
                     )
-                return peaks
-        return []
+                break
+        return peaks
 
     @staticmethod
     def extract_wavelength(lines: list[str]) -> int | None:
@@ -179,5 +202,6 @@ class AgilentRDLReader(AbstractReader):
                     and record[0].rstrip(":").strip().lower() == "signal"
                 ):
                     match = re.search(r"Sig=(\d+)", record[1])
-                    return int(match.group(1)) if match else None
+                    if match:
+                        return int(match.group(1))
         return None
