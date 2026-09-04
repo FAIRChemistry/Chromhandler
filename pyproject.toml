@@ -9,6 +9,9 @@ dependencies = [
   "pydantic>=2,<3",
   "rich>=13.7,<15",
   "loguru>=0.7,<1",
+  "matplotlib>=3.9",
+  "pandas>=2",
+  "requests>=2.31",
 ]
 description = "Tool for processing chromatography data"
 license = { text = "MIT" }
