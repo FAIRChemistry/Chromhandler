@@ -266,7 +266,10 @@ class ShimadzuReader(AbstractReader):
         files = []
         directory = Path(self.dirpath)
 
-        for file_path in directory.glob("*.txt"):
+        # Sort glob result: glob returns filesystem order (arbitrary per OS/filesystem).
+        # When values are passed, they're zipped against this list positionally, so unsorted
+        # paths would bind reaction times to the wrong files (e.g., sample 7 instead of 0).
+        for file_path in sorted(directory.glob("*.txt")):
             if file_path.name.startswith("."):
                 continue
 
