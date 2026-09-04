@@ -28,26 +28,6 @@ class ShimadzuReader(AbstractReader):
         if len(self.file_paths) == 0:
             raise ValueError("No files found. Is the directory empty?")
 
-        # #region agent log
-        import json
-
-        with open("/Users/max/code/aldol_addition/.cursor/debug.log", "a") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "sessionId": "debug-session",
-                        "runId": "post-fix",
-                        "hypothesisId": "A",
-                        "location": "shimadzu.py:32",
-                        "message": "Using file_paths directly (no string sort)",
-                        "data": {"file_paths": self.file_paths, "values": self.values},
-                        "timestamp": __import__("time").time() * 1000,
-                    }
-                )
-                + "\n"
-            )
-        # #endregion
-
         measurements = []
         # Use self.file_paths directly - they are already sorted numerically by abstractreader.py
         for i, file in enumerate(self.file_paths):
@@ -71,31 +51,6 @@ class ShimadzuReader(AbstractReader):
 
             dilution_factor = sample_dict.get("Dilution Factor", 1)
             injection_volume = sample_dict.get("Injection Volume")
-
-            # #region agent log
-            import json
-
-            with open("/Users/max/code/aldol_addition/.cursor/debug.log", "a") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "sessionId": "debug-session",
-                            "runId": "post-fix",
-                            "hypothesisId": "C",
-                            "location": "shimadzu.py:55",
-                            "message": "Mapping file to value",
-                            "data": {
-                                "i": i,
-                                "file": file,
-                                "value": self.values[i],
-                                "all_values": self.values,
-                            },
-                            "timestamp": __import__("time").time() * 1000,
-                        }
-                    )
-                    + "\n"
-                )
-            # #endregion
 
             data = Data(
                 value=self.values[i],
@@ -311,34 +266,14 @@ class ShimadzuReader(AbstractReader):
         files = []
         directory = Path(self.dirpath)
 
-        for file_path in directory.glob("*.txt"):
+        # Sort glob result: glob returns filesystem order (arbitrary per OS/filesystem).
+        # When values are passed, they're zipped against this list positionally, so unsorted
+        # paths would bind reaction times to the wrong files (e.g., sample 7 instead of 0).
+        for file_path in sorted(directory.glob("*.txt")):
             if file_path.name.startswith("."):
                 continue
 
             files.append(str(file_path.absolute()))
-
-        # #region agent log
-        import json
-
-        with open("/Users/max/code/aldol_addition/.cursor/debug.log", "a") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "D",
-                        "location": "shimadzu.py:264",
-                        "message": "File collection in _get_file_paths",
-                        "data": {
-                            "files": files,
-                            "values": self.values if hasattr(self, "values") else None,
-                        },
-                        "timestamp": __import__("time").time() * 1000,
-                    }
-                )
-                + "\n"
-            )
-        # #endregion
 
         assert (
             len(files) == len(self.values)

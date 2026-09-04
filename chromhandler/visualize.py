@@ -97,14 +97,14 @@ def visualize(
         # Create colormap for retention times
         retention_times = np.array(all_retention_times)
         norm = Normalize(vmin=min(retention_times), vmax=max(retention_times))
-        cmap = plt.cm.get_cmap("viridis")
+        cmap = plt.get_cmap("viridis")
         sm = ScalarMappable(norm=norm, cmap=cmap)
 
         # Create a colormap for molecules (use a different colormap to distinguish from retention times)
         molecule_colors = {}
         if molecule_ids:
             molecule_list = list(molecule_ids)
-            molecule_colors_list = plt.cm.get_cmap("tab10")(
+            molecule_colors_list = plt.get_cmap("tab10")(
                 np.linspace(0, 1, len(molecule_list))
             )
             molecule_colors = {
@@ -117,7 +117,7 @@ def visualize(
         fig, ax = plt.subplots(figsize=figsize)
 
         # Generate colors for different measurements
-        measurement_colors = plt.cm.get_cmap("tab10")(np.linspace(0, 1, n_measurements))
+        measurement_colors = plt.get_cmap("tab10")(np.linspace(0, 1, n_measurements))
 
         # Plot all measurements on the same axis
         for i, meas in enumerate(handler.measurements):

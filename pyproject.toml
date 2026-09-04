@@ -9,13 +9,16 @@ dependencies = [
   "pydantic>=2,<3",
   "rich>=13.7,<15",
   "loguru>=0.7,<1",
+  "matplotlib>=3.9",
+  "pandas>=2",
+  "requests>=2.31",
 ]
 description = "Tool for processing chromatography data"
 license = { text = "MIT" }
 name = "chromhandler"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-version = "0.10.9"
+version = "0.10.10"
 
 [build-system]
 build-backend = "hatchling.build"
@@ -55,7 +58,7 @@ warn_return_any = true
 
 [tool.pytest.ini_options]
 markers = [
-  "readers: marks tests as slow (deselect with '-m \"not slow\"')",
+  "readers: marks tests as slow (deselect with '-m \"not readers\"')",
   "core: marks tests as core (deselect with '-m \"not core\"')",
 ]
 
