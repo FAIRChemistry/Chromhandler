@@ -4,17 +4,6 @@ from itertools import zip_longest
 from chromhandler.model import Chromatogram, Data, Measurement, Peak
 from chromhandler.readers.abstractreader import AbstractReader
 
-# Normalised report column name -> Peak field. "RT [min]" normalises to "rt",
-# "Width [min]" to "width", so a template that renames a unit suffix still maps.
-_PEAK_FIELDS = {
-    "rt": "retention_time",
-    "type": "type",
-    "width": "width",
-    "area": "area",
-    "height": "amplitude",
-    "area%": "percent_area",
-}
-
 
 def _cells(line: str) -> list[str] | None:
     """Interior cells of one box-drawn table line, stripped.
@@ -30,37 +19,60 @@ def _cells(line: str) -> list[str] | None:
     return [cell.strip() for cell in stripped.strip("│").split("│")]
 
 
-def _records(lines: list[str]) -> list[list[str]]:
-    """Group consecutive data lines into records, joining cells column-wise.
+def _boxes(lines: list[str]) -> list[list[list[str]]]:
+    """The report's records, grouped by the box that encloses them.
 
-    The box's own rules delimit records, so a value the report wrapped across two
-    physical lines (``"13."`` then ``"198"``) is rejoined into ``"13.198"``. Ragged
-    groups are padded rather than truncated.
+    Two levels of grouping, both taken from the report's own drawing. Within a box,
+    ``├─┼─┤`` rules delimit records, so a value the report wrapped across two
+    physical lines (``"13."`` then ``"198"``) is rejoined into ``"13.198"``; ragged
+    groups are padded rather than truncated. A ``└`` closes the box, which is what
+    keeps one peak table's rows from bleeding into the next one's — a report with a
+    table per detector signal would otherwise merge them.
     """
+    boxes: list[list[list[str]]] = []
     records: list[list[str]] = []
     group: list[list[str]] = []
 
-    def flush() -> None:
+    def flush_group() -> None:
         if group:
             records.append(
                 ["".join(parts).strip() for parts in zip_longest(*group, fillvalue="")]
             )
             group.clear()
 
+    def flush_box() -> None:
+        flush_group()
+        if records:
+            boxes.append(records.copy())
+            records.clear()
+
     for line in lines:
         cells = _cells(line)
         if cells is None:
-            flush()
+            flush_group()
+            if line.strip().startswith("└"):
+                flush_box()
         else:
             group.append(cells)
-    flush()
-    return records
+    flush_box()
+    return boxes
 
 
 def _header_columns(record: list[str]) -> dict[str, int] | None:
-    """Map normalised column name -> position, or ``None`` if this is not the header."""
+    """Map normalised column name -> position, or ``None`` if this is not the header.
+
+    ``"RT [min]"`` normalises to ``"rt"``, ``"Width [min]"`` to ``"width"``. If a
+    template ever repeated a column name the last occurrence would win; no known
+    template does.
+    """
     columns = {cell.split("[")[0].strip().lower(): i for i, cell in enumerate(record)}
     return columns if "rt" in columns and "area" in columns else None
+
+
+def _cell(row: list[str], columns: dict[str, int], key: str) -> str:
+    """The *key* column of *row*, or ``""`` when this template has no such column."""
+    position = columns.get(key)
+    return row[position] if position is not None and position < len(row) else ""
 
 
 def _maybe_float(value: str) -> float | None:
@@ -120,43 +132,52 @@ class AgilentRDLReader(AbstractReader):
 
     @staticmethod
     def parse_peaks(lines: list[str]) -> list[Peak]:
-        """Every peak in the report's peak table.
+        """Every peak in the report's first peak table.
 
         A record is a peak iff its ``RT`` and ``Area`` cells both parse as floats,
-        which is also what discards the table's trailing ``Sum`` row and the report
-        footer — neither carries a retention time.
+        which is also what discards the table's trailing ``Sum`` row — it carries no
+        retention time. Only the table's own box is read, so a second table further
+        down the report cannot contribute rows to this one.
         """
-        records = _records(lines)
-        for i, record in enumerate(records):
-            columns = _header_columns(record)
-            if columns is None:
-                continue
-
-            peaks = []
-            for row in records[i + 1 :]:
-                fields = {
-                    field: _maybe_float(row[position])
-                    if field != "type"
-                    else row[position]
-                    for name, field in _PEAK_FIELDS.items()
-                    if (position := columns.get(name)) is not None
-                    and position < len(row)
-                }
-                if fields.get("retention_time") is None or fields.get("area") is None:
+        for box in _boxes(lines):
+            for i, record in enumerate(box):
+                columns = _header_columns(record)
+                if columns is None:
                     continue
-                peaks.append(Peak(**fields))
-            return peaks
+
+                peaks = []
+                for row in box[i + 1 :]:
+                    retention_time = _maybe_float(_cell(row, columns, "rt"))
+                    area = _maybe_float(_cell(row, columns, "area"))
+                    if retention_time is None or area is None:
+                        continue
+                    peaks.append(
+                        Peak(
+                            retention_time=retention_time,
+                            area=area,
+                            type=_cell(row, columns, "type") or None,
+                            width=_maybe_float(_cell(row, columns, "width")),
+                            amplitude=_maybe_float(_cell(row, columns, "height")),
+                            percent_area=_maybe_float(_cell(row, columns, "area%")),
+                        )
+                    )
+                return peaks
         return []
 
     @staticmethod
     def extract_wavelength(lines: list[str]) -> int | None:
         """Detection wavelength in nm from the report's ``Signal:`` box.
 
-        ``DAD1A,Sig=254,4  Ref=360,100`` -> ``254``. ``None`` when the report has no
-        signal box, or one without a wavelength.
+        ``DAD1A,Sig=254,4  Ref=360,100`` -> ``254``. Reading the box rather than the
+        raw line means a signal cell the report wrapped is rejoined first. ``None``
+        when the report has no signal box, or one without a wavelength.
         """
-        for line in lines:
-            if "│Signal:│" in line.replace(" ", ""):
-                match = re.search(r"Sig=(\d+)", line)
-                return int(match.group(1)) if match else None
+        for box in _boxes(lines):
+            for record in box:
+                if (
+                    len(record) >= 2
+                    and record[0].rstrip(":").strip().lower() == "signal"
+                ):
+                    match = re.search(r"Sig=(\d+)", record[1])
+                    return int(match.group(1)) if match else None
         return None

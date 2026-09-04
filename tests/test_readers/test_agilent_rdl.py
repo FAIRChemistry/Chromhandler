@@ -144,3 +144,94 @@ def test_shipped_example_data_is_unchanged(name: str) -> None:
         assert peak.area == pytest.approx(area)
         assert peak.amplitude == pytest.approx(amplitude)
         assert peak.percent_area == pytest.approx(percent)
+
+
+# ---------------------------------------------------------------------------
+# Review findings: box scoping (Finding 2) — table 2 must not bleed into table 1
+# ---------------------------------------------------------------------------
+
+# A synthetic report with two independent signal boxes and two independent peak
+# tables, each closed by its own "└" rule — reproduces the reviewer's repro of
+# two detectors' peaks merging into one Chromatogram.
+_TWO_TABLE_REPORT = """\
+┌───────┬──────────────────────────────┐
+│Signal:│DAD1A,Sig=254,4  Ref=360,100 │
+└───────┴──────────────────────────────┘
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 2.744│BB  │ 0.4746│ 37.2216│  4.6769│ 0.4221│
+└──────┴────┴───────┴────────┴────────┴───────┘
+┌───────┬──────────────────────────────┐
+│Signal:│DAD1B,Sig=360,4  Ref=254,100 │
+└───────┴──────────────────────────────┘
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 9.001│BB  │ 0.5123│ 88.0000│  6.0000│ 1.0000│
+└──────┴────┴───────┴────────┴────────┴───────┘
+"""
+
+
+def test_second_peak_table_does_not_bleed_into_the_first() -> None:
+    lines = _TWO_TABLE_REPORT.splitlines(keepends=True)
+    peaks = AgilentRDLReader.parse_peaks(lines)
+    assert len(peaks) == 1
+    assert peaks[0].retention_time == pytest.approx(2.744)
+
+
+def test_wavelength_comes_from_the_first_signal_box() -> None:
+    lines = _TWO_TABLE_REPORT.splitlines(keepends=True)
+    assert AgilentRDLReader.extract_wavelength(lines) == 254
+
+
+# A Signal box whose value the report wrapped onto a second physical line.
+_WRAPPED_SIGNAL_REPORT = """\
+┌───────┬──────────────────────────────┐
+│Signal:│DAD1A,Sig=                    │
+│       │254,4  Ref=360,100            │
+└───────┴──────────────────────────────┘
+"""
+
+
+def test_wrapped_signal_cell_still_yields_a_wavelength() -> None:
+    lines = _WRAPPED_SIGNAL_REPORT.splitlines(keepends=True)
+    assert AgilentRDLReader.extract_wavelength(lines) == 254
+
+
+# ---------------------------------------------------------------------------
+# Review findings: named kwargs through _cell (Finding 1) — blank/ragged cells
+# ---------------------------------------------------------------------------
+
+_BLANK_TYPE_REPORT = """\
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 5.000│    │ 0.5000│ 10.0000│  1.0000│ 1.0000│
+└──────┴────┴───────┴────────┴────────┴───────┘
+"""
+
+
+def test_blank_type_cell_yields_none_not_empty_string() -> None:
+    peaks = AgilentRDLReader.parse_peaks(_BLANK_TYPE_REPORT.splitlines(keepends=True))
+    assert len(peaks) == 1
+    assert peaks[0].type is None
+
+
+_RAGGED_ROW_REPORT = """\
+┌──────┬────┬───────┬────────┬────────┬───────┐
+│    RT│Type│  Width│   Area │ Height │  Area%│
+├──────┼────┼───────┼────────┼────────┼───────┤
+│ 6.500│BB  │ 0.4000│ 20.0000│
+└──────┴────┴───────┴────────┴────────┴───────┘
+"""
+
+
+def test_ragged_row_missing_optional_fields_are_none() -> None:
+    peaks = AgilentRDLReader.parse_peaks(_RAGGED_ROW_REPORT.splitlines(keepends=True))
+    assert len(peaks) == 1
+    peak = peaks[0]
+    assert peak.retention_time == pytest.approx(6.5)
+    assert peak.area == pytest.approx(20.0)
+    assert peak.amplitude is None
+    assert peak.percent_area is None
