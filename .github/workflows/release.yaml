@@ -1,116 +1,60 @@
-name: Publish Python 🐍 distribution 📦 to PyPI and TestPyPI
+# Keep this file name: PyPI's trusted publisher for chromhandler is bound to
+# `release.yaml` and the `pypi` environment.
+name: Release
 
-# Deploy to TestPyPI on PRs, and to PyPI on published releases
-on: 
-  pull_request:
-    branches: [main]  # or whatever your main branch is
+on:
   release:
-    types: [published]  # Only trigger on published releases
+    types: [published]
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build distribution 📦
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.x"
-    - name: Install pypa/build
-      run: >-
-        python3 -m
-        pip install
-        build
-        --user
-    - name: Build a binary wheel and a source tarball
-      run: python3 -m build
-    - name: Store the distribution packages
-      uses: actions/upload-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.1.0 # no floating major tag after v7; dependabot bumps this
+      - run: uv build
+      - name: Smoke test the wheel and the sdist
+        run: |
+          uv run --isolated --no-project --with dist/*.whl python -c "import chromhandler; print(chromhandler.__version__)"
+          uv run --isolated --no-project --with dist/*.tar.gz python -c "import chromhandler; print(chromhandler.__version__)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
 
-  publish-to-testpypi:
-    name: Publish Python 🐍 distribution 📦 to TestPyPI
-    if: github.event_name == 'pull_request'  # Only on PRs
-    needs:
-    - build
-    runs-on: ubuntu-latest
-
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/chromhandler
-
-    permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
-
-    steps:
-    - name: Download all the dists
-      uses: actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
-    - name: Publish distribution 📦 to TestPyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://test.pypi.org/legacy/
-        skip-existing: true
-
-  publish-to-pypi:
-    name: >-
-      Publish Python 🐍 distribution 📦 to PyPI
-    if: github.event_name == 'release'  # Only on published releases
-    needs:
-    - build
+  publish-pypi:
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/chromhandler
     permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
-
+      id-token: write # trusted publishing
     steps:
-    - name: Download all the dists
-      uses: actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
-    - name: Publish distribution 📦 to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: astral-sh/setup-uv@v10.1.0 # no floating major tag after v7; dependabot bumps this
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - run: uv publish
 
-  github-release:
-    name: >-
-      Sign the Python 🐍 distribution 📦 with Sigstore
-      and upload them to GitHub Release
-    if: github.event_name == 'release'  # Only on published releases
-    needs:
-    - publish-to-pypi
+  attach-to-release:
+    needs: publish-pypi
     runs-on: ubuntu-latest
-
     permissions:
-      contents: write  # IMPORTANT: mandatory for making GitHub Releases
-      id-token: write  # IMPORTANT: mandatory for sigstore
-
+      contents: write # upload assets to the release that triggered this run
     steps:
-    - name: Download all the dists
-      uses: actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
-    - name: Create GitHub Release
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-      run: >-
-        gh release create
-        '${{ github.ref_name }}'
-        --repo '${{ github.repository }}'
-        --notes ""
-    - name: Upload distributions to GitHub Release
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-      run: >-
-        gh release upload
-        '${{ github.ref_name }}' dist/**
-        --repo '${{ github.repository }}'
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - run: gh release upload "$TAG" dist/* --repo "$REPO" --clobber
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.1.0 # no floating major tag after v7; dependabot bumps this
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --dev
+      - run: uv run pytest --nbval-lax -s
+        env:
+          PYTHONUTF8: "1" # calipytion prints emoji; the Windows console is cp1252
+
+  build:
+    name: build package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.1.0 # no floating major tag after v7; dependabot bumps this
+      - run: uv build
+      - name: Smoke test the wheel and the sdist
+        run: |
+          uv run --isolated --no-project --with dist/*.whl python -c "import chromhandler; print(chromhandler.__version__)"
+          uv run --isolated --no-project --with dist/*.tar.gz python -c "import chromhandler; print(chromhandler.__version__)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
