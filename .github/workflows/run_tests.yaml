@@ -25,3 +25,5 @@ jobs:
 
       - name: Run tests
         run: uv run pytest --nbval-lax -s
+        env:
+          PYTHONUTF8: "1" # calipytion prints emoji; the Windows console is cp1252
