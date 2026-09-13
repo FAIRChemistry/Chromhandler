@@ -1,0 +1,11 @@
+[contents]
+count=1
+Name=,D:\MassHunter\GCMS\1\data\Elizabeth\B06\24.06.06\RAU-R505-4.D
+1=,INT TIC: RAU-R505-4.D\data.ms
+[INT TIC: RAU-R505-4.D\data.ms]
+Time=,Thu Jun 06 16:31:58 2024
+Header=,"Peak","R.T.","First","Max","Last","PK  TY","Height","Area","Pct Max","Pct Total"
+1=,  1,  6.055,  857, 860, 871,"  M ",1765430, 14248182,100.00, 50.147
+2=,  2,  6.301,  899, 903, 909,"  M ",1187211,  9005906, 63.21, 31.696
+3=,  3, 10.162, 1569,1571,1574,"  M2",  10448,    93302,  0.65,  0.328
+4=,  4, 10.292, 1591,1594,1607,"  M ", 310533,  5065576, 35.55, 17.828

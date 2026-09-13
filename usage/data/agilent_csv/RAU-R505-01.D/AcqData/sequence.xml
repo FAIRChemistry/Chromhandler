@@ -1,0 +1,57 @@
+﻿<SequenceTableDataSet SchemaVersion="1.0" SequenceComment="" SequenceOperator="Iris" SequenceSeqPathFileName="D:\MassHunter\GCMS\1\data\Iris\DITF\" SequencePreSeqAcqCommand="" SequencePostSeqAcqCommand="" SequencePreSeqDACommand="" SequencePostSeqDACommand="" SequenceReProcessing="False" SequenceInjectBarCodeMismatch="OnBarcodeMismatchInjectAnyway" SequenceOverwriteExistingData="False" SequenceDecoupleDataAnalysis="False" SequenceModifiedTimeStamp="" SequenceFileECMPath="" SequenceRecurringKeyword="" SequenceRecurringInterval="0" SequenceRecurringType="0" SequenceRecurringKeywordString="">
+  <Sequence>
+    <SequenceID>0</SequenceID>
+    <SampleID>0</SampleID>
+    <AcqMethodFileName>Janis12min,1minsolventdelay</AcqMethodFileName>
+    <AcqMethodPathName>D:\MassHunter\GCMS\1\methods\</AcqMethodPathName>
+    <Comment />
+    <Completed>false</Completed>
+    <DAMethodFileName />
+    <DAMethodPathName />
+    <DAReportPathFileName />
+    <DataFileName>RAU-R505-1</DataFileName>
+    <DataPathName>D:\MassHunter\GCMS\1\data\Elizabeth\B06\24.06.06\</DataPathName>
+    <Dilution>1</Dilution>
+    <DualInjector>false</DualInjector>
+    <DualInjectorExpectedBarcode />
+    <DualInjectorVial>2</DualInjectorVial>
+    <DualInjectorVolume>0</DualInjectorVolume>
+    <EquilibrationTime>0</EquilibrationTime>
+    <ExpectedBarcode />
+    <InjectionsPerPosition>1</InjectionsPerPosition>
+    <InjectorVolume>1</InjectorVolume>
+    <InstrumentName>5977B MSD</InstrumentName>
+    <InstrumentType>SingleQuadrupole</InstrumentType>
+    <Keyword />
+    <KeywordString />
+    <LevelName />
+    <MatrixSpikeGroup />
+    <Locked>false</Locked>
+    <PlateCode />
+    <PlatePosition>2</PlatePosition>
+    <RackCode />
+    <SampleGroup />
+    <SampleInformation />
+    <SampleName>RAU-R505-1</SampleName>
+    <SamplePosition>dummy</SamplePosition>
+    <SamplePrepFileName />
+    <SamplePrepPathName />
+    <SampleType>Sample</SampleType>
+    <TrayName />
+    <UpdateResponseFactor>None</UpdateResponseFactor>
+    <UpdateRetentionTime>None</UpdateRetentionTime>
+    <UpdateQualifierRatios>None</UpdateQualifierRatios>
+    <UpdateMassAssignments>None</UpdateMassAssignments>
+    <UserDefined />
+    <UserDefined1 />
+    <UserDefined2 />
+    <UserDefined3 />
+    <UserDefined4 />
+    <UserDefined5 />
+    <UserDefined6 />
+    <UserDefined7 />
+    <UserDefined8 />
+    <UserDefined9 />
+    <Vial>2</Vial>
+  </Sequence>
+</SequenceTableDataSet>
