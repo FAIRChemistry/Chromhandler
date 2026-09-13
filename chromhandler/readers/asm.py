@@ -5,7 +5,7 @@ from typing import Any
 from loguru import logger
 
 from chromhandler.model import Chromatogram, Data, Measurement, Peak
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.readers.abstractreader import AbstractReader, natural_key
 
 
 class ASMReader(AbstractReader):
@@ -57,7 +57,7 @@ class ASMReader(AbstractReader):
             len(files) == len(self.values)
         ), f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
 
-        self.file_paths = sorted(files)
+        self.file_paths = sorted(files, key=natural_key)
 
     def _read_asm_file(self, file_path: str) -> Any:
         with open(file_path, "r") as file:

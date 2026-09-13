@@ -53,22 +53,23 @@ def test_read_asm_lc(asm_lc_1: ASMReader) -> None:
     assert len(measurements) == 4
     assert measurements[0].data.value == 0.0
     assert measurements[-1].data.value == 10.0
-    assert measurements[0].chromatograms[0].peaks[0].peak_start == pytest.approx(
+    # the peak numbers below come from the 0.5hours file, which numeric order puts second
+    assert measurements[1].chromatograms[0].peaks[0].peak_start == pytest.approx(
         81.962 / 60, rel=1e-3
     )
-    assert measurements[0].chromatograms[0].peaks[0].peak_end == pytest.approx(
+    assert measurements[1].chromatograms[0].peaks[0].peak_end == pytest.approx(
         129.762 / 60, rel=1e-3
     )
-    assert measurements[0].chromatograms[0].peaks[0].amplitude == pytest.approx(
+    assert measurements[1].chromatograms[0].peaks[0].amplitude == pytest.approx(
         2510394.25, rel=1e-1
     )
-    assert measurements[0].chromatograms[0].peaks[0].retention_time == pytest.approx(
+    assert measurements[1].chromatograms[0].peaks[0].retention_time == pytest.approx(
         86.562 / 60, rel=1e-3
     )
-    assert measurements[0].chromatograms[0].peaks[0].percent_area == pytest.approx(
+    assert measurements[1].chromatograms[0].peaks[0].percent_area == pytest.approx(
         0.1907055105844727, rel=1e-6
     )
-    assert measurements[0].chromatograms[0].peaks[0].area == pytest.approx(
+    assert measurements[1].chromatograms[0].peaks[0].area == pytest.approx(
         1.4715719691118047e8 * 60, rel=1e-1
     )
 

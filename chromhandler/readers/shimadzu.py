@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Dict, List, Optional
 import pandas as pd
 
 from chromhandler.model import Data, Measurement, Peak, SignalType
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.readers.abstractreader import AbstractReader, natural_key
 
 
 class ShimadzuReader(AbstractReader):
@@ -269,7 +269,7 @@ class ShimadzuReader(AbstractReader):
         # Sort glob result: glob returns filesystem order (arbitrary per OS/filesystem).
         # When values are passed, they're zipped against this list positionally, so unsorted
         # paths would bind reaction times to the wrong files (e.g., sample 7 instead of 0).
-        for file_path in sorted(directory.glob("*.txt")):
+        for file_path in sorted(directory.glob("*.txt"), key=natural_key):
             if file_path.name.startswith("."):
                 continue
 

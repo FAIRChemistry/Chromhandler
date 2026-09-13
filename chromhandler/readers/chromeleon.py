@@ -7,7 +7,7 @@ from loguru import logger
 from mdmodels.units.annotation import UnitDefinition
 
 from chromhandler.model import Chromatogram, Data, Measurement
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.readers.abstractreader import AbstractReader, natural_key
 
 
 class ChromeleonReader(AbstractReader):
@@ -158,4 +158,4 @@ class ChromeleonReader(AbstractReader):
             len(files) == len(self.values)
         ), f"Number of files ({len(files)}) does not match the number of reaction times ({len(self.values)})."
 
-        self.file_paths = sorted(files)
+        self.file_paths = sorted(files, key=natural_key)
