@@ -441,7 +441,7 @@ class Handler(BaseModel):
         silent: bool = False,
     ) -> Handler:
         """Reads chromatographic data from a directory containing Allotrope Simple Model (ASM) json files.
-        Measurements are assumed to be named alphabetically, allowing sorting by file name.
+        Files are read in numeric file-name order (numbers inside the names compared as numbers).
 
         Args:
             path (str | Path): Path to the directory containing the ASM files.
@@ -452,7 +452,8 @@ class Handler(BaseModel):
                 `values` should be a list of reaction times. If "calibration", `values` should be a list of concentrations.
                 Defaults to None.
             values (list[float], optional): A list of reaction times (for "timecourse" mode) or concentrations
-                (for "calibration" mode), corresponding to each measurement in the directory.
+                (for "calibration" mode), one per file, following the files in numeric file-name order
+                (e.g. `s_2.88min` before `s_10.38min`).
             unit (UnitDefinitionAnnot, optional): Unit of the `values` provided. It can be the time unit for reaction times or
                 the concentration unit for calibration mode, depending on the mode.
             id (str, optional): Unique identifier of the Handler object. If not provided, the `path` is used as ID.
@@ -498,7 +499,7 @@ class Handler(BaseModel):
         silent: bool = False,
     ) -> Handler:
         """Reads chromatographic data from a directory containing Shimadzu files.
-        Measurements are assumed to be named alphabetically, allowing sorting by file name.
+        Files are read in numeric file-name order (numbers inside the names compared as numbers).
 
         Args:
             path (str | Path): Path to the directory containing the Shimadzu files.
@@ -509,7 +510,8 @@ class Handler(BaseModel):
                 `values` should be a list of reaction times. If "calibration", `values` should be a list of concentrations.
                 Defaults to None.
             values (list[float], optional): A list of reaction times (for "timecourse" mode) or concentrations
-                (for "calibration" mode), corresponding to each measurement in the directory.
+                (for "calibration" mode), one per file, following the files in numeric file-name order
+                (e.g. `s_2.88min` before `s_10.38min`).
             unit (UnitDefinitionAnnot, optional): Unit of the `values` provided. It can be the time unit for reaction times or
                 the concentration unit for calibration mode, depending on the mode.
             id (str, optional): Unique identifier of the Handler object. If not provided, the `path` is used as ID.
@@ -570,7 +572,8 @@ class Handler(BaseModel):
                 `values` should be a list of reaction times. If "calibration", `values` should be a list of concentrations.
                 Defaults to None.
             values (list[float], optional): A list of reaction times (for "timecourse" mode) or concentrations
-                (for "calibration" mode), corresponding to each measurement in the directory.
+                (for "calibration" mode), one per file, following the files in numeric file-name order
+                (e.g. `s_2.88min` before `s_10.38min`).
             unit (UnitDefinitionAnnot, optional): Unit of the `values` provided. It can be the time unit for reaction times or
                 the concentration unit for calibration mode, depending on the mode.
             id (str, optional): Unique identifier of the Handler object. If not provided, the `path` is used as ID.
@@ -673,7 +676,8 @@ class Handler(BaseModel):
                 `values` should be a list of reaction times. If "calibration", `values` should be a list of concentrations.
                 Defaults to None.
             values (list[float], optional): A list of reaction times (for "timecourse" mode) or concentrations
-                (for "calibration" mode), corresponding to each measurement in the directory.
+                (for "calibration" mode), one per file, following the files in numeric file-name order
+                (e.g. `s_2.88min` before `s_10.38min`).
             unit (UnitDefinitionAnnot, optional): Unit of the `values` provided. It can be the time unit for reaction times or
                 the concentration unit for calibration mode, depending on the mode.
             id (str, optional): Unique identifier of the Handler object. If not provided, the `path` is used as ID.
@@ -719,7 +723,7 @@ class Handler(BaseModel):
         silent: bool = False,
     ) -> Handler:
         """Reads chromatographic data from a directory containing Thermo Scientific TX0 files.
-        Measurements are assumed to be named alphabetically, allowing sorting by file name.
+        Files are read in numeric file-name order (numbers inside the names compared as numbers).
 
         Args:
             path (str | Path): Path to the directory containing the TX0 files.
@@ -730,7 +734,8 @@ class Handler(BaseModel):
                 `values` should be a list of reaction times. If "calibration", `values` should be a list of concentrations.
                 Defaults to None.
             values (list[float], optional): A list of reaction times (for "timecourse" mode) or concentrations
-                (for "calibration" mode), corresponding to each measurement in the directory.
+                (for "calibration" mode), one per file, following the files in numeric file-name order
+                (e.g. `s_2.88min` before `s_10.38min`).
             unit (UnitDefinitionAnnot, optional): Unit of the `values` provided. It can be the time unit for reaction times or
                 the concentration unit for calibration mode, depending on the mode.
             id (str, optional): Unique identifier of the Handler object. If not provided, the `path` is used as ID.
@@ -799,7 +804,8 @@ class Handler(BaseModel):
         Args:
             path (str | Path): Path to the CSV file.
             mode (Literal["timecourse", "calibration"]): Mode of the data.
-            values (Optional[list[float]]): List of values. Defaults to None.
+            values (Optional[list[float]]): List of values, one per file, following the files in numeric
+                file-name order. Defaults to None.
             unit (Optional[UnitDefinitionAnnot]): Unit of the values. Defaults to None.
             ph (float): pH value of the measurement.
             temperature (float): Temperature of the measurement.

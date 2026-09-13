@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from chromhandler.model import Chromatogram, Data, Measurement, Peak
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.readers.abstractreader import AbstractReader, natural_key
 
 
 class AgilentCSVReader(AbstractReader):
@@ -20,7 +20,7 @@ class AgilentCSVReader(AbstractReader):
         """
 
         measurements = []
-        for path_idx, csv_path in enumerate(sorted(self.file_paths)):
+        for path_idx, csv_path in enumerate(sorted(self.file_paths, key=natural_key)):
             peaks = self._read_peaks_from_csv(csv_path)
             chromatogram = Chromatogram(peaks=peaks)
 
@@ -76,7 +76,7 @@ class AgilentCSVReader(AbstractReader):
             List[str]: A list of sorted file paths by the last parent directory.
         """
         # Sort paths by their last parent directory and return them as strings
-        sorted_paths = sorted(paths, key=lambda p: Path(p).parent.name)
+        sorted_paths = sorted(paths, key=lambda p: natural_key(Path(p).parent.name))
 
         # Return the sorted paths as strings
         return [str(path) for path in sorted_paths]

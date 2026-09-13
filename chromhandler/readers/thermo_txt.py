@@ -4,14 +4,14 @@ from pathlib import Path
 from typing import Any
 
 from chromhandler.model import Chromatogram, Data, Measurement, Peak
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.readers.abstractreader import AbstractReader, natural_key
 
 
 class ThermoTX0Reader(AbstractReader):
     def __init__(self, dirpath: str, **kwargs: Any) -> None:
         # Find all TX0 files in the directory first
         path = Path(dirpath)
-        file_paths = sorted([str(f) for f in path.glob("*.TX0")])
+        file_paths = sorted([str(f) for f in path.glob("*.TX0")], key=natural_key)
         # Then initialize parent class with all paths already set
         super().__init__(dirpath=dirpath, file_paths=file_paths, **kwargs)
 

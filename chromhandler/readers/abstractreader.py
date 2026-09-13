@@ -33,6 +33,16 @@ class FileNotFoundInDirectoryError(Exception):
         super().__init__(message)
 
 
+def natural_key(path: str | Path) -> list[str | float]:
+    """Sort key that compares the numbers inside a path as numbers, so `s_2.88min` < `s_10.38min`.
+
+    Readers zip `values` onto their file paths positionally, so the paths must be in the
+    order a human reads the file names in, not text order.
+    """
+    parts = re.split(r"(\d+(?:\.\d+)?)", str(path))
+    return [float(part) if i % 2 else part for i, part in enumerate(parts)]
+
+
 class AbstractReader(BaseModel):
     """
     Abstract class for reading chromatographic data from files.
@@ -174,7 +184,9 @@ class AbstractReader(BaseModel):
         """Parse data and unit from filenames based on the mode."""
 
         try:
-            filenames = sorted([Path(f) for f in data.get("file_paths", [])])
+            filenames = sorted(
+                [Path(f) for f in data.get("file_paths", [])], key=natural_key
+            )
             if not filenames:
                 raise KeyError
         except KeyError:
@@ -188,7 +200,8 @@ class AbstractReader(BaseModel):
 
             # Get all filenames of normal files in the directory, exclude hidden files
             filenames = sorted(
-                [f for f in path.iterdir() if not f.name.startswith(".")]
+                [f for f in path.iterdir() if not f.name.startswith(".")],
+                key=natural_key,
             )
 
         # Define patterns based on the mode

@@ -11,7 +11,7 @@ from chromhandler.model import (
     Measurement,
     SignalType,
 )
-from chromhandler.readers.abstractreader import AbstractReader
+from chromhandler.readers.abstractreader import AbstractReader, natural_key
 
 
 class AgilentTXTReader(AbstractReader):
@@ -58,7 +58,7 @@ class AgilentTXTReader(AbstractReader):
         except AssertionError:
             raise FileNotFoundError(f"No 'Report.TXT' files found in '{self.dirpath}'.")
 
-        return sorted(file_paths)
+        return sorted(file_paths, key=natural_key)
 
     def _read_file(self, path: str) -> list[str]:
         """Reads the content of a file with different encodings."""
