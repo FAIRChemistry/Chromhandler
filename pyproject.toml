@@ -18,7 +18,7 @@ license = { text = "MIT" }
 name = "chromhandler"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-version = "0.10.10"
+version = "0.10.11"
 
 [build-system]
 build-backend = "hatchling.build"
