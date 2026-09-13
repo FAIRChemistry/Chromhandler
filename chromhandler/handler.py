@@ -937,7 +937,10 @@ class Handler(BaseModel):
             ), "No chromatograms found at the specified wavelength."
 
         peak_areas = [
-            peak.area for chrom in chroms for peak in chrom.peaks if peak.molecule_id
+            peak.area
+            for chrom in chroms
+            for peak in chrom.peaks
+            if peak.molecule_id == molecule.id
         ]
 
         concs = [meas.data.value for meas in self.measurements]
